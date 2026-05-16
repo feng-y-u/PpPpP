@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pixiv Viewer</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+:root {
+  --card-hover-scale: 1.03;
+  --card-transition: 0.2s ease;
+}
+body { background: #f5f6fa; }
+.navbar { background: #1a1a2e; }
+.navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
+
+.search-section {
+  background: #fff;
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+
+.card-grid .col { margin-bottom: 1.25rem; }
+.art-card {
+  border: none;
+  border-radius: 10px;
+  overflow: hidden;
+  transition: transform var(--card-transition), box-shadow var(--card-transition);
+  box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  height: 100%;
+}
+.art-card:hover {
+  transform: translateY(-4px) scale(var(--card-hover-scale));
+  box-shadow: 0 8px 24px rgba(0,0,0,.14);
+}
+
+.card-img-wrap {
+  position: relative;
+  background: #e9ecef;
+  aspect-ratio: 250 / 250;
+  overflow: hidden;
+}
+.card-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.card-badges {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+.badge-bookmark { background: rgba(220,53,69,.9); }
+.badge-page { background: rgba(13,110,253,.85); }
+
+.card-body { padding: 0.75rem; }
+.card-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 0.25rem;
+}
+.card-artist {
+  font-size: 0.8rem;
+  color: #6c757d;
+  margin-bottom: 0.4rem;
+}
+.tags-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-bottom: 0.5rem;
+}
+.tag-badge {
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.tag-badge:hover { opacity: 0.8; }
+
+.card-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.card-actions .btn { font-size: 0.75rem; padding: 3px 8px; }
+
+.load-more-wrap { margin: 1.5rem 0 2.5rem; }
+
+.loading-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(255,255,255,.7);
+  z-index: 1050;
+  justify-content: center;
+  align-items: center;
+}
+.loading-overlay.show { display: flex; }
+
+.empty-state { text-align: center; padding: 3rem 1rem; color: #6c757d; }
+.empty-state svg { width: 80px; height: 80px; margin-bottom: 1rem; opacity: 0.4; }
+
+.toast-container { z-index: 1060; }
+
+@media (max-width: 575px) {
+  .search-section { padding: 0.75rem; border-radius: 8px; }
+  .card-title { font-size: 0.82rem; }
+}
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark">
+  <div class="container">
+    <span class="navbar-brand">Pixiv Viewer</span>
+    <span class="navbar-text text-white-50 small d-none d-sm-inline">作品检索与展示</span>
+  </div>
+</nav>
+
+<div class="container mt-3">
+  <!-- Search Form -->
+  <div class="search-section">
+    <div class="row g-2 align-items-end">
+      <div class="col-6 col-md-2">
+        <label class="form-label small fw-semibold">类型</label>
+        <select id="searchType" class="form-select form-select-sm">
+          <option value="tag">标签</option>
+          <option value="user">画师UID</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-4">
+        <label class="form-label small fw-semibold">
+          <span id="queryLabel">关键词</span>
+        </label>
+        <input id="searchQuery" class="form-control form-control-sm" placeholder="输入标签关键词..." autocomplete="off">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label small fw-semibold">最低收藏数</label>
+        <input id="minBookmarks" type="number" class="form-control form-control-sm" value="0" min="0" step="100">
+      </div>
+      <div class="col-6 col-md-2 d-grid">
+        <button id="searchBtn" class="btn btn-primary btn-sm">搜索</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="cardGrid" class="card-grid row"></div>
+
+  <!-- Empty State -->
+  <div id="emptyState" class="empty-state" style="display:none;">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+    <h5>暂无结果</h5>
+    <p class="small">尝试其他关键词或降低收藏数下限</p>
+  </div>
+
+  <!-- Load More -->
+  <div id="loadMoreWrap" class="load-more-wrap text-center" style="display:none;">
+    <button id="loadMoreBtn" class="btn btn-outline-primary">加载更多</button>
+  </div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="spinner-border text-primary" role="status">
+    <span class="visually-hidden">加载中...</span>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3">
+  <div id="liveToast" class="toast align-items-center text-bg-danger border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const csrfToken = '{{ csrf_token | safe }}';
+
+let currentPage = 0;
+let lastSearchParams = null;
+
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+// ── Search Type Toggle ──
+$('#searchType').addEventListener('change', function() {
+  const isTag = this.value === 'tag';
+  $('#queryLabel').textContent = isTag ? '关键词' : '画师UID';
+  $('#searchQuery').placeholder = isTag ? '输入标签关键词...' : '输入画师UID...';
+});
+
+// ── Search ──
+$('#searchBtn').addEventListener('click', () => doSearch(false));
+$('#searchQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(false); });
+
+async function doSearch(append) {
+  const type = $('#searchType').value;
+  const query = $('#searchQuery').value.trim();
+  const minBookmarks = parseInt($('#minBookmarks').value) || 0;
+
+  if (!query) {
+    showToast('请输入搜索关键词或画师ID');
+    return;
+  }
+
+  lastSearchParams = { type, query, minBookmarks };
+  if (!append) {
+    currentPage = 0;
+    $('#cardGrid').innerHTML = '';
+    $('#emptyState').style.display = 'none';
+    $('#loadMoreWrap').style.display = 'none';
+  }
+
+  const fetchPage = currentPage + 1;
+
+  showLoading(true);
+  try {
+    const params = new URLSearchParams({ type, query, min_bookmarks: minBookmarks, page: String(fetchPage) });
+    const resp = await fetch(`/search?${params}`);
+    if (!resp.ok) {
+      if (resp.status === 429) {
+        showToast('请求过于频繁，请稍后再试');
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        showToast(data.error || '搜索失败');
+      }
+      return;
+    }
+    const data = await resp.json();
+    hasMore = data.has_more;
+
+    if (!append) {
+      $('#cardGrid').innerHTML = '';
+    }
+
+    if (data.results.length === 0 && !append) {
+      $('#emptyState').style.display = 'block';
+      return;
+    }
+
+    currentPage = fetchPage;
+    data.results.forEach(r => renderCard(r));
+    $('#loadMoreWrap').style.display = data.has_more ? 'block' : 'none';
+
+    // 懒加载新图片
+    requestAnimationFrame(() => {
+      $$('img[loading="lazy"]').forEach(img => {
+        if (img.dataset.src) {
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+        }
+      });
+    });
+  } catch (err) {
+    showToast('网络错误，请检查连接后重试');
+  } finally {
+    showLoading(false);
+  }
+}
+
+// ── Load More ──
+$('#loadMoreBtn').addEventListener('click', () => {
+  if (!lastSearchParams) return;
+  doSearch(true);
+});
+
+// ── Thumbnail Proxy ──
+function proxyThumb(url) {
+  if (!url) return '';
+  const encoded = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `/thumb/${encoded}`;
+}
+
+// ── Render Card ──
+function renderCard(r) {
+  const tags = (r.tags || []).slice(0, 8).map(t =>
+    `<span class="badge bg-light text-dark tag-badge" data-tag="${escAttr(t)}">${escHtml(t)}</span>`
+  ).join('');
+
+  const downloaded = r.download_status === 'done';
+  const downloading = r.download_status === 'downloading';
+
+  let actionHtml;
+  if (downloading) {
+    actionHtml = `<button class="btn btn-secondary btn-sm" disabled>下载中...</button>`;
+  } else if (downloaded) {
+    actionHtml = `<button class="btn btn-success btn-sm download-file-btn" data-pid="${r.pixiv_id}">打包下载</button>`;
+  } else {
+    actionHtml = `<button class="btn btn-outline-primary btn-sm download-btn" data-pid="${r.pixiv_id}">下载到服务器</button>`;
+  }
+
+  const pageBadge = r.page_count > 1
+    ? `<span class="badge badge-page">${r.page_count}P</span>` : '';
+
+  const col = document.createElement('div');
+  col.className = 'col-lg-3 col-md-4 col-sm-6 col-12';
+  col.innerHTML = `
+    <div class="card art-card" data-pixiv-id="${r.pixiv_id}">
+      <div class="card-img-wrap">
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23dee2e6'%3E%3C/svg%3E"
+             data-src="${escAttr(proxyThumb(r.thumb_url))}"
+             loading="lazy" alt="">
+        <div class="card-badges">
+          <span class="badge badge-bookmark" title="收藏数">♥ ${fmtNum(r.bookmark_count)}</span>
+          ${pageBadge}
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="card-title" title="${escAttr(r.title)}">${escHtml(r.title)}</div>
+        <div class="card-artist">${escHtml(r.user_name)}</div>
+        <div class="tags-wrap">${tags}</div>
+        <div class="card-actions">${actionHtml}</div>
+      </div>
+    </div>`;
+
+  $('#cardGrid').appendChild(col);
+
+  // 标签点击 → 新搜索
+  col.querySelectorAll('.tag-badge').forEach(badge => {
+    badge.addEventListener('click', () => {
+      $('#searchType').value = 'tag';
+      $('#searchQuery').value = badge.dataset.tag;
+      $('#searchQuery').dispatchEvent(new Event('change'));
+      doSearch(false);
+    });
+  });
+
+  // 下载按钮
+  const downloadBtn = col.querySelector('.download-btn');
+  if (downloadBtn) {
+    downloadBtn.addEventListener('click', () => triggerDownload(r.pixiv_id, downloadBtn));
+  }
+
+  // 打包下载按钮
+  const dlFileBtn = col.querySelector('.download-file-btn');
+  if (dlFileBtn) {
+    dlFileBtn.addEventListener('click', () => downloadFile(r.pixiv_id));
+  }
+}
+
+// ── Download Trigger ──
+async function triggerDownload(pixivId, btn) {
+  btn.disabled = true;
+  btn.textContent = '下载中...';
+  btn.className = 'btn btn-secondary btn-sm';
+
+  try {
+    const resp = await fetch(`/download/${pixivId}`, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showToast(data.error || '下载请求失败');
+      resetDownloadBtn(pixivId);
+      return;
+    }
+    if (data.status === 'done') {
+      updateToDownloaded(pixivId);
+      return;
+    }
+    // 轮询状态
+    pollDownloadStatus(pixivId, btn);
+  } catch (err) {
+    showToast('网络错误，下载请求失败');
+    resetDownloadBtn(pixivId);
+  }
+}
+
+function pollDownloadStatus(pixivId, btn) {
+  const interval = setInterval(async () => {
+    try {
+      const resp = await fetch(`/download_status/${pixivId}`);
+      const data = await resp.json();
+      if (data.status === 'done') {
+        clearInterval(interval);
+        updateToDownloaded(pixivId);
+      } else if (data.status === 'failed') {
+        clearInterval(interval);
+        showToast(`作品 #${pixivId} 下载失败，请重试`);
+        resetDownloadBtn(pixivId);
+      }
+    } catch {} // 轮询失败不中断
+  }, 2000);
+  // 超时 5 分钟停止
+  setTimeout(() => clearInterval(interval), 300000);
+}
+
+function updateToDownloaded(pixivId) {
+  const card = $(`.art-card[data-pixiv-id="${pixivId}"]`);
+  if (!card) return;
+  const actions = card.querySelector('.card-actions');
+  actions.innerHTML = `<button class="btn btn-success btn-sm download-file-btn" data-pid="${pixivId}">打包下载</button>`;
+  actions.querySelector('.download-file-btn').addEventListener('click', () => downloadFile(pixivId));
+}
+
+function resetDownloadBtn(pixivId) {
+  const card = $(`.art-card[data-pixiv-id="${pixivId}"]`);
+  if (!card) return;
+  const actions = card.querySelector('.card-actions');
+  actions.innerHTML = `<button class="btn btn-outline-primary btn-sm download-btn" data-pid="${pixivId}">下载到服务器</button>
+                       <button class="btn btn-outline-danger btn-sm retry-btn" data-pid="${pixivId}">重试</button>`;
+  actions.querySelector('.download-btn').addEventListener('click', function() {
+    triggerDownload(pixivId, this);
+  });
+  actions.querySelector('.retry-btn').addEventListener('click', function() {
+    actions.innerHTML = `<button class="btn btn-outline-primary btn-sm download-btn" data-pid="${pixivId}">下载到服务器</button>`;
+    actions.querySelector('.download-btn').addEventListener('click', function() {
+      triggerDownload(pixivId, this);
+    });
+  });
+}
+
+// ── Download File ──
+function downloadFile(pixivId) {
+  window.open(`/download_file/${pixivId}`, '_blank');
+}
+
+// ── Helpers ──
+function showToast(msg) {
+  $('#toastMsg').textContent = msg;
+  const toast = new bootstrap.Toast($('#liveToast'));
+  toast.show();
+}
+
+function showLoading(on) {
+  $('#loadingOverlay').classList.toggle('show', on);
+  $('#searchBtn').disabled = on;
+}
+
+function fmtNum(n) {
+  if (n >= 10000) return (n / 10000).toFixed(1) + 'w';
+  return String(n);
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+function escAttr(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
