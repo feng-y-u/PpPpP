@@ -1,6 +1,4 @@
-flask==3.1.1
-sqlalchemy==2.0.41
-pixiv-utils==1.0.2
-gunicorn==23.0.0
-requests==2.32.3
-flask-wtf==1.2.2
+flask>=3.1
+sqlalchemy>=2.0
+requests>=2.32
+gunicorn>=23.0

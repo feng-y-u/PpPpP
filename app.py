@@ -1,17 +1,19 @@
-import io
+import hashlib
 import logging
 import os
 import re
 import secrets
-import tempfile
 import threading
 import time
 import zipfile
 from base64 import urlsafe_b64decode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from functools import wraps
+from io import BytesIO
 
 import requests
+import urllib3
 from flask import (
     Flask, jsonify, render_template, request, session,
     send_file, abort, Response,
@@ -19,34 +21,85 @@ from flask import (
 
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
-    MAX_BOOKMARKS_DEFAULT, COOKIE_PATH,
+    MAX_BOOKMARKS_DEFAULT,
 )
-from models import init_db, get_session, Illust
-from fetcher import search_by_tag, search_by_user
+from models import init_db, get_session, Illust, DownloadLog, BlockedTag, safe_commit
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
 )
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # 过滤掉请求头日志，防止 Cookie 泄露
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = secrets.token_hex(32)
+
+_secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', '.secret_key')
+if os.path.exists(_secret_path):
+    with open(_secret_path) as f:
+        app.config['SECRET_KEY'] = f.read().strip()
+else:
+    app.config['SECRET_KEY'] = secrets.token_hex(32)
+    os.makedirs(os.path.dirname(_secret_path), exist_ok=True)
+    with open(_secret_path, 'w') as f:
+        f.write(app.config['SECRET_KEY'])
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 1MB max upload
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 init_db()
 
-download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
-download_locks: dict[int, threading.Lock] = {}
-
 
 def _get_download_dir(pixiv_id: int) -> str:
     return os.path.join(DOWNLOAD_DIR, str(pixiv_id))
+
+
+def _reset_stuck_downloads():
+    """Startup: reset any 'downloading' status left over from a previous crash/restart."""
+    with get_session() as db:
+        stuck = db.query(Illust).filter(Illust.download_status == 'downloading').all()
+        if not stuck:
+            return
+        for illust in stuck:
+            work_dir = _get_download_dir(illust.pixiv_id)
+            if os.path.isdir(work_dir):
+                for f in os.listdir(work_dir):
+                    try:
+                        os.remove(os.path.join(work_dir, f))
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(work_dir)
+                except OSError:
+                    pass
+            illust.download_status = None
+            db.add(DownloadLog(pixiv_id=illust.pixiv_id, action='failed',
+                               message='app 重启，下载任务自动重置'))
+        safe_commit(db)
+        logger.info(f'Reset {len(stuck)} stuck downloads from previous session')
+
+
+_reset_stuck_downloads()
+
+download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
+download_locks: dict[int, threading.Lock] = {}
+download_cancellations: set[int] = set()
+
+
+def _enrich_with_download_status(results: list[dict]) -> list[dict]:
+    """Re-fetch results from DB to include current download_status/local_paths."""
+    if not results:
+        return results
+    pixiv_ids = [r['pixiv_id'] for r in results]
+    with get_session() as db:
+        illusts = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
+        illust_map = {i.pixiv_id: i.to_dict() for i in illusts}
+    return [illust_map.get(r['pixiv_id'], r) for r in results]
 
 
 def _download_illust(pixiv_id: int):
@@ -55,14 +108,14 @@ def _download_illust(pixiv_id: int):
     if not lock.acquire(blocking=False):
         return  # Already being downloaded
     try:
-        db = get_session()
-        try:
+        with get_session() as db:
             illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if not illust:
                 return
 
             illust.download_status = 'downloading'
-            db.commit()
+            db.add(DownloadLog(pixiv_id=pixiv_id, action='start', message=f'开始下载: {illust.title or pixiv_id}'))
+            safe_commit(db)
 
             urls = illust.original_urls_list
             work_dir = _get_download_dir(pixiv_id)
@@ -73,9 +126,12 @@ def _download_illust(pixiv_id: int):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Referer': 'https://www.pixiv.net/',
             })
+            session_obj.verify = False
 
             local_paths = []
             for i, url in enumerate(urls):
+                if pixiv_id in download_cancellations:
+                    break
                 try:
                     ext = _extract_ext(url)
                     filename = f'{pixiv_id}_p{i}.{ext}'
@@ -92,7 +148,6 @@ def _download_illust(pixiv_id: int):
                         time.sleep(PAGE_DOWNLOAD_INTERVAL)
                 except Exception as e:
                     logger.error(f'Download failed for {pixiv_id} page {i}: {e}')
-                    # 清理已下载的部分
                     for p in local_paths:
                         try:
                             os.remove(p)
@@ -103,17 +158,32 @@ def _download_illust(pixiv_id: int):
                     except OSError:
                         pass
                     illust.download_status = 'failed'
-                    db.commit()
+                    db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message=f'下载失败: 第 {i} 页'))
+                    safe_commit(db)
                     return
 
-            illust.local_paths_list = local_paths
-            illust.download_status = 'done'
-            db.commit()
-        finally:
-            db.close()
+            if pixiv_id in download_cancellations:
+                for p in local_paths:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(work_dir)
+                except OSError:
+                    pass
+                illust.download_status = None
+                db.add(DownloadLog(pixiv_id=pixiv_id, action='cancelled', message=f'已取消, 删除了 {len(local_paths)} 个已下载文件'))
+            else:
+                illust.local_paths_list = local_paths
+                illust.download_status = 'done'
+                total_size = sum(os.path.getsize(p) for p in local_paths if os.path.isfile(p))
+                db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
+            safe_commit(db)
     finally:
         lock.release()
         download_locks.pop(pixiv_id, None)
+        download_cancellations.discard(pixiv_id)
 
 
 def _extract_ext(url: str) -> str:
@@ -128,6 +198,17 @@ def _get_csrf_token() -> str:
     return session['_csrf_token']
 
 
+def _csrf_required(f):
+    """Decorator: require valid X-CSRF-Token header for POST endpoints."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('X-CSRF-Token', '')
+        if not token or token != session.get('_csrf_token', ''):
+            return jsonify({'error': 'CSRF校验失败'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 @app.route('/')
 def index():
     return render_template('index.html', csrf_token=_get_csrf_token())
@@ -138,10 +219,11 @@ def search():
     search_type = request.args.get('type', 'tag')
     query = request.args.get('query', '').strip()
     min_bookmarks = request.args.get('min_bookmarks', MAX_BOOKMARKS_DEFAULT)
-    page = request.args.get('page', '1')
+    start_page = request.args.get('page', '1')
+    sort_order = request.args.get('sort', 'date_d')
 
-    if not query:
-        return jsonify({'error': '请输入搜索关键词或画师ID'}), 400
+    if search_type == 'user' and not query:
+        return jsonify({'error': '请输入画师ID'}), 400
 
     try:
         min_bookmarks = int(min_bookmarks)
@@ -149,38 +231,60 @@ def search():
         min_bookmarks = MAX_BOOKMARKS_DEFAULT
 
     try:
-        page = int(page)
+        start_page = int(start_page)
+    except (ValueError, TypeError):
+        start_page = 1
+    start_page = max(1, start_page)
+
+    tag_mode = request.args.get('tag_mode', 'or')
+    if tag_mode not in ('or', 'and'):
+        tag_mode = 'or'
+
+    if sort_order not in ('popular_d', 'date_d'):
+        sort_order = 'date_d'
+
+    logger.info(f'Search: type={search_type}, query={query!r}, min={min_bookmarks}, start={start_page}, sort={sort_order}, tag_mode={tag_mode}')
+
+    all_results = []
+    has_more = False
+    try:
+        if search_type == 'tag':
+            if len(query) > 200:
+                return jsonify({'error': '搜索关键词过长'}), 400
+            if not query:
+                all_results, has_more = browse_discovery(start_page, sort_order, min_bookmarks)
+            else:
+                all_results, has_more = search_by_tag(query, min_bookmarks, start_page, sort_order, 9999, tag_mode)
+        else:
+            if not query.isdigit():
+                return jsonify({'error': '画师ID必须为数字'}), 400
+            all_results, has_more = search_by_user(query, min_bookmarks, start_page)
+    except FileNotFoundError as e:
+        logger.error(f'Search failed - file not found: {e}')
+        return jsonify({'error': f'缺少文件: {e}'}), 500
+    except Exception as e:
+        logger.error(f'Search failed: {e}', exc_info=True)
+        return jsonify({'error': f'搜索出错: {e}'}), 500
+
+    all_results = _enrich_with_download_status(all_results)
+    return jsonify({'results': all_results, 'has_more': has_more})
+
+
+@app.route('/api/following')
+def api_following():
+    page = request.args.get('page', '1')
+    try:
+        page = max(1, int(page))
     except (ValueError, TypeError):
         page = 1
-    page = max(1, page)
-
-    if search_type == 'tag':
-        if len(query) > 200:
-            return jsonify({'error': '搜索关键词过长'}), 400
-        results, has_more = search_by_tag(query, min_bookmarks, page)
-    else:
-        if not query.isdigit():
-            return jsonify({'error': '画师ID必须为数字'}), 400
-        results, has_more = search_by_user(query, min_bookmarks, page)
-
-    # 获取最新数据（含下载状态）
-    if results:
-        pixiv_ids = [r['pixiv_id'] for r in results]
-        with get_session() as db:
-            illusts = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
-            illust_map = {i.pixiv_id: i.to_dict() for i in illusts}
-        results = [illust_map.get(r['pixiv_id'], r) for r in results]
-
+    results, has_more = fetch_following(page)
+    results = _enrich_with_download_status(results)
     return jsonify({'results': results, 'has_more': has_more})
 
 
 @app.route('/download/<int:pixiv_id>', methods=['POST'])
+@_csrf_required
 def trigger_download(pixiv_id):
-    # CSRF 校验
-    token = request.headers.get('X-CSRF-Token', '')
-    if not token or token != session.get('_csrf_token', ''):
-        return jsonify({'error': 'CSRF校验失败'}), 403
-
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
@@ -197,6 +301,78 @@ def trigger_download(pixiv_id):
 
     download_executor.submit(_download_illust, pixiv_id)
     return jsonify({'status': 'accepted', 'message': '已加入下载队列'})
+
+
+@app.route('/api/download/batch', methods=['POST'])
+@_csrf_required
+def batch_download():
+    body = request.get_json(silent=True) or {}
+    pixiv_ids = body.get('ids', [])
+    if not pixiv_ids or not isinstance(pixiv_ids, list):
+        return jsonify({'error': '请提供作品ID列表'}), 400
+
+    accepted, skipped = 0, 0
+    with get_session() as db:
+        for pid in pixiv_ids:
+            if not isinstance(pid, int) and not (isinstance(pid, str) and pid.isdigit()):
+                continue
+            pid = int(pid)
+            illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            if not illust or not illust.original_urls_list:
+                skipped += 1
+                continue
+            if illust.download_status in ('done', 'downloading'):
+                skipped += 1
+                continue
+            download_executor.submit(_download_illust, pid)
+            accepted += 1
+
+    return jsonify({'accepted': accepted, 'skipped': skipped, 'message': f'已加入 {accepted} 个下载任务'})
+
+
+@app.route('/download/cancel/<int:pixiv_id>', methods=['POST'])
+@_csrf_required
+def cancel_download(pixiv_id):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            return jsonify({'error': '作品不存在'}), 404
+        if illust.download_status != 'downloading':
+            return jsonify({'error': '该作品未在下载中'}), 400
+
+    download_cancellations.add(pixiv_id)
+    return jsonify({'status': 'cancelling', 'message': '正在取消...'})
+
+
+@app.route('/download/reset/<int:pixiv_id>', methods=['POST'])
+@_csrf_required
+def reset_download(pixiv_id):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            return jsonify({'error': '作品不存在'}), 404
+        if illust.download_status != 'downloading':
+            return jsonify({'error': '该作品未在下载中'}), 400
+
+        download_cancellations.add(pixiv_id)
+        # Clean up partial files
+        work_dir = _get_download_dir(pixiv_id)
+        if os.path.isdir(work_dir):
+            for f in os.listdir(work_dir):
+                try:
+                    os.remove(os.path.join(work_dir, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(work_dir)
+            except OSError:
+                pass
+
+        illust.download_status = None
+        db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message='下载已手动重置'))
+        safe_commit(db)
+        download_cancellations.discard(pixiv_id)
+        return jsonify({'status': 'reset', 'message': '已重置'})
 
 
 @app.route('/download_status/<int:pixiv_id>')
@@ -229,34 +405,25 @@ def download_file(pixiv_id):
 
         # 单文件直接返回
         if len(valid_paths) == 1:
-            ext = os.path.splitext(valid_paths[0])[1]
             return send_file(
                 valid_paths[0],
-                mimetype=f'image/{ext[1:] if ext else "jpeg"}',
                 as_attachment=True,
-                download_name=f'{safe_title}{ext}',
+                download_name=f'{safe_title}{os.path.splitext(valid_paths[0])[1]}',
             )
 
-        # 多文件打包 zip（ZIP_STORED 不压缩）
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
-        try:
-            with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_STORED) as zf:
-                for i, p in enumerate(valid_paths):
-                    ext = os.path.splitext(p)[1]
-                    zf.write(p, f'{safe_title}_p{i}{ext}')
-            tmp.close()
-            return send_file(
-                tmp.name,
-                mimetype='application/zip',
-                as_attachment=True,
-                download_name=f'{safe_title}.zip',
-            )
-        except Exception:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-            raise
+        # 多文件打包 zip（ZIP_STORED 不压缩），使用内存缓冲避免临时文件泄漏
+        buf = BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
+            for i, p in enumerate(valid_paths):
+                ext = os.path.splitext(p)[1]
+                zf.write(p, f'{safe_title}_p{i}{ext}')
+        buf.seek(0)
+        return send_file(
+            buf,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'{safe_title}.zip',
+        )
 
 
 @app.route('/csrf-token')
@@ -268,6 +435,9 @@ def csrf_token():
 def thumb_proxy(url_b64):
     """代理 Pixiv 缩略图，绕过 Referer 检查。url_b64 为 base64(urlencode) 编码的原始 URL。"""
     try:
+        padding = 4 - len(url_b64) % 4
+        if padding != 4:
+            url_b64 += '=' * padding
         url = urlsafe_b64decode(url_b64.encode()).decode()
     except Exception:
         return abort(400)
@@ -282,6 +452,7 @@ def thumb_proxy(url_b64):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': 'https://www.pixiv.net/',
         })
+        s.verify = False
         resp = s.get(url, timeout=(5, 15))
         resp.raise_for_status()
     except requests.RequestException:
@@ -293,9 +464,173 @@ def thumb_proxy(url_b64):
         mimetype=resp.headers.get('Content-Type', 'image/jpeg'),
         headers={
             'Cache-Control': f'public, max-age={int(cache_timeout.total_seconds())}',
-            'ETag': str(hash(url)),
+            'ETag': hashlib.md5(url.encode()).hexdigest(),
         },
     )
+
+
+@app.route('/api/image/<int:pixiv_id>/<int:index>')
+def serve_image(pixiv_id, index):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust or illust.download_status != 'done' or not illust.local_paths_list:
+            abort(404)
+        paths = illust.local_paths_list
+        if index < 0 or index >= len(paths):
+            abort(404)
+        filepath = paths[index]
+        if not os.path.isfile(filepath):
+            abort(404)
+        return send_file(filepath)
+
+
+@app.route('/gallery')
+def gallery():
+    return render_template('gallery.html', csrf_token=_get_csrf_token())
+
+
+@app.route('/api/gallery')
+def api_gallery():
+    with get_session() as db:
+        blocked = {t.tag for t in db.query(BlockedTag).all()}
+        illusts = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).all()
+        results = []
+        for i in illusts:
+            if blocked and set(i.tags_list) & blocked:
+                continue
+            d = i.to_dict()
+            paths = i.local_paths_list or []
+            total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
+            d['file_size'] = total_size
+            d['file_count'] = len(paths)
+            d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
+            results.append(d)
+        return jsonify(results)
+
+
+@app.route('/api/gallery/<int:pixiv_id>', methods=['DELETE'])
+@_csrf_required
+def delete_gallery(pixiv_id):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            return jsonify({'error': '作品不存在'}), 404
+
+        # 删除文件
+        paths = illust.local_paths_list or []
+        deleted = 0
+        for p in paths:
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+                    deleted += 1
+            except OSError:
+                pass
+        # 删除空目录
+        if paths:
+            work_dir = os.path.dirname(paths[0])
+            try:
+                if os.path.isdir(work_dir) and not os.listdir(work_dir):
+                    os.rmdir(work_dir)
+            except OSError:
+                pass
+
+        illust.download_status = None
+        illust.local_paths = None
+        db.add(DownloadLog(pixiv_id=pixiv_id, action='deleted', message=f'已删除 {deleted} 个文件'))
+        safe_commit(db)
+
+        return jsonify({'status': 'deleted', 'message': f'已删除 {deleted} 个文件'})
+
+
+@app.route('/logs')
+def logs():
+    return render_template('logs.html')
+
+
+@app.route('/api/logs')
+def api_logs():
+    page = request.args.get('page', '1')
+    try:
+        page = max(1, int(page))
+    except (ValueError, TypeError):
+        page = 1
+
+    per_page = 50
+    with get_session() as db:
+        total = db.query(DownloadLog).count()
+        entries = (
+            db.query(DownloadLog)
+            .order_by(DownloadLog.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+        return jsonify({
+            'entries': [e.to_dict() for e in entries],
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+        })
+
+
+# ── Download Management ──
+
+@app.route('/downloads')
+def downloads_page():
+    return render_template('downloads.html', csrf_token=_get_csrf_token())
+
+
+@app.route('/api/downloads')
+def api_downloads():
+    with get_session() as db:
+        active = db.query(Illust).filter(Illust.download_status == 'downloading').order_by(Illust.created_at.desc()).all()
+        completed = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).limit(30).all()
+        failed = db.query(Illust).filter(Illust.download_status == 'failed').order_by(Illust.created_at.desc()).limit(20).all()
+        logs = (
+            db.query(DownloadLog)
+            .order_by(DownloadLog.created_at.desc())
+            .limit(50).all()
+        )
+        return jsonify({
+            'active': [i.to_dict() for i in active],
+            'completed': [i.to_dict() for i in completed],
+            'failed': [i.to_dict() for i in failed],
+            'logs': [l.to_dict() for l in logs],
+        })
+
+
+# ── Blocked Tags ──
+
+@app.route('/api/blocked-tags', methods=['GET'])
+def list_blocked_tags():
+    with get_session() as db:
+        tags = db.query(BlockedTag).order_by(BlockedTag.created_at.desc()).all()
+        return jsonify([t.tag for t in tags])
+
+
+@app.route('/api/blocked-tags', methods=['POST'])
+def add_blocked_tag():
+    tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '标签不能为空'}), 400
+    with get_session() as db:
+        if db.query(BlockedTag).filter(BlockedTag.tag == tag).first():
+            return jsonify({'error': '标签已存在'}), 409
+        db.add(BlockedTag(tag=tag))
+        safe_commit(db)
+        return jsonify({'status': 'added', 'tag': tag})
+
+
+@app.route('/api/blocked-tags/<path:tag>', methods=['DELETE'])
+def remove_blocked_tag(tag):
+    with get_session() as db:
+        entry = db.query(BlockedTag).filter(BlockedTag.tag == tag).first()
+        if not entry:
+            return jsonify({'error': '标签不存在'}), 404
+        db.delete(entry)
+        safe_commit(db)
+        return jsonify({'status': 'deleted', 'tag': tag})
 
 
 if __name__ == '__main__':

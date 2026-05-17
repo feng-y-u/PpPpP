@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>下载管理 - Pixiv Viewer</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+:root {
+  --accent: #7c3aed;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: #0b0b12;
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Navbar ── */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(11,11,18,.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  padding: 0.75rem 0;
+}
+.navbar-brand {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: #fff;
+  text-decoration: none;
+}
+.navbar-brand:hover { color: #fff; }
+.nav-link {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary) !important;
+  padding: 0.4rem 0.9rem !important;
+  border-radius: 6px;
+  transition: all 0.15s;
+  text-decoration: none;
+}
+.nav-link:hover { color: #fff !important; background: rgba(255,255,255,.06); }
+.nav-link.active { color: #fff !important; background: rgba(124,58,237,.2); }
+
+/* ── Status Cards ── */
+.status-card {
+  border: none;
+  border-radius: var(--radius);
+  background: rgba(255,255,255,.02);
+  border: 1px solid rgba(255,255,255,.05);
+  margin-bottom: 1rem;
+  overflow: hidden;
+}
+.status-card .card-header {
+  font-weight: 600;
+  font-size: 0.82rem;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+
+.dl-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid rgba(255,255,255,.03);
+}
+.dl-item:last-child { border-bottom: none; }
+.dl-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #1e1b2e;
+  flex-shrink: 0;
+}
+.dl-info { flex: 1; min-width: 0; }
+.dl-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dl-meta { font-size: 0.75rem; color: var(--text-muted); }
+
+.empty-state { text-align: center; padding: 2rem 1rem; color: var(--text-muted); }
+
+.log-entry {
+  font-size: 0.76rem;
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(255,255,255,.03);
+  color: var(--text-secondary);
+}
+.log-entry:last-child { border-bottom: none; }
+
+.progress { height: 4px; background: rgba(255,255,255,.06); }
+.progress-bar { transition: width 0.3s ease; }
+
+/* ── Buttons ── */
+.btn {
+  font-weight: 500;
+  border-radius: 8px;
+  transition: all 0.15s;
+}
+.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.76rem; }
+.btn-success { background: #059669; border-color: #059669; }
+.btn-success:hover { background: #07b87a; border-color: #07b87a; }
+.btn-outline-warning { color: #fbbf24; border-color: rgba(251,191,36,.2); }
+.btn-outline-warning:hover { background: rgba(251,191,36,.1); color: #fcd34d; }
+.btn-outline-danger { color: #f87171; border-color: rgba(239,68,68,.2); }
+.btn-outline-danger:hover { background: rgba(239,68,68,.1); color: #fca5a5; }
+.btn-outline-secondary { color: var(--text-secondary); border-color: rgba(255,255,255,.1); }
+.btn-outline-secondary:hover { background: rgba(255,255,255,.05); color: #fff; }
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="container">
+    <a class="navbar-brand" href="/">Pixiv Viewer</a>
+    <div class="d-flex gap-1">
+      <a class="nav-link" href="/">搜索</a>
+      <a class="nav-link" href="/gallery">图库</a>
+      <a class="nav-link active" href="/downloads">下载</a>
+      <a class="nav-link" href="/logs">日志</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container mt-3">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">下载管理</h5>
+    <button id="refreshBtn" class="btn btn-outline-secondary btn-sm">刷新</button>
+  </div>
+
+  <div class="row">
+    <!-- Active Downloads -->
+    <div class="col-lg-8">
+      <div class="status-card card">
+        <div class="card-header bg-primary bg-opacity-25 text-primary border-0 d-flex align-items-center gap-2">
+          下载中
+          <span id="activeCount" class="badge bg-primary ms-auto"></span>
+        </div>
+        <div class="card-body p-0" id="activeList">
+          <div class="empty-state small">暂无活跃下载</div>
+        </div>
+      </div>
+
+      <!-- Failed -->
+      <div class="status-card card">
+        <div class="card-header bg-danger bg-opacity-25 text-danger border-0 d-flex align-items-center gap-2">
+          下载失败
+          <span id="failedCount" class="badge bg-danger ms-auto"></span>
+        </div>
+        <div class="card-body p-0" id="failedList" style="max-height:300px;overflow-y:auto;">
+          <div class="empty-state small">暂无失败记录</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Completed + Logs -->
+    <div class="col-lg-4">
+      <div class="status-card card">
+        <div class="card-header bg-success bg-opacity-25 text-success border-0 d-flex align-items-center gap-2">
+          最近完成
+          <span id="completedCount" class="badge bg-success ms-auto"></span>
+        </div>
+        <div class="card-body p-0" id="completedList" style="max-height:400px;overflow-y:auto;">
+          <div class="empty-state small">暂无完成记录</div>
+        </div>
+      </div>
+
+      <div class="status-card card">
+        <div class="card-header bg-secondary bg-opacity-25 text-light border-0">操作日志</div>
+        <div class="card-body p-0" id="logList" style="max-height:300px;overflow-y:auto;">
+          <div class="empty-state small">暂无日志</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const actionMap = {
+  start: { label: '开始', cls: 'bg-info' },
+  done: { label: '完成', cls: 'bg-success' },
+  failed: { label: '失败', cls: 'bg-danger' },
+  deleted: { label: '删除', cls: 'bg-warning text-dark' },
+};
+
+let pollTimer = null;
+
+async function loadData() {
+  try {
+    const resp = await fetch('/api/downloads');
+    const data = await resp.json();
+    renderActive(data.active);
+    renderCompleted(data.completed);
+    renderFailed(data.failed);
+    renderLogs(data.logs);
+  } catch {}
+}
+
+function renderActive(items) {
+  const container = $('#activeList');
+  $('#activeCount').textContent = items.length || '';
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state small">暂无活跃下载</div>';
+    return;
+  }
+
+  container.innerHTML = items.map(i => `
+    <div class="dl-item">
+      <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
+           onerror="this.style.display='none'" loading="lazy">
+      <div class="dl-info">
+        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
+        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P</div>
+        <div class="progress mt-1">
+          <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+               style="width:100%"></div>
+        </div>
+      </div>
+      <div class="dl-status d-flex gap-1">
+        <button class="btn btn-outline-danger btn-sm cancel-dl-btn" data-pid="${i.pixiv_id}">取消</button>
+        <button class="btn btn-outline-warning btn-sm reset-dl-btn" data-pid="${i.pixiv_id}" title="强制清除卡住的下载">清除</button>
+      </div>
+    </div>`).join('');
+
+  container.querySelectorAll('.cancel-dl-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '取消中...';
+      try {
+        const t = await fetch('/csrf-token').then(r => r.json());
+        await fetch(`/download/cancel/${btn.dataset.pid}`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': t.token },
+        });
+        loadData();
+      } catch { btn.disabled = false; btn.textContent = '取消'; }
+    });
+  });
+
+  container.querySelectorAll('.reset-dl-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '清除中...';
+      try {
+        const t = await fetch('/csrf-token').then(r => r.json());
+        await fetch(`/download/reset/${btn.dataset.pid}`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': t.token },
+        });
+        loadData();
+      } catch { btn.disabled = false; btn.textContent = '清除'; }
+    });
+  });
+}
+
+function renderCompleted(items) {
+  const container = $('#completedList');
+  $('#completedCount').textContent = items.length || '';
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state small">暂无完成记录</div>';
+    return;
+  }
+
+  container.innerHTML = items.map(i => `
+    <div class="dl-item">
+      <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
+           onerror="this.style.display='none'" loading="lazy">
+      <div class="dl-info">
+        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
+        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)}</div>
+      </div>
+      <div class="dl-status">
+        <a href="/download_file/${i.pixiv_id}" class="btn btn-success btn-sm">下载</a>
+      </div>
+    </div>`).join('');
+}
+
+function renderFailed(items) {
+  const container = $('#failedList');
+  $('#failedCount').textContent = items.length || '';
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state small">暂无失败记录</div>';
+    return;
+  }
+
+  container.innerHTML = items.map(i => `
+    <div class="dl-item">
+      <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
+           onerror="this.style.display='none'" loading="lazy">
+      <div class="dl-info">
+        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
+        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P</div>
+      </div>
+      <div class="dl-status">
+        <button class="btn btn-outline-warning btn-sm retry-dl-btn" data-pid="${i.pixiv_id}">重试</button>
+      </div>
+    </div>`).join('');
+
+  container.querySelectorAll('.retry-dl-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = '提交中...';
+      try {
+        const t = await fetch('/csrf-token').then(r => r.json());
+        const resp = await fetch(`/download/${btn.dataset.pid}`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': t.token, 'Content-Type': 'application/json' },
+        });
+        if (resp.ok) { loadData(); }
+        else { btn.disabled = false; btn.textContent = '重试'; }
+      } catch { btn.disabled = false; btn.textContent = '重试'; }
+    });
+  });
+}
+
+function renderLogs(logs) {
+  const container = $('#logList');
+  if (!logs.length) {
+    container.innerHTML = '<div class="empty-state small">暂无日志</div>';
+    return;
+  }
+
+  container.innerHTML = logs.map(l => {
+    const a = actionMap[l.action] || { label: l.action, cls: 'bg-secondary' };
+    const time = new Date(l.created_at).toLocaleString('zh-CN');
+    return `<div class="log-entry">
+      <span class="badge ${a.cls} me-1" style="font-size:0.65rem;">${a.label}</span>
+      <span class="text-muted me-1">#${l.pixiv_id}</span>
+      ${escHtml(l.message)}
+      <span class="text-muted float-end" style="font-size:0.7rem;">${time}</span>
+    </div>`;
+  }).join('');
+}
+
+function proxyThumb(url) {
+  if (!url) return '';
+  return `/thumb/${btoa(url).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`;
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+function escAttr(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Poll for active downloads
+function startPolling() {
+  loadData();
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(loadData, 3000);
+}
+
+$('#refreshBtn').addEventListener('click', loadData);
+startPolling();
+
+// Stop polling when page hidden, resume when visible
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  } else {
+    loadData();
+    pollTimer = setInterval(loadData, 3000);
+  }
+});
+</script>
+</body>
+</html>

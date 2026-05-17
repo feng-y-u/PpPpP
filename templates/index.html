@@ -7,152 +7,464 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
 :root {
-  --card-hover-scale: 1.03;
-  --card-transition: 0.2s ease;
-}
-body { background: #f5f6fa; }
-.navbar { background: #1a1a2e; }
-.navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
-
-.search-section {
-  background: #fff;
-  border-radius: 12px;
-  padding: 1.25rem;
-  margin-bottom: 1.5rem;
-  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  --accent: #7c3aed;
+  --accent-light: #a78bfa;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --radius: 12px;
 }
 
-.card-grid .col { margin-bottom: 1.25rem; }
-.art-card {
-  border: none;
-  border-radius: 10px;
-  overflow: hidden;
-  transition: transform var(--card-transition), box-shadow var(--card-transition);
-  box-shadow: 0 2px 8px rgba(0,0,0,.08);
-  height: 100%;
-}
-.art-card:hover {
-  transform: translateY(-4px) scale(var(--card-hover-scale));
-  box-shadow: 0 8px 24px rgba(0,0,0,.14);
+* { box-sizing: border-box; }
+
+body {
+  background: #0b0b12;
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
-.card-img-wrap {
-  position: relative;
-  background: #e9ecef;
-  aspect-ratio: 250 / 250;
-  overflow: hidden;
+/* ── Navbar ── */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(11,11,18,.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  padding: 0.75rem 0;
 }
-.card-img-wrap img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.navbar-brand {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: #fff;
+  text-decoration: none;
 }
-.card-badges {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: flex;
-  gap: 4px;
+.navbar-brand:hover { color: #fff; }
+.nav-link {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary) !important;
+  padding: 0.4rem 0.9rem !important;
+  border-radius: 6px;
+  transition: all 0.15s;
+  text-decoration: none;
 }
-.badge-bookmark { background: rgba(220,53,69,.9); }
-.badge-page { background: rgba(13,110,253,.85); }
+.nav-link:hover { color: #fff !important; background: rgba(255,255,255,.06); }
+.nav-link.active { color: #fff !important; background: rgba(124,58,237,.2); }
 
-.card-body { padding: 0.75rem; }
-.card-title {
+/* ── Hero Search Area ── */
+.search-hero {
+  padding: 3rem 0 2.5rem;
+  text-align: center;
+}
+
+.search-hero-title {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+  letter-spacing: -0.5px;
+}
+.search-hero-sub {
   font-size: 0.9rem;
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+
+.search-bar-wrap {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.search-bar {
+  display: flex;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.search-bar:focus-within {
+  border-color: rgba(124,58,237,.4);
+  box-shadow: 0 0 0 4px rgba(124,58,237,.1);
+}
+
+.search-bar select, .search-bar input, .search-bar .form-control, .search-bar .form-select {
+  background-color: transparent !important;
+  background: transparent !important;
+  border: none;
+  color: #fff;
+  font-size: 0.9rem;
+  padding: 0.65rem 0.9rem;
+  outline: none;
+  box-shadow: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-bar .form-control::placeholder { color: var(--text-muted); }
+.search-bar select, .search-bar .form-select {
+  color: var(--text-secondary);
+  width: auto;
+  cursor: pointer;
+  border-left: 1px solid rgba(255,255,255,.06) !important;
+  border-radius: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23888' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 0.6rem center !important;
+  padding-right: 1.8rem !important;
+}
+.search-bar select option, .search-bar .form-select option { background: #1a1a2e; color: #fff; }
+
+.search-bar .btn-search {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 0.65rem 1.5rem;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.search-bar .btn-search:hover { background: #6d28d9; }
+
+/* ── Filters Row ── */
+.filters-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 0.78rem;
+}
+.filters-row label { color: var(--text-muted); margin: 0 0 0 0.5rem; align-self: center; font-size: 0.72rem; }
+.filters-row select, .filters-row input, .filters-row .form-select, .filters-row .form-control {
+  background-color: rgba(255,255,255,.04) !important;
+  background: rgba(255,255,255,.04) !important;
+  border: 1px solid rgba(255,255,255,.08) !important;
+  color: var(--text-secondary);
+  border-radius: 7px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  width: auto;
+  min-width: 60px;
+  -webkit-appearance: none;
+  appearance: none;
+  -moz-appearance: textfield;
+}
+/* Hide number input spinners */
+.filters-row input[type="number"]::-webkit-inner-spin-button,
+.filters-row input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.filters-row select, .filters-row .form-select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23888' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 0.4rem center !important;
+  padding-right: 1.3rem !important;
+}
+.filters-row select:focus, .filters-row input:focus, .filters-row .form-select:focus, .filters-row .form-control:focus {
+  border-color: rgba(124,58,237,.3) !important;
+  box-shadow: 0 0 0 2px rgba(124,58,237,.08) !important;
+  color: #fff;
+  outline: none;
+}
+.filters-row select option, .filters-row .form-select option { background: #1a1a2e; color: #fff; }
+
+/* ── Toolbar ── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 0 0.5rem;
+}
+.toolbar-left { display: flex; align-items: center; gap: 0.75rem; }
+
+/* ── Buttons ── */
+.btn {
+  font-weight: 500;
+  border-radius: 8px;
+  transition: all 0.15s;
+}
+.btn-primary { background: var(--accent); border-color: var(--accent); }
+.btn-primary:hover { background: #6d28d9; border-color: #6d28d9; box-shadow: 0 4px 12px rgba(124,58,237,.25); }
+.btn-outline-primary {
+  color: var(--accent-light);
+  border-color: rgba(124,58,237,.3);
+}
+.btn-outline-primary:hover { background: rgba(124,58,237,.1); color: #c4b5fd; }
+.btn-success { background: #059669; border-color: #059669; }
+.btn-success:hover { background: #07b87a; }
+.btn-outline-secondary { color: var(--text-secondary); border-color: rgba(255,255,255,.1); }
+.btn-outline-secondary:hover { background: rgba(255,255,255,.05); color: #fff; }
+.btn-outline-danger { color: #f87171; border-color: rgba(239,68,68,.2); }
+.btn-outline-danger:hover { background: rgba(239,68,68,.1); color: #fca5a5; }
+.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.76rem; }
+
+/* ── Masonry Grid ── */
+.masonry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+.masonry-item {
+  width: calc((100% - 3rem) / 4);
+}
+@media (max-width: 992px) { .masonry-item { width: calc((100% - 2rem) / 3); } }
+@media (max-width: 768px) { .masonry-item { width: calc((100% - 1rem) / 2); } }
+@media (max-width: 480px) { .masonry-item { width: calc((100% - 0.4rem) / 2); } .masonry { gap: 0.4rem; } }
+
+.masonry-item {
+  /* flex item, no extra margin needed — gap handles spacing */
+}
+
+/* ── Photo Card ── */
+.photo-card {
+  position: relative;
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  background: rgba(255,255,255,.03);
+  transition: transform 0.25s ease;
+}
+.photo-card:hover { transform: translateY(-3px); }
+
+.photo-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #1e1b2e;
+}
+
+/* Overlay on hover */
+.photo-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0,0,0,.7) 0%, transparent 50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 0.75rem;
+}
+.photo-card:hover .photo-overlay { opacity: 1; pointer-events: auto; }
+
+.photo-overlay-top {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.photo-badge {
+  background: rgba(0,0,0,.65);
+  backdrop-filter: blur(6px);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: 5px;
+}
+
+.photo-info {
+  color: #fff;
+}
+.photo-title {
+  font-size: 0.8rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.15rem;
 }
-.card-artist {
-  font-size: 0.8rem;
-  color: #6c757d;
-  margin-bottom: 0.4rem;
-}
-.tags-wrap {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  margin-bottom: 0.5rem;
-}
-.tag-badge {
+.photo-artist {
   font-size: 0.7rem;
-  cursor: pointer;
-  transition: opacity 0.15s;
+  color: rgba(255,255,255,.75);
 }
-.tag-badge:hover { opacity: 0.8; }
 
-.card-actions {
+.photo-actions {
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
 }
-.card-actions .btn { font-size: 0.75rem; padding: 3px 8px; }
+.photo-actions .btn {
+  font-size: 0.68rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 5px;
+  backdrop-filter: blur(6px);
+  font-weight: 500;
+}
+.btn-dl {
+  background: rgba(255,255,255,.15);
+  border: 1px solid rgba(255,255,255,.2);
+  color: #fff;
+}
+.btn-dl:hover { background: rgba(255,255,255,.25); color: #fff; }
+.btn-dl-done {
+  background: rgba(5,150,105,.5);
+  border: 1px solid rgba(5,150,105,.4);
+  color: #fff;
+}
+.btn-dl-done:hover { background: rgba(5,150,105,.7); color: #fff; }
 
-.load-more-wrap { margin: 1.5rem 0 2.5rem; }
+/* Tags below image */
+.photo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding: 0.45rem 0.5rem;
+}
+.photo-tag {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(255,255,255,.03);
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+.photo-tag:hover { color: #c4b5fd; background: rgba(124,58,237,.12); border-color: rgba(124,58,237,.15); }
+.tag-block-x { opacity: 0.35; margin-left: 2px; transition: opacity 0.15s; }
+.tag-block-x:hover { opacity: 1; color: #f87171; }
 
+/* ── Empty State ── */
+.empty-state {
+  text-align: center;
+  padding: 5rem 1rem;
+  color: var(--text-muted);
+}
+.empty-state svg { width: 64px; height: 64px; margin-bottom: 1rem; opacity: 0.25; }
+
+/* ── Loading ── */
 .loading-overlay {
   display: none;
   position: fixed;
-  top: 0; left: 0; width: 100%; height: 100%;
-  background: rgba(255,255,255,.7);
+  inset: 0;
+  background: rgba(11,11,18,.5);
+  backdrop-filter: blur(3px);
   z-index: 1050;
   justify-content: center;
   align-items: center;
 }
 .loading-overlay.show { display: flex; }
+.spinner { width: 36px; height: 36px; border: 2px solid rgba(255,255,255,.1); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.empty-state { text-align: center; padding: 3rem 1rem; color: #6c757d; }
-.empty-state svg { width: 80px; height: 80px; margin-bottom: 1rem; opacity: 0.4; }
-
+/* ── Toast ── */
 .toast-container { z-index: 1060; }
-
-@media (max-width: 575px) {
-  .search-section { padding: 0.75rem; border-radius: 8px; }
-  .card-title { font-size: 0.82rem; }
+#liveToast {
+  background: rgba(30,27,46,.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(239,68,68,.15);
+  border-radius: 10px;
+  color: #fca5a5;
 }
+
+/* ── Blocked Tags Panel ── */
+.blocked-panel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  font-size: 0.78rem;
+}
+.blocked-panel .form-control {
+  background-color: rgba(255,255,255,.04) !important;
+  border: 1px solid rgba(255,255,255,.08) !important;
+  color: #fff;
+}
+.blocked-panel .form-control:focus {
+  border-color: rgba(124,58,237,.3) !important;
+  box-shadow: 0 0 0 2px rgba(124,58,237,.08) !important;
+}
+.blocked-panel .form-control::placeholder { color: var(--text-muted); }
 </style>
 </head>
 <body>
 
-<nav class="navbar navbar-dark">
+<nav class="navbar">
   <div class="container">
-    <span class="navbar-brand">Pixiv Viewer</span>
-    <span class="navbar-text text-white-50 small d-none d-sm-inline">作品检索与展示</span>
+    <a class="navbar-brand" href="/">Pixiv Viewer</a>
+    <div class="d-flex gap-1">
+      <a class="nav-link active" href="/">搜索</a>
+      <a class="nav-link" href="/gallery">图库</a>
+      <a class="nav-link" href="/downloads">下载</a>
+      <a class="nav-link" href="/logs">日志</a>
+    </div>
   </div>
 </nav>
 
-<div class="container mt-3">
-  <!-- Search Form -->
-  <div class="search-section">
-    <div class="row g-2 align-items-end">
-      <div class="col-6 col-md-2">
-        <label class="form-label small fw-semibold">类型</label>
-        <select id="searchType" class="form-select form-select-sm">
+<!-- Hero Search -->
+<div class="search-hero">
+  <div class="container">
+    <div class="search-hero-title">探索 Pixiv 作品</div>
+    <div class="search-hero-sub">按标签搜索、画师检索、关注动态</div>
+
+    <div class="search-bar-wrap">
+      <div class="search-bar">
+        <select id="searchType">
           <option value="tag">标签</option>
           <option value="user">画师UID</option>
+          <option value="following">关注</option>
         </select>
-      </div>
-      <div class="col-6 col-md-4">
-        <label class="form-label small fw-semibold">
-          <span id="queryLabel">关键词</span>
-        </label>
-        <input id="searchQuery" class="form-control form-control-sm" placeholder="输入标签关键词..." autocomplete="off">
-      </div>
-      <div class="col-6 col-md-2">
-        <label class="form-label small fw-semibold">最低收藏数</label>
-        <input id="minBookmarks" type="number" class="form-control form-control-sm" value="0" min="0" step="100">
-      </div>
-      <div class="col-6 col-md-2 d-grid">
-        <button id="searchBtn" class="btn btn-primary btn-sm">搜索</button>
+        <input id="searchQuery" class="form-control" placeholder="多个标签用逗号分隔">
+        <select id="tagMode" title="组合方式">
+          <option value="or">OR</option>
+          <option value="and">AND</option>
+        </select>
+        <button id="searchBtn" class="btn-search">搜索</button>
       </div>
     </div>
+
+    <!-- Filters -->
+    <div class="filters-row">
+      <label>排序</label>
+      <select id="sortOrder">
+        <option value="date_d">最新</option>
+        <option value="popular_d">综合</option>
+      </select>
+      <label>起始页</label>
+      <input id="startPage" type="number" value="1" min="1">
+      <label>收藏≥</label>
+      <input id="minBookmarks" type="number" value="0" min="0" step="100">
+      <button id="toggleBlockedBtn" class="btn btn-outline-secondary btn-sm">屏蔽标签 ▾</button>
+      <span id="blockedCount" style="color:var(--text-muted);display:none;"></span>
+    </div>
+
+    <div id="blockedPanel" class="blocked-panel justify-content-center" style="display:none;">
+      <input id="newBlockedTag" class="form-control form-control-sm" placeholder="输入要屏蔽的标签..." style="max-width:180px;">
+      <button id="addBlockedBtn" class="btn btn-outline-danger btn-sm">添加</button>
+      <div id="blockedTagList" class="d-flex flex-wrap gap-1"></div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Toolbar -->
+  <div id="downloadToolbar" class="toolbar" style="display:none;">
+    <div class="toolbar-left">
+      <button id="downloadAllBtn" class="btn btn-success btn-sm">全部下载</button>
+      <span id="downloadAllStatus" style="font-size:0.78rem;color:var(--text-secondary);"></span>
+    </div>
+    <div id="resultCount" style="font-size:0.78rem;color:var(--text-muted);"></div>
   </div>
 
-  <!-- Results -->
-  <div id="cardGrid" class="card-grid row"></div>
+  <!-- Masonry Grid -->
+  <div id="masonryGrid" class="masonry"></div>
+
+  <!-- Load More -->
+  <div id="loadMoreWrap" style="text-align:center;padding:1.5rem 0;display:none;">
+    <button id="loadMoreBtn" class="btn btn-outline-primary">加载更多</button>
+  </div>
 
   <!-- Empty State -->
   <div id="emptyState" class="empty-state" style="display:none;">
@@ -161,22 +473,14 @@ body { background: #f5f6fa; }
     <p class="small">尝试其他关键词或降低收藏数下限</p>
   </div>
 
-  <!-- Load More -->
-  <div id="loadMoreWrap" class="load-more-wrap text-center" style="display:none;">
-    <button id="loadMoreBtn" class="btn btn-outline-primary">加载更多</button>
-  </div>
 </div>
 
 <!-- Loading Overlay -->
-<div id="loadingOverlay" class="loading-overlay">
-  <div class="spinner-border text-primary" role="status">
-    <span class="visually-hidden">加载中...</span>
-  </div>
-</div>
+<div id="loadingOverlay" class="loading-overlay"><div class="spinner"></div></div>
 
-<!-- Toast Container -->
+<!-- Toast -->
 <div class="toast-container position-fixed bottom-0 end-0 p-3">
-  <div id="liveToast" class="toast align-items-center text-bg-danger border-0" role="alert">
+  <div id="liveToast" class="toast align-items-center border-0" role="alert">
     <div class="d-flex">
       <div class="toast-body" id="toastMsg"></div>
       <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
@@ -188,272 +492,361 @@ body { background: #f5f6fa; }
 <script>
 const csrfToken = '{{ csrf_token | safe }}';
 
-let currentPage = 0;
-let lastSearchParams = null;
+let lastSearchParams = null, allResults = [], currentPage = 1, hasMorePages = false;
+const SEARCH_STATE_KEY = 'pixiv_search_state';
+const $ = s => document.querySelector(s), $$ = s => document.querySelectorAll(s);
 
-const $ = (s) => document.querySelector(s);
-const $$ = (s) => document.querySelectorAll(s);
+// ── State ──
+function saveSearchState(results) {
+  try { sessionStorage.setItem(SEARCH_STATE_KEY, JSON.stringify({
+    ...lastSearchParams, results, currentPage, hasMorePages
+  })); } catch {}
+}
 
-// ── Search Type Toggle ──
-$('#searchType').addEventListener('change', function() {
-  const isTag = this.value === 'tag';
-  $('#queryLabel').textContent = isTag ? '关键词' : '画师UID';
-  $('#searchQuery').placeholder = isTag ? '输入标签关键词...' : '输入画师UID...';
+function restoreSearchState() {
+  try {
+    const raw = sessionStorage.getItem(SEARCH_STATE_KEY);
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    if (!s.results?.length) return false;
+    $('#searchType').value = s.type || 'tag';
+    $('#searchQuery').value = s.query || '';
+    $('#minBookmarks').value = s.minBookmarks || 0;
+    $('#sortOrder').value = s.sort || 'date_d';
+    $('#startPage').value = s.startPage || 1;
+    $('#tagMode').value = s.tagMode || 'or';
+    updateSearchUI();
+
+    lastSearchParams = { type:s.type, query:s.query, minBookmarks:s.minBookmarks,
+      sort:s.sort||'date_d', startPage:s.startPage||1, tagMode:s.tagMode||'or' };
+    allResults = s.results || [];
+    currentPage = s.currentPage || (s.startPage || 1);
+    hasMorePages = s.hasMorePages || false;
+    s.results.forEach(r => renderCard(r));
+    showToolbar(true);
+    updateLoadMore();
+    lazyLoad();
+    return true;
+  } catch { return false; }
+}
+
+// ── UI Toggle ──
+function updateSearchUI() {
+  const type = $('#searchType').value;
+  const isTag = type === 'tag';
+  $('#tagMode').style.display = isTag ? '' : 'none';
+  $('#searchQuery').placeholder = type === 'following' ? '' : isTag ? '多个标签用逗号分隔' : '输入画师UID...';
+
+  const show = type !== 'following';
+  ['#sortOrder','#startPage','#minBookmarks'].forEach(id => {
+    $(id).closest('label') && ($(id).style.display = show ? '' : 'none');
+  });
+  $$('.filters-row label').forEach(l => l.style.display = show ? '' : 'none');
+  if (!show) {
+    ['#sortOrder','#startPage','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = 'none');
+  } else {
+    ['#sortOrder','#startPage','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = '');
+  }
+}
+$('#searchType').addEventListener('change', updateSearchUI);
+
+// ── Blocked Tags ──
+let blockedTags = [];
+async function loadBlockedTags() {
+  try { blockedTags = await fetch('/api/blocked-tags').then(r => r.json()); renderBlockedTags(); } catch {}
+}
+function renderBlockedTags() {
+  const list = $('#blockedTagList');
+  list.innerHTML = blockedTags.map(t =>
+    `<span class="badge bg-danger" style="font-size:0.7rem;">${escHtml(t)} <span data-untag="${escAttr(t)}" style="cursor:pointer;opacity:.6;">&times;</span></span>`
+  ).join('');
+  list.querySelectorAll('[data-untag]').forEach(el => el.addEventListener('click', () => removeBlockedTag(el.dataset.untag)));
+  const c = blockedTags.length;
+  $('#blockedCount').style.display = c ? '' : 'none';
+  $('#blockedCount').textContent = c ? `${c} 个已屏蔽` : '';
+}
+async function addBlockedTag(tag) {
+  const r = await fetch('/api/blocked-tags', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag}) });
+  if (r.ok) { blockedTags.push(tag); renderBlockedTags(); refreshCurrentSearch(); }
+  else if (r.status !== 409) showToast(((await r.json().catch(()=>({}))).error) || '添加失败');
+}
+async function removeBlockedTag(tag) {
+  const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, { method:'DELETE' });
+  if (r.ok) { blockedTags = blockedTags.filter(t => t !== tag); renderBlockedTags(); refreshCurrentSearch(); }
+}
+function refreshCurrentSearch() { if (lastSearchParams) doSearch(); }
+
+$('#toggleBlockedBtn').addEventListener('click', () => {
+  const p = $('#blockedPanel');
+  const s = p.style.display === 'none';
+  p.style.display = s ? 'flex' : 'none';
+  $('#toggleBlockedBtn').textContent = s ? '屏蔽标签 ▴' : '屏蔽标签 ▾';
 });
+$('#addBlockedBtn').addEventListener('click', () => {
+  const t = $('#newBlockedTag').value.trim();
+  if (t) { addBlockedTag(t); $('#newBlockedTag').value = ''; }
+});
+$('#newBlockedTag').addEventListener('keydown', e => { if (e.key==='Enter') $('#addBlockedBtn').click(); });
 
 // ── Search ──
-$('#searchBtn').addEventListener('click', () => doSearch(false));
-$('#searchQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(false); });
+$('#searchBtn').addEventListener('click', () => doSearch());
+$('#searchQuery').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
 
-async function doSearch(append) {
+function showToolbar(v) { $('#downloadToolbar').style.display = v ? 'flex' : 'none'; }
+
+async function doSearch() {
   const type = $('#searchType').value;
   const query = $('#searchQuery').value.trim();
   const minBookmarks = parseInt($('#minBookmarks').value) || 0;
+  if (type === 'user' && !query) { showToast('请输入画师ID'); return; }
 
-  if (!query) {
-    showToast('请输入搜索关键词或画师ID');
-    return;
-  }
+  const sort = $('#sortOrder').value || 'date_d';
+  const startPage = Math.max(1, parseInt($('#startPage').value) || 1);
+  const tagMode = $('#tagMode').value || 'or';
 
-  lastSearchParams = { type, query, minBookmarks };
-  if (!append) {
-    currentPage = 0;
-    $('#cardGrid').innerHTML = '';
-    $('#emptyState').style.display = 'none';
-    $('#loadMoreWrap').style.display = 'none';
-  }
-
-  const fetchPage = currentPage + 1;
+  lastSearchParams = { type, query, minBookmarks, sort, startPage, tagMode };
+  currentPage = startPage;
+  allResults = [];
+  hasMorePages = false;
+  sessionStorage.removeItem(SEARCH_STATE_KEY);
+  $('#masonryGrid').innerHTML = '';
+  $('#emptyState').style.display = 'none';
+  $('#loadMoreWrap').style.display = 'none';
+  showToolbar(false);
+  batchInProgress = false;
 
   showLoading(true);
   try {
-    const params = new URLSearchParams({ type, query, min_bookmarks: minBookmarks, page: String(fetchPage) });
-    const resp = await fetch(`/search?${params}`);
+    let url;
+    if (type === 'following') url = `/api/following?page=${startPage}`;
+    else url = `/search?${new URLSearchParams({type,query,min_bookmarks:minBookmarks,page:String(startPage),sort,tag_mode:tagMode})}`;
+
+    const resp = await fetch(url);
     if (!resp.ok) {
-      if (resp.status === 429) {
-        showToast('请求过于频繁，请稍后再试');
-      } else {
-        const data = await resp.json().catch(() => ({}));
-        showToast(data.error || '搜索失败');
-      }
+      showToast(resp.status===429 ? '请求过于频繁' : ((await resp.json().catch(()=>({}))).error||'搜索失败'));
       return;
     }
     const data = await resp.json();
-    hasMore = data.has_more;
 
-    if (!append) {
-      $('#cardGrid').innerHTML = '';
-    }
-
-    if (data.results.length === 0 && !append) {
+    if (!data.results.length) {
       $('#emptyState').style.display = 'block';
       return;
     }
 
-    currentPage = fetchPage;
     data.results.forEach(r => renderCard(r));
-    $('#loadMoreWrap').style.display = data.has_more ? 'block' : 'none';
-
-    // 懒加载新图片
-    requestAnimationFrame(() => {
-      $$('img[loading="lazy"]').forEach(img => {
-        if (img.dataset.src) {
-          img.src = img.dataset.src;
-          img.removeAttribute('data-src');
-        }
-      });
-    });
-  } catch (err) {
-    showToast('网络错误，请检查连接后重试');
-  } finally {
-    showLoading(false);
-  }
+    allResults = data.results;
+    hasMorePages = data.has_more || false;
+    saveSearchState(allResults);
+    $('#resultCount').textContent = allResults.length ? `已加载 ${allResults.length} 件` : '';
+    showToolbar(true);
+    updateLoadMore();
+    lazyLoad();
+  } catch { showToast('网络错误'); }
+  finally { showLoading(false); }
 }
 
-// ── Load More ──
-$('#loadMoreBtn').addEventListener('click', () => {
+async function loadMore() {
   if (!lastSearchParams) return;
-  doSearch(true);
-});
+  currentPage++;
+  showLoading(true);
+  try {
+    const p = lastSearchParams;
+    let url;
+    if (p.type === 'following') url = `/api/following?page=${currentPage}`;
+    else url = `/search?${new URLSearchParams({type:p.type,query:p.query,min_bookmarks:p.minBookmarks,page:String(currentPage),sort:p.sort,tag_mode:p.tagMode})}`;
 
-// ── Thumbnail Proxy ──
-function proxyThumb(url) {
-  if (!url) return '';
-  const encoded = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return `/thumb/${encoded}`;
+    const resp = await fetch(url);
+    if (!resp.ok) { showToast('加载失败'); return; }
+    const data = await resp.json();
+
+    if (!data.results.length) { hasMorePages = false; updateLoadMore(); return; }
+
+    data.results.forEach(r => renderCard(r));
+    allResults.push(...data.results);
+    hasMorePages = data.has_more || false;
+    $('#startPage').value = currentPage + 1;
+    $('#resultCount').textContent = allResults.length ? `已加载 ${allResults.length} 件` : '';
+    saveSearchState(allResults);
+    updateLoadMore();
+    lazyLoad();
+  } catch { showToast('网络错误'); }
+  finally { showLoading(false); }
 }
+
+function updateLoadMore() {
+  $('#loadMoreWrap').style.display = hasMorePages ? 'block' : 'none';
+}
+
+$('#loadMoreBtn').addEventListener('click', loadMore);
 
 // ── Render Card ──
+function proxyThumb(url) {
+  if (!url) return '';
+  return `/thumb/${btoa(url).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`;
+}
+
 function renderCard(r) {
-  const tags = (r.tags || []).slice(0, 8).map(t =>
-    `<span class="badge bg-light text-dark tag-badge" data-tag="${escAttr(t)}">${escHtml(t)}</span>`
-  ).join('');
+  const isDone = r.download_status === 'done';
+  const isDl = r.download_status === 'downloading';
+  let btnHtml;
+  if (isDl) btnHtml = '<span style="font-size:0.68rem;color:rgba(255,255,255,.5);">下载中...</span>';
+  else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
+  else btnHtml = `<button class="btn btn-dl btn-sm dl-btn" data-pid="${r.pixiv_id}">下载原图</button>`;
 
-  const downloaded = r.download_status === 'done';
-  const downloading = r.download_status === 'downloading';
+  const badges = [];
+  badges.push(`<span class="photo-badge">♥ ${fmtNum(r.bookmark_count)}</span>`);
+  if (r.page_count > 1) badges.push(`<span class="photo-badge" style="background:rgba(124,58,237,.7);">${r.page_count}P</span>`);
 
-  let actionHtml;
-  if (downloading) {
-    actionHtml = `<button class="btn btn-secondary btn-sm" disabled>下载中...</button>`;
-  } else if (downloaded) {
-    actionHtml = `<button class="btn btn-success btn-sm download-file-btn" data-pid="${r.pixiv_id}">打包下载</button>`;
-  } else {
-    actionHtml = `<button class="btn btn-outline-primary btn-sm download-btn" data-pid="${r.pixiv_id}">下载到服务器</button>`;
-  }
+  const tags = (r.tags||[]).slice(0,6).map(t =>
+    `<span class="photo-tag" data-tag="${escAttr(t)}">${escHtml(t)}<span class="tag-block-x" data-block="${escAttr(t)}">&times;</span></span>`).join('');
 
-  const pageBadge = r.page_count > 1
-    ? `<span class="badge badge-page">${r.page_count}P</span>` : '';
-
-  const col = document.createElement('div');
-  col.className = 'col-lg-3 col-md-4 col-sm-6 col-12';
-  col.innerHTML = `
-    <div class="card art-card" data-pixiv-id="${r.pixiv_id}">
-      <div class="card-img-wrap">
-        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23dee2e6'%3E%3C/svg%3E"
-             data-src="${escAttr(proxyThumb(r.thumb_url))}"
-             loading="lazy" alt="">
-        <div class="card-badges">
-          <span class="badge badge-bookmark" title="收藏数">♥ ${fmtNum(r.bookmark_count)}</span>
-          ${pageBadge}
+  const item = document.createElement('div');
+  item.className = 'masonry-item';
+  item.innerHTML = `
+    <div class="photo-card" data-pixiv-id="${r.pixiv_id}">
+      <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%231e1b2e'%3E%3C/svg%3E"
+           data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" alt="">
+      <div class="photo-overlay">
+        <div class="photo-overlay-top">${badges.join('')}</div>
+        <div class="photo-info">
+          <div class="photo-title">${escHtml(r.title)}</div>
+          <div class="photo-artist artist-link" data-uid="${r.user_id}">${escHtml(r.user_name)}</div>
+          <div class="photo-actions">${btnHtml}</div>
         </div>
       </div>
-      <div class="card-body">
-        <div class="card-title" title="${escAttr(r.title)}">${escHtml(r.title)}</div>
-        <div class="card-artist">${escHtml(r.user_name)}</div>
-        <div class="tags-wrap">${tags}</div>
-        <div class="card-actions">${actionHtml}</div>
-      </div>
-    </div>`;
+    </div>
+    <div class="photo-tags">${tags}</div>`;
+  $('#masonryGrid').appendChild(item);
 
-  $('#cardGrid').appendChild(col);
-
-  // 标签点击 → 新搜索
-  col.querySelectorAll('.tag-badge').forEach(badge => {
-    badge.addEventListener('click', () => {
-      $('#searchType').value = 'tag';
-      $('#searchQuery').value = badge.dataset.tag;
-      $('#searchQuery').dispatchEvent(new Event('change'));
-      doSearch(false);
-    });
-  });
-
-  // 下载按钮
-  const downloadBtn = col.querySelector('.download-btn');
-  if (downloadBtn) {
-    downloadBtn.addEventListener('click', () => triggerDownload(r.pixiv_id, downloadBtn));
-  }
-
-  // 打包下载按钮
-  const dlFileBtn = col.querySelector('.download-file-btn');
-  if (dlFileBtn) {
-    dlFileBtn.addEventListener('click', () => downloadFile(r.pixiv_id));
-  }
-}
-
-// ── Download Trigger ──
-async function triggerDownload(pixivId, btn) {
-  btn.disabled = true;
-  btn.textContent = '下载中...';
-  btn.className = 'btn btn-secondary btn-sm';
-
-  try {
-    const resp = await fetch(`/download/${pixivId}`, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      showToast(data.error || '下载请求失败');
-      resetDownloadBtn(pixivId);
-      return;
-    }
-    if (data.status === 'done') {
-      updateToDownloaded(pixivId);
-      return;
-    }
-    // 轮询状态
-    pollDownloadStatus(pixivId, btn);
-  } catch (err) {
-    showToast('网络错误，下载请求失败');
-    resetDownloadBtn(pixivId);
-  }
-}
-
-function pollDownloadStatus(pixivId, btn) {
-  const interval = setInterval(async () => {
-    try {
-      const resp = await fetch(`/download_status/${pixivId}`);
-      const data = await resp.json();
-      if (data.status === 'done') {
-        clearInterval(interval);
-        updateToDownloaded(pixivId);
-      } else if (data.status === 'failed') {
-        clearInterval(interval);
-        showToast(`作品 #${pixivId} 下载失败，请重试`);
-        resetDownloadBtn(pixivId);
+  // Tag click → search; × → block
+  item.querySelectorAll('.photo-tag').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('.tag-block-x')) {
+        e.stopPropagation();
+        addBlockedTag(el.dataset.tag);
+        return;
       }
-    } catch {} // 轮询失败不中断
-  }, 2000);
-  // 超时 5 分钟停止
-  setTimeout(() => clearInterval(interval), 300000);
-}
-
-function updateToDownloaded(pixivId) {
-  const card = $(`.art-card[data-pixiv-id="${pixivId}"]`);
-  if (!card) return;
-  const actions = card.querySelector('.card-actions');
-  actions.innerHTML = `<button class="btn btn-success btn-sm download-file-btn" data-pid="${pixivId}">打包下载</button>`;
-  actions.querySelector('.download-file-btn').addEventListener('click', () => downloadFile(pixivId));
-}
-
-function resetDownloadBtn(pixivId) {
-  const card = $(`.art-card[data-pixiv-id="${pixivId}"]`);
-  if (!card) return;
-  const actions = card.querySelector('.card-actions');
-  actions.innerHTML = `<button class="btn btn-outline-primary btn-sm download-btn" data-pid="${pixivId}">下载到服务器</button>
-                       <button class="btn btn-outline-danger btn-sm retry-btn" data-pid="${pixivId}">重试</button>`;
-  actions.querySelector('.download-btn').addEventListener('click', function() {
-    triggerDownload(pixivId, this);
-  });
-  actions.querySelector('.retry-btn').addEventListener('click', function() {
-    actions.innerHTML = `<button class="btn btn-outline-primary btn-sm download-btn" data-pid="${pixivId}">下载到服务器</button>`;
-    actions.querySelector('.download-btn').addEventListener('click', function() {
-      triggerDownload(pixivId, this);
+      e.stopPropagation();
+      $('#searchType').value = 'tag';
+      $('#searchQuery').value = el.dataset.tag;
+      updateSearchUI();
+      doSearch();
     });
   });
+
+  // Artist click
+  const al = item.querySelector('.artist-link');
+  if (al) al.addEventListener('click', e => {
+    e.stopPropagation();
+    $('#searchType').value = 'user';
+    $('#searchQuery').value = al.dataset.uid;
+    updateSearchUI();
+    doSearch();
+  });
+
+  // Download button
+  item.querySelector('.dl-btn')?.addEventListener('click', function(e) {
+    e.stopPropagation();
+    triggerDownload(r.pixiv_id, this);
+  });
+  item.querySelector('.dl-file-btn')?.addEventListener('click', function(e) {
+    e.stopPropagation();
+    downloadFile(r.pixiv_id);
+  });
 }
 
-// ── Download File ──
-function downloadFile(pixivId) {
-  window.open(`/download_file/${pixivId}`, '_blank');
+// ── Download ──
+async function triggerDownload(pixivId, btn) {
+  btn.disabled = true; btn.textContent = '...'; btn.className = 'btn btn-sm';
+  try {
+    const r = await fetch(`/download/${pixivId}`, { method:'POST', headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/json'} });
+    const d = await r.json();
+    if (!r.ok) { showToast(d.error||'失败'); resetDlBtn(pixivId); return; }
+    if (d.status === 'done') { updateDlDone(pixivId); return; }
+    pollDl(pixivId);
+  } catch { showToast('网络错误'); resetDlBtn(pixivId); }
+}
+
+function pollDl(pixivId) {
+  const iv = setInterval(async () => {
+    try {
+      const d = await fetch(`/download_status/${pixivId}`).then(r => r.json());
+      if (d.status === 'done') { clearInterval(iv); updateDlDone(pixivId); }
+      else if (d.status === 'failed') { clearInterval(iv); showToast(`#${pixivId} 下载失败`); resetDlBtn(pixivId); }
+    } catch {}
+  }, 2000);
+  setTimeout(() => clearInterval(iv), 300000);
+}
+
+function updateDlDone(pixivId) {
+  const card = $(`.photo-card[data-pixiv-id="${pixivId}"]`);
+  if (!card) return;
+  const actions = card.querySelector('.photo-actions');
+  actions.innerHTML = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${pixivId}">下载</button>`;
+  card.querySelector('.dl-file-btn')?.addEventListener('click', e => { e.stopPropagation(); downloadFile(pixivId); });
+}
+
+function resetDlBtn(pixivId) {
+  const card = $(`.photo-card[data-pixiv-id="${pixivId}"]`);
+  if (!card) return;
+  const actions = card.querySelector('.photo-actions');
+  actions.innerHTML = `<button class="btn btn-dl btn-sm dl-btn" data-pid="${pixivId}">下载原图</button>`;
+  card.querySelector('.dl-btn')?.addEventListener('click', function(e) { e.stopPropagation(); triggerDownload(pixivId, this); });
+}
+
+function downloadFile(pixivId) { window.open(`/download_file/${pixivId}`, '_blank'); }
+
+// ── Batch Download ──
+let batchInProgress = false;
+$('#downloadAllBtn').addEventListener('click', async () => {
+  if (batchInProgress) return;
+  const ids = Array.from($$('.photo-card')).map(c => parseInt(c.dataset.pixivId));
+  if (!ids.length) return;
+  batchInProgress = true;
+  const btn = $('#downloadAllBtn'), st = $('#downloadAllStatus');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/download/batch', { method:'POST', headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/json'}, body:JSON.stringify({ids}) });
+    const d = await r.json();
+    if (r.ok) { st.textContent = d.message; btn.textContent='下载中...'; btn.className='btn btn-secondary btn-sm'; pollBatch(ids); }
+    else { showToast(d.error||'失败'); btn.disabled=false; }
+  } catch { showToast('网络错误'); btn.disabled=false; batchInProgress=false; }
+});
+
+function pollBatch(ids) {
+  const pending = new Set(ids); let n = 0;
+  const iv = setInterval(async () => {
+    n++;
+    for (const pid of [...pending]) {
+      try { const d = await fetch(`/download_status/${pid}`).then(r=>r.json());
+        if (d.status==='done') { pending.delete(pid); updateDlDone(pid); }
+        else if (d.status==='failed') { pending.delete(pid); resetDlBtn(pid); }
+      } catch {}
+    }
+    if (pending.size===0) { clearInterval(iv); $('#downloadAllStatus').textContent='全部完成'; batchInProgress=false; }
+    else if (n>=150) { clearInterval(iv); $('#downloadAllStatus').textContent=`部分完成(${pending.size})`; batchInProgress=false; }
+    else $('#downloadAllStatus').textContent = `剩余 ${pending.size} 个...`;
+  }, 2000);
 }
 
 // ── Helpers ──
-function showToast(msg) {
-  $('#toastMsg').textContent = msg;
-  const toast = new bootstrap.Toast($('#liveToast'));
-  toast.show();
+function lazyLoad() {
+  requestAnimationFrame(() => {
+    $$('img[data-src]').forEach(img => {
+      img.src = img.dataset.src;
+      img.removeAttribute('data-src');
+    });
+  });
 }
+function showToast(msg) { $('#toastMsg').textContent=msg; bootstrap.Toast.getOrCreateInstance($('#liveToast')).show(); }
+function showLoading(on) { $('#loadingOverlay').classList.toggle('show',on); $('#searchBtn').disabled=on; }
+function fmtNum(n) { return n>=10000 ? (n/10000).toFixed(1)+'w' : String(n); }
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+function escAttr(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function showLoading(on) {
-  $('#loadingOverlay').classList.toggle('show', on);
-  $('#searchBtn').disabled = on;
-}
-
-function fmtNum(n) {
-  if (n >= 10000) return (n / 10000).toFixed(1) + 'w';
-  return String(n);
-}
-
-function escHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s || '';
-  return d.innerHTML;
-}
-
-function escAttr(s) {
-  return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
+// ── Init ──
+loadBlockedTags();
+if (!restoreSearchState()) sessionStorage.removeItem(SEARCH_STATE_KEY);
 </script>
 </body>
 </html>

@@ -1,8 +1,10 @@
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, event, Integer, String, Text, DateTime
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
 from config import DATABASE_PATH
@@ -19,8 +21,22 @@ engine = create_engine(
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute('PRAGMA journal_mode=WAL;')
-    cursor.execute('PRAGMA busy_timeout=5000;')
+    cursor.execute('PRAGMA busy_timeout=10000;')
+    cursor.execute('PRAGMA synchronous=NORMAL;')
     cursor.close()
+
+
+def safe_commit(db_session, max_retries=3):
+    """带重试的 commit，处理 database is locked 错误."""
+    for attempt in range(max_retries):
+        try:
+            db_session.commit()
+            return
+        except OperationalError as e:
+            if 'database is locked' in str(e) and attempt < max_retries - 1:
+                time.sleep(1 + attempt)
+            else:
+                raise
 
 
 class Base(DeclarativeBase):
@@ -102,17 +118,31 @@ class Illust(Base):
         }
 
 
-class Setting(Base):
-    __tablename__ = 'settings'
+class BlockedTag(Base):
+    __tablename__ = 'blocked_tags'
 
-    key: Mapped[str] = mapped_column(String, primary_key=True)
-    current_page: Mapped[int] = mapped_column(Integer, default=1)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tag: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-class DeletedRecord(Base):
-    __tablename__ = 'deleted_records'
+class DownloadLog(Base):
+    __tablename__ = 'download_logs'
 
-    pixiv_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pixiv_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    message: Mapped[str] = mapped_column(String, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'pixiv_id': self.pixiv_id,
+            'action': self.action,
+            'message': self.message,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 def init_db():

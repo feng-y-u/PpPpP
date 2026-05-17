@@ -1,18 +1,22 @@
-import hashlib
 import logging
 import os
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from config import (
     COOKIE_PATH, SEARCH_PAGES, PER_PAGE,
-    DETAIL_TIMEOUT, DETAIL_MAX_RETRIES,
+    DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
 )
-from models import Illust, Setting, DeletedRecord, get_session
+from models import Illust, BlockedTag, get_session, safe_commit
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,12 @@ def _load_cookie():
     mtime = os.path.getmtime(COOKIE_PATH)
     if mtime != _cookie_mtime:
         with open(COOKIE_PATH) as f:
-            _cookie_value = f.read().strip()
+            raw = f.read().strip()
+        # 支持两种格式: "PHPSESSID=xxxxx" 或纯 "xxxxx"
+        if raw.startswith('PHPSESSID='):
+            _cookie_value = raw.split('=', 1)[1]
+        else:
+            _cookie_value = raw
         _cookie_mtime = mtime
 
 
@@ -39,16 +48,30 @@ def _build_session() -> requests.Session:
         'Referer': 'https://www.pixiv.net/',
         'Accept-Language': 'ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7',
     })
+    s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
     s.cookies.set('PHPSESSID', _cookie_value, domain='.pixiv.net')
+    s.verify = False
     retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503])
     adapter = HTTPAdapter(max_retries=retry)
     s.mount('https://', adapter)
     return s
 
 
-def _make_search_key(search_type: str, query: str, min_bookmarks: int) -> str:
-    raw = f'{search_type}:{query}:min{min_bookmarks}'
-    return hashlib.md5(raw.encode()).hexdigest()
+def _split_tags(keyword: str) -> list[str]:
+    """Split by comma only. Spaces within each tag are preserved."""
+    raw = keyword.replace('，', ',').strip()
+    parts = [t.strip() for t in raw.split(',') if t.strip()]
+    return parts if parts else [raw]
+
+
+def _get_blocked_tags(db) -> set[str]:
+    return {t.tag for t in db.query(BlockedTag).all()}
+
+
+def _is_blocked(tags: list[str], blocked: set[str]) -> bool:
+    if not blocked:
+        return False
+    return bool(set(tags) & blocked)
 
 
 def _parse_tags(tags_data) -> list[str]:
@@ -82,8 +105,16 @@ def _extract_original_urls(detail_body: dict) -> list[str]:
         urls.append(meta_single['originalImageUrl'])
         return urls
     original = detail_body.get('urls', {}).get('original', '')
-    if original:
+    if not original:
+        return urls
+    page_count = detail_body.get('pageCount', 1)
+    if page_count <= 1:
         urls.append(original)
+        return urls
+    # Pixiv removed metaPages from the API; construct page URLs from _p0 pattern
+    for i in range(page_count):
+        page_url = re.sub(r'_p0(\.[a-zA-Z]+)(\?|$)', f'_p{i}\\1\\2', original)
+        urls.append(page_url)
     return urls
 
 
@@ -117,18 +148,51 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
     return None
 
 
-def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1) -> tuple[list[dict], bool]:
-    """Search Pixiv by tag. page is 1-based. Returns (results, has_more)."""
-    if page > SEARCH_PAGES:
+def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
+    """Fetch illust details in parallel. Returns {pixiv_id: detail}."""
+    if not pixiv_ids:
+        return {}
+
+    results = {}
+
+    def _worker(pid):
+        session = _build_session()
+        return pid, _get_illust_detail(session, pid)
+
+    with ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS) as executor:
+        futures = {executor.submit(_worker, pid): pid for pid in pixiv_ids}
+        for future in as_completed(futures):
+            try:
+                pid, detail = future.result()
+                if detail is not None:
+                    results[pid] = detail
+            except Exception as e:
+                logger.error(f'Parallel fetch failed for {futures[future]}: {e}')
+
+    return results
+
+
+def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
+                  sort_order: str = 'popular_d', max_pages: int = 10,
+                  tag_mode: str = 'or') -> tuple[list[dict], bool]:
+    """Search Pixiv by tag(s). tag_mode: 'or' = any tag, 'and' = all tags."""
+    if page > max_pages:
         return [], False
 
-    search_key = _make_search_key('tag', keyword, min_bookmarks)
+    tags = _split_tags(keyword)
+    if len(tags) == 1:
+        pixiv_query = tags[0]
+    elif tag_mode == 'and':
+        pixiv_query = ' '.join(tags)
+    else:
+        pixiv_query = '(' + ' OR '.join(tags) + ')'
+
     session = _build_session()
 
-    quoted = requests.utils.quote(keyword)
+    quoted = requests.utils.quote(pixiv_query)
     search_url = (
         f'https://www.pixiv.net/ajax/search/illustrations/{quoted}'
-        f'?word={quoted}&order=popular_d&mode=all&p={page}'
+        f'?word={quoted}&order={sort_order}&mode=all&p={page}'
         f'&s_mode=s_tag&type=illust'
     )
 
@@ -146,70 +210,152 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1) -> tuple[
 
     illusts_data = (
         search_data.get('body', {})
-        .get('illustManga', {})
+        .get('illust', {})
         .get('data', [])
     )
-    total = search_data.get('body', {}).get('illustManga', {}).get('total', 0)
+    total = search_data.get('body', {}).get('illust', {}).get('total', 0)
 
     if not illusts_data:
         return [], False
 
     with get_session() as db:
         results = []
+        to_fetch = []  # (pixiv_id, item_dict)
+        blocked = _get_blocked_tags(db)
+
+        # 第一遍：分离已入库和需抓取的作品
         for item in illusts_data:
             pixiv_id = int(item['id'])
 
-            if db.query(DeletedRecord).filter(DeletedRecord.pixiv_id == pixiv_id).first():
-                continue
-
             existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if existing:
-                if existing.bookmark_count >= min_bookmarks:
+                if existing.bookmark_count >= min_bookmarks and not _is_blocked(existing.tags_list, blocked):
                     results.append(existing.to_dict())
                 continue
 
-            detail = _get_illust_detail(session, pixiv_id)
-            if detail is None:
-                continue
+            to_fetch.append(pixiv_id)
 
-            if detail['bookmark_count'] < min_bookmarks:
-                continue
+        # 并行获取详情
+        if to_fetch:
+            details = _fetch_details_parallel(to_fetch)
+            for pixiv_id in to_fetch:
+                detail = details.get(pixiv_id)
+                if detail is None or detail['bookmark_count'] < min_bookmarks:
+                    continue
+                if _is_blocked(detail.get('tags', []), blocked):
+                    continue
 
-            illust = Illust(
-                pixiv_id=pixiv_id,
-                title=item.get('title', ''),
-                user_id=int(item.get('userId', 0)),
-                user_name=item.get('userName', ''),
-                page_count=item.get('pageCount', 1),
-                bookmark_count=detail['bookmark_count'],
-                thumb_url=item.get('url', ''),
-                upload_date=_parse_date(item.get('updateDate')),
-            )
-            illust.tags_list = _parse_tags(item.get('tags', []))
-            illust.original_urls_list = detail['original_urls']
-            db.add(illust)
-            db.flush()
-            results.append(illust.to_dict())
+                item = next((i for i in illusts_data if int(i['id']) == pixiv_id), None)
+                if item is None:
+                    continue
 
-            time.sleep(0.5)
+                illust = Illust(
+                    pixiv_id=pixiv_id,
+                    title=item.get('title', ''),
+                    user_id=int(item.get('userId', 0)),
+                    user_name=item.get('userName', ''),
+                    page_count=item.get('pageCount', 1),
+                    bookmark_count=detail['bookmark_count'],
+                    thumb_url=item.get('url', ''),
+                    upload_date=_parse_date(item.get('updateDate')),
+                )
+                illust.tags_list = _parse_tags(item.get('tags', []))
+                illust.original_urls_list = detail['original_urls']
+                db.add(illust)
+                db.flush()
+                results.append(illust.to_dict())
 
-        # 记录已抓取到的最大页码
-        setting = db.query(Setting).filter(Setting.key == search_key).first()
-        if setting:
-            setting.current_page = max(setting.current_page, page)
-        else:
-            db.add(Setting(key=search_key, current_page=page))
-        db.commit()
+        safe_commit(db)
 
-    total_pages = min((total + PER_PAGE - 1) // PER_PAGE, SEARCH_PAGES) if total else SEARCH_PAGES
+    total_pages = min((total + PER_PAGE - 1) // PER_PAGE, max_pages) if total else max_pages
     has_more = page < total_pages
+
+    return results, has_more
+
+
+def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
+                     min_bookmarks: int = 0) -> tuple[list[dict], bool]:
+    """Browse Pixiv discovery (all works) without a specific tag."""
+    session = _build_session()
+    url = (
+        f'https://www.pixiv.net/ajax/discovery/artworks'
+        f'?mode=all&p={page}&limit=60&order={sort_order}'
+    )
+
+    try:
+        resp = session.get(url, timeout=DETAIL_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.error(f'Discovery API failed: {e}')
+        return [], False
+
+    if data.get('error'):
+        logger.error(f'Discovery API error: {data.get("message")}')
+        return [], False
+
+    body = data.get('body', {})
+    thumbnails = body.get('thumbnails', {}).get('illust', body.get('illusts', []))
+    illusts_data = [t for t in thumbnails if not t.get('type') or t.get('type') == 'illust']
+    if not illusts_data:
+        return [], False
+
+    total = body.get('total', 0)
+    total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE) if total else 1
+    has_more = page < total_pages
+
+    with get_session() as db:
+        results = []
+        to_fetch = []
+        blocked = _get_blocked_tags(db)
+
+        for item in illusts_data:
+            pixiv_id = int(item['id'])
+
+            existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+            if existing:
+                if existing.bookmark_count >= min_bookmarks and not _is_blocked(existing.tags_list, blocked):
+                    results.append(existing.to_dict())
+                continue
+
+            to_fetch.append(pixiv_id)
+
+        if to_fetch:
+            details = _fetch_details_parallel(to_fetch)
+            for pixiv_id in to_fetch:
+                detail = details.get(pixiv_id)
+                if detail is None or detail['bookmark_count'] < min_bookmarks:
+                    continue
+                if _is_blocked(detail.get('tags', []), blocked):
+                    continue
+
+                item = next((i for i in illusts_data if int(i['id']) == pixiv_id), None)
+                if item is None:
+                    continue
+
+                illust = Illust(
+                    pixiv_id=pixiv_id,
+                    title=item.get('title', ''),
+                    user_id=int(item.get('userId', 0)),
+                    user_name=item.get('userName', ''),
+                    page_count=item.get('pageCount', 1),
+                    bookmark_count=detail['bookmark_count'],
+                    thumb_url=item.get('url', ''),
+                    upload_date=_parse_date(item.get('updateDate')),
+                )
+                illust.tags_list = _parse_tags(item.get('tags', []))
+                illust.original_urls_list = detail['original_urls']
+                db.add(illust)
+                db.flush()
+                results.append(illust.to_dict())
+
+        safe_commit(db)
 
     return results, has_more
 
 
 def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1) -> tuple[list[dict], bool]:
     """Search by user ID. page is 1-based. Returns (results, has_more)."""
-    search_key = _make_search_key('user', user_id, min_bookmarks)
     session = _build_session()
 
     profile_url = f'https://www.pixiv.net/ajax/user/{user_id}/profile/all'
@@ -241,52 +387,124 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1) -> tuple
 
     with get_session() as db:
         results = []
-        for pixiv_id in page_ids:
-            if db.query(DeletedRecord).filter(DeletedRecord.pixiv_id == pixiv_id).first():
-                continue
+        to_fetch = []
+        blocked = _get_blocked_tags(db)
 
+        # 第一遍：分离已入库和需抓取的作品
+        for pixiv_id in page_ids:
             existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if existing:
-                if existing.bookmark_count >= min_bookmarks:
+                if existing.bookmark_count >= min_bookmarks and not _is_blocked(existing.tags_list, blocked):
                     results.append(existing.to_dict())
                 continue
 
-            detail = _get_illust_detail(session, pixiv_id)
-            if detail is None:
-                continue
+            to_fetch.append(pixiv_id)
 
-            if detail['bookmark_count'] < min_bookmarks:
-                continue
+        # 并行获取详情
+        if to_fetch:
+            details = _fetch_details_parallel(to_fetch)
+            for pixiv_id in to_fetch:
+                detail = details.get(pixiv_id)
+                if detail is None or detail['bookmark_count'] < min_bookmarks:
+                    continue
+                if _is_blocked(detail.get('tags', []), blocked):
+                    continue
 
-            illust = Illust(
-                pixiv_id=pixiv_id,
-                title=detail['title'],
-                user_id=detail['user_id'],
-                user_name=detail['user_name'],
-                page_count=detail['page_count'],
-                bookmark_count=detail['bookmark_count'],
-                thumb_url=detail['thumb_url'],
-                upload_date=_parse_date(detail['upload_date']),
-            )
-            illust.tags_list = detail['tags']
-            illust.original_urls_list = detail['original_urls']
-            db.add(illust)
-            db.flush()
-            results.append(illust.to_dict())
+                illust = Illust(
+                    pixiv_id=pixiv_id,
+                    title=detail['title'],
+                    user_id=detail['user_id'],
+                    user_name=detail['user_name'],
+                    page_count=detail['page_count'],
+                    bookmark_count=detail['bookmark_count'],
+                    thumb_url=detail['thumb_url'],
+                    upload_date=_parse_date(detail['upload_date']),
+                )
+                illust.tags_list = detail['tags']
+                illust.original_urls_list = detail['original_urls']
+                db.add(illust)
+                db.flush()
+                results.append(illust.to_dict())
 
-            time.sleep(0.5)
-
-        setting = db.query(Setting).filter(Setting.key == search_key).first()
-        if setting:
-            setting.current_page = max(setting.current_page, page)
-        else:
-            db.add(Setting(key=search_key, current_page=page))
-        db.commit()
+        safe_commit(db)
 
     max_pages = (total + PER_PAGE - 1) // PER_PAGE
     has_more = page < max_pages
 
     return results, has_more
+
+
+def fetch_following(page: int = 1) -> tuple[list[dict], bool]:
+    """Fetch latest works from followed artists."""
+    session = _build_session()
+    url = f'https://www.pixiv.net/ajax/follow_latest/illust?mode=all&p={page}'
+    try:
+        resp = session.get(url, timeout=DETAIL_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.error(f'Follow latest API failed: {e}')
+        return [], False
+
+    if data.get('error'):
+        logger.error(f'Follow latest API error: {data.get("message")}')
+        return [], False
+
+    body = data.get('body', {})
+    illusts_data = body.get('thumbnails', {}).get('illust', [])
+    if not illusts_data:
+        return [], False
+
+    has_next = not body.get('page', {}).get('isLastPage', True)
+
+    with get_session() as db:
+        results = []
+        to_fetch = []
+        blocked = _get_blocked_tags(db)
+
+        for item in illusts_data:
+            pixiv_id = int(item['id'])
+
+            existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+            if existing:
+                if not _is_blocked(existing.tags_list, blocked):
+                    results.append(existing.to_dict())
+                continue
+
+            to_fetch.append(pixiv_id)
+
+        if to_fetch:
+            details = _fetch_details_parallel(to_fetch)
+            for pixiv_id in to_fetch:
+                detail = details.get(pixiv_id)
+                if detail is None:
+                    continue
+                if _is_blocked(detail.get('tags', []), blocked):
+                    continue
+
+                item = next((i for i in illusts_data if int(i['id']) == pixiv_id), None)
+                if item is None:
+                    continue
+
+                illust = Illust(
+                    pixiv_id=pixiv_id,
+                    title=item.get('title', ''),
+                    user_id=int(item.get('userId', 0)),
+                    user_name=item.get('userName', ''),
+                    page_count=item.get('pageCount', 1),
+                    bookmark_count=detail['bookmark_count'],
+                    thumb_url=item.get('url', ''),
+                    upload_date=_parse_date(item.get('updateDate')),
+                )
+                illust.tags_list = _parse_tags(item.get('tags', []))
+                illust.original_urls_list = detail['original_urls']
+                db.add(illust)
+                db.flush()
+                results.append(illust.to_dict())
+
+        safe_commit(db)
+
+    return results, has_next
 
 
 def _parse_date(date_str: str | None) -> datetime | None:

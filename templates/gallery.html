@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图库 - Pixiv Viewer</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+:root {
+  --accent: #7c3aed;
+  --accent-light: #a78bfa;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: #0b0b12;
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Navbar ── */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(11,11,18,.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  padding: 0.75rem 0;
+}
+.navbar-brand {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: #fff;
+  text-decoration: none;
+}
+.navbar-brand:hover { color: #fff; }
+.nav-link {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary) !important;
+  padding: 0.4rem 0.9rem !important;
+  border-radius: 6px;
+  transition: all 0.15s;
+  text-decoration: none;
+}
+.nav-link:hover { color: #fff !important; background: rgba(255,255,255,.06); }
+.nav-link.active { color: #fff !important; background: rgba(124,58,237,.2); }
+
+/* ── Gallery Cards ── */
+.gallery-card {
+  border: none;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.05);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  height: 100%;
+}
+.gallery-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
+}
+
+.card-img-wrap {
+  position: relative;
+  background: #1e1b2e;
+  aspect-ratio: 250 / 250;
+  overflow: hidden;
+}
+.card-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.size-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  background: rgba(0,0,0,.65);
+  backdrop-filter: blur(6px);
+  color: #fff;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+
+.card-body { padding: 0.75rem; }
+.card-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-info { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.3rem; }
+.tags-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin: 0.3rem 0; }
+.tag-badge {
+  font-size: 0.65rem;
+  background: rgba(255,255,255,.05) !important;
+  color: var(--text-muted) !important;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+/* ── Buttons ── */
+.btn {
+  font-weight: 500;
+  border-radius: 8px;
+  transition: all 0.15s;
+}
+.btn-outline-danger {
+  color: #f87171;
+  border-color: rgba(239,68,68,.2);
+}
+.btn-outline-danger:hover { background: rgba(239,68,68,.1); color: #fca5a5; }
+.btn-outline-secondary { color: var(--text-secondary); border-color: rgba(255,255,255,.1); }
+.btn-outline-secondary:hover { background: rgba(255,255,255,.05); color: #fff; }
+.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.76rem; }
+.btn-close-white { filter: invert(1); }
+
+/* ── Empty State ── */
+.empty-state { text-align: center; padding: 5rem 1rem; color: var(--text-muted); }
+.empty-state svg { width: 64px; height: 64px; margin-bottom: 1rem; opacity: 0.25; }
+
+/* ── Stats ── */
+#stats { color: var(--text-muted) !important; }
+
+/* ── Toast ── */
+.toast-container { z-index: 1060; }
+#liveToast {
+  background: rgba(30,27,46,.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(239,68,68,.15);
+  border-radius: 10px;
+  color: #fca5a5;
+}
+
+/* ── Modals ── */
+.modal-content {
+  background: #1a1a2e;
+  border: 1px solid rgba(255,255,255,.08);
+  color: var(--text-primary);
+}
+.modal-header { border-color: rgba(255,255,255,.06); }
+.modal-footer { border-color: rgba(255,255,255,.06); }
+.bg-dark { background: #0d0d1a !important; }
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="container">
+    <a class="navbar-brand" href="/">Pixiv Viewer</a>
+    <div class="d-flex gap-1">
+      <a class="nav-link" href="/">搜索</a>
+      <a class="nav-link active" href="/gallery">图库</a>
+      <a class="nav-link" href="/downloads">下载</a>
+      <a class="nav-link" href="/logs">日志</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container mt-3">
+  <h5 class="mb-3">已下载作品</h5>
+  <div id="cardGrid" class="row"></div>
+  <div id="emptyState" class="empty-state" style="display:none;">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+    <h6>暂无已下载作品</h6>
+    <p class="small">搜索作品并下载后在此查看</p>
+  </div>
+  <div id="stats" class="small mb-3" style="display:none;"></div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3">
+  <div id="liveToast" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox Modal -->
+<div class="modal fade" id="lightboxModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content bg-dark border-0">
+      <div class="modal-header border-0 py-1">
+        <span id="lightboxTitle" class="text-white small"></span>
+        <span id="lightboxPage" class="text-white-50 small ms-2"></span>
+        <button class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body text-center p-0 position-relative">
+        <img id="lightboxImg" src="" class="img-fluid" style="max-height:85vh;" alt="">
+        <button id="lightboxPrev" class="btn btn-dark position-absolute start-0 top-50 translate-middle-y ms-2 opacity-75" style="display:none;">&#9664;</button>
+        <button id="lightboxNext" class="btn btn-dark position-absolute end-0 top-50 translate-middle-y me-2 opacity-75" style="display:none;">&#9654;</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Confirm Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">确认删除</h6>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body small" id="deleteModalBody"></div>
+      <div class="modal-footer py-1">
+        <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+        <button class="btn btn-danger btn-sm" id="confirmDeleteBtn">删除</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const csrfToken = '{{ csrf_token | safe }}';
+const $ = s => document.querySelector(s);
+
+let deleteTarget = null;
+const deleteModal = new bootstrap.Modal($('#deleteModal'));
+
+fetch('/api/gallery')
+  .then(r => r.json())
+  .then(data => {
+    if (data.length === 0) {
+      $('#emptyState').style.display = 'block';
+      return;
+    }
+    let totalSize = 0;
+    data.forEach(item => {
+      totalSize += item.file_size || 0;
+      renderCard(item);
+    });
+    $('#stats').style.display = 'block';
+    $('#stats').textContent = `共 ${data.length} 个作品，总大小 ${fmtSize(totalSize)}`;
+  })
+  .catch(() => showToast('加载图库失败'));
+
+function renderCard(r) {
+  const tags = (r.tags || []).slice(0, 6).map(t =>
+    `<span class="badge tag-badge">${escHtml(t)}</span>`
+  ).join('');
+
+  const thumbUrl = r.thumb_url
+    ? `/thumb/${btoa(r.thumb_url).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`
+    : '';
+
+  const localUrls = r.local_urls || [];
+  const urlsAttr = escAttr(JSON.stringify(localUrls));
+  const hasImages = localUrls.length > 0;
+
+  const col = document.createElement('div');
+  col.className = 'col-lg-3 col-md-4 col-sm-6 col-12 mb-3';
+  col.innerHTML = `
+    <div class="gallery-card" data-urls="${urlsAttr}" style="cursor:${hasImages ? 'pointer' : 'default'}">
+      <div class="card-img-wrap">
+        <img src="${thumbUrl}" loading="lazy" onerror="this.style.display='none'">
+        <span class="size-badge">${fmtSize(r.file_size || 0)}</span>
+      </div>
+      <div class="card-body">
+        <div class="card-title" title="${escAttr(r.title)}">${escHtml(r.title)}</div>
+        <div class="card-info">#${r.pixiv_id} · ${escHtml(r.user_name)} · ${r.file_count || 1} 文件</div>
+        <div class="tags-wrap">${tags}</div>
+        <button class="btn btn-outline-danger btn-sm w-100 delete-btn" data-pid="${r.pixiv_id}">删除</button>
+      </div>
+    </div>`;
+  $('#cardGrid').appendChild(col);
+
+  if (hasImages) {
+    col.querySelector('.gallery-card').addEventListener('click', function(e) {
+      if (e.target.closest('.delete-btn')) return;
+      openLightbox(JSON.parse(this.dataset.urls), r.title || `#${r.pixiv_id}`);
+    });
+  }
+
+  col.querySelector('.delete-btn').addEventListener('click', function() {
+    deleteTarget = r.pixiv_id;
+    $('#deleteModalBody').textContent = `确定删除 #${r.pixiv_id} 的所有已下载文件？`;
+    deleteModal.show();
+  });
+}
+
+$('#confirmDeleteBtn').addEventListener('click', async () => {
+  if (!deleteTarget) return;
+  try {
+    const resp = await fetch(`/api/gallery/${deleteTarget}`, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': csrfToken },
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      showToast(data.message);
+      setTimeout(() => location.reload(), 800);
+    } else {
+      showToast(data.error || '删除失败');
+    }
+  } catch {
+    showToast('网络错误');
+  }
+  deleteModal.hide();
+  deleteTarget = null;
+});
+
+// ── Lightbox ──
+let lightboxUrls = [];
+let lightboxIndex = 0;
+const lightboxModal = new bootstrap.Modal($('#lightboxModal'));
+
+function openLightbox(urls, title) {
+  lightboxUrls = urls;
+  lightboxIndex = 0;
+  $('#lightboxTitle').textContent = title;
+  showLightboxImage();
+  lightboxModal.show();
+}
+
+function showLightboxImage() {
+  $('#lightboxImg').src = lightboxUrls[lightboxIndex];
+  const page = lightboxUrls.length > 1 ? ` ${lightboxIndex + 1}/${lightboxUrls.length}` : '';
+  $('#lightboxPage').textContent = page;
+  $('#lightboxPrev').style.display = lightboxUrls.length > 1 ? '' : 'none';
+  $('#lightboxNext').style.display = lightboxUrls.length > 1 ? '' : 'none';
+}
+
+$('#lightboxPrev').addEventListener('click', () => {
+  lightboxIndex = (lightboxIndex - 1 + lightboxUrls.length) % lightboxUrls.length;
+  showLightboxImage();
+});
+
+$('#lightboxNext').addEventListener('click', () => {
+  lightboxIndex = (lightboxIndex + 1) % lightboxUrls.length;
+  showLightboxImage();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (!document.querySelector('#lightboxModal.show')) return;
+  if (e.key === 'ArrowLeft') $('#lightboxPrev').click();
+  if (e.key === 'ArrowRight') $('#lightboxNext').click();
+});
+
+function showToast(msg) {
+  const toast = $('#liveToast');
+  toast.className = 'toast align-items-center border-0';
+  toast.style.background = msg.includes('失败') || msg.includes('错误') ? 'rgba(30,27,46,.92)' : 'rgba(5,150,105,.85)';
+  $('#toastMsg').textContent = msg;
+  bootstrap.Toast.getOrCreateInstance(toast).show();
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+function escAttr(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
