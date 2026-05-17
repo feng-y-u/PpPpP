@@ -33,3 +33,19 @@ MAX_BOOKMARKS_DEFAULT = 0  # 默认最低收藏数
 # 自动关注抓取
 AUTO_FOLLOW_INTERVAL = 600   # 检查间隔（秒），0 禁用
 AUTO_FOLLOW_DOWNLOAD = False # 是否自动下载新作品
+
+# 网络代理 / GFW 绕过
+PROXY = ''                   # HTTP/SOCKS5 代理, 如 'http://127.0.0.1:7890', 留空禁用
+BYPASS_SNI = True           # 启用 SNI 绕过（绕过 SNI 检测, 需要 PIXIV_BASE_URL 为 www.pixiv.net）
+
+# Pixiv SNI 绕过后备 IP（从 pixiv-api-http-main 项目获取, 可手动更新）
+PIXIV_ORIGIN_IPS = [
+    '210.140.92.183',
+    '210.140.92.187',
+    '210.140.92.193',
+    '210.140.131.226',
+    '210.140.131.223',
+    '210.140.131.218',
+    '210.140.131.199',
+    '210.140.131.201',
+]
