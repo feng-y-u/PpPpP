@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -120,6 +121,7 @@ def _extract_original_urls(detail_body: dict) -> list[str]:
 
 def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
     url = f'https://www.pixiv.net/ajax/illust/{pixiv_id}'
+    time.sleep(random.uniform(0.1, 0.6))
     for attempt in range(DETAIL_MAX_RETRIES + 1):
         try:
             resp = session.get(url, timeout=DETAIL_TIMEOUT)

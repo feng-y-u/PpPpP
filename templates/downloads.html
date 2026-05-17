@@ -135,6 +135,7 @@ body {
     <div class="d-flex gap-1">
       <a class="nav-link" href="/">搜索</a>
       <a class="nav-link" href="/gallery">图库</a>
+      <a class="nav-link" href="/bulk">批量</a>
       <a class="nav-link active" href="/downloads">下载</a>
       <a class="nav-link" href="/logs">日志</a>
     </div>
@@ -160,16 +161,16 @@ body {
         </div>
       </div>
 
-      <!-- Failed -->
       <div class="status-card card">
-        <div class="card-header bg-danger bg-opacity-25 text-danger border-0 d-flex align-items-center gap-2">
-          下载失败
-          <span id="failedCount" class="badge bg-danger ms-auto"></span>
+        <div class="card-header bg-info bg-opacity-25 text-info border-0 d-flex align-items-center gap-2">
+          等待中
+          <span id="queuedCount" class="badge bg-info ms-auto"></span>
         </div>
-        <div class="card-body p-0" id="failedList" style="max-height:300px;overflow-y:auto;">
-          <div class="empty-state small">暂无失败记录</div>
+        <div class="card-body p-0" id="queuedList">
+          <div class="empty-state small">队列为空</div>
         </div>
       </div>
+
     </div>
 
     <!-- Right Column: Completed + Logs -->
@@ -211,8 +212,8 @@ async function loadData() {
     const resp = await fetch('/api/downloads');
     const data = await resp.json();
     renderActive(data.active);
+    renderQueued(data.queued || []);
     renderCompleted(data.completed);
-    renderFailed(data.failed);
     renderLogs(data.logs);
   } catch {}
 }
@@ -277,6 +278,48 @@ function renderActive(items) {
   });
 }
 
+function renderQueued(items) {
+  const container = $('#queuedList');
+  $('#queuedCount').textContent = items.length || '';
+
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state small">队列为空</div>';
+    return;
+  }
+
+  container.innerHTML = items.map(i => `
+    <div class="dl-item">
+      <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
+           onerror="this.style.display='none'" loading="lazy">
+      <div class="dl-info">
+        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
+        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P</div>
+        <div class="progress mt-1">
+          <div class="progress-bar bg-info" style="width:100%"></div>
+        </div>
+      </div>
+      <div class="dl-status d-flex gap-1">
+        <button class="btn btn-outline-danger btn-sm cancel-dl-btn" data-pid="${i.pixiv_id}">取消</button>
+      </div>
+    </div>`).join('');
+
+  container.querySelectorAll('.cancel-dl-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '取消中...';
+      try {
+        const t = await fetch('/csrf-token').then(r => r.json());
+        await fetch(`/download/cancel/${btn.dataset.pid}`, {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': t.token },
+        });
+        loadData();
+      } catch { btn.disabled = false; btn.textContent = '取消'; }
+    });
+  });
+}
+
 function renderCompleted(items) {
   const container = $('#completedList');
   $('#completedCount').textContent = items.length || '';
@@ -298,45 +341,6 @@ function renderCompleted(items) {
         <a href="/download_file/${i.pixiv_id}" class="btn btn-success btn-sm">下载</a>
       </div>
     </div>`).join('');
-}
-
-function renderFailed(items) {
-  const container = $('#failedList');
-  $('#failedCount').textContent = items.length || '';
-
-  if (!items.length) {
-    container.innerHTML = '<div class="empty-state small">暂无失败记录</div>';
-    return;
-  }
-
-  container.innerHTML = items.map(i => `
-    <div class="dl-item">
-      <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
-           onerror="this.style.display='none'" loading="lazy">
-      <div class="dl-info">
-        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
-        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P</div>
-      </div>
-      <div class="dl-status">
-        <button class="btn btn-outline-warning btn-sm retry-dl-btn" data-pid="${i.pixiv_id}">重试</button>
-      </div>
-    </div>`).join('');
-
-  container.querySelectorAll('.retry-dl-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      btn.textContent = '提交中...';
-      try {
-        const t = await fetch('/csrf-token').then(r => r.json());
-        const resp = await fetch(`/download/${btn.dataset.pid}`, {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': t.token, 'Content-Type': 'application/json' },
-        });
-        if (resp.ok) { loadData(); }
-        else { btn.disabled = false; btn.textContent = '重试'; }
-      } catch { btn.disabled = false; btn.textContent = '重试'; }
-    });
-  });
 }
 
 function renderLogs(logs) {

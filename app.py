@@ -8,7 +8,7 @@ import time
 import zipfile
 from base64 import urlsafe_b64decode
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO
 
@@ -21,7 +21,7 @@ from flask import (
 
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
-    MAX_BOOKMARKS_DEFAULT,
+    MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, safe_commit
 from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery
@@ -86,9 +86,62 @@ def _reset_stuck_downloads():
 
 _reset_stuck_downloads()
 
+# ── Auto-Follow Worker ──
+_auto_follow_state = {
+    'last_check': None,
+    'last_count': 0,
+    'interval': AUTO_FOLLOW_INTERVAL,
+    'auto_download': AUTO_FOLLOW_DOWNLOAD,
+    'running': True,
+}
+
+def _auto_follow_worker():
+    while _auto_follow_state['running']:
+        interval = _auto_follow_state['interval']
+        if interval <= 0:
+            time.sleep(30)
+            continue
+        try:
+            results, _ = fetch_following(page=1)
+            new_count = 0
+            for r in results:
+                with get_session() as db:
+                    existing = db.query(Illust).filter(Illust.pixiv_id == r['pixiv_id']).first()
+                    if existing:
+                        continue
+                    illust = Illust(
+                        pixiv_id=r['pixiv_id'],
+                        title=r['title'],
+                        user_id=r['user_id'],
+                        user_name=r['user_name'],
+                        page_count=r['page_count'],
+                        bookmark_count=r['bookmark_count'],
+                        thumb_url=r['thumb_url'],
+                        upload_date=r['upload_date'],
+                    )
+                    illust.tags_list = r.get('tags', [])
+                    illust.original_urls_list = r.get('original_urls', [])
+                    db.add(illust)
+                    safe_commit(db)
+                    new_count += 1
+                    if _auto_follow_state['auto_download'] and illust.original_urls_list:
+                        _queued_downloads.add(r['pixiv_id'])
+                        download_executor.submit(_download_illust, r['pixiv_id'])
+            _auto_follow_state['last_check'] = datetime.now(timezone.utc).isoformat()
+            _auto_follow_state['last_count'] = new_count
+            if new_count:
+                logger.info(f'Auto-follow: found {new_count} new works')
+        except Exception as e:
+            logger.error(f'Auto-follow error: {e}')
+        time.sleep(interval)
+
+_auto_follow_thread = threading.Thread(target=_auto_follow_worker, daemon=True)
+_auto_follow_thread.start()
+
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
 download_locks: dict[int, threading.Lock] = {}
 download_cancellations: set[int] = set()
+_queued_downloads: set[int] = set()
 
 
 def _enrich_with_download_status(results: list[dict]) -> list[dict]:
@@ -113,6 +166,7 @@ def _download_illust(pixiv_id: int):
             if not illust:
                 return
 
+            _queued_downloads.discard(pixiv_id)
             illust.download_status = 'downloading'
             db.add(DownloadLog(pixiv_id=pixiv_id, action='start', message=f'开始下载: {illust.title or pixiv_id}'))
             safe_commit(db)
@@ -184,6 +238,7 @@ def _download_illust(pixiv_id: int):
         lock.release()
         download_locks.pop(pixiv_id, None)
         download_cancellations.discard(pixiv_id)
+        _queued_downloads.discard(pixiv_id)
 
 
 def _extract_ext(url: str) -> str:
@@ -299,6 +354,7 @@ def trigger_download(pixiv_id):
         if not illust.original_urls_list:
             return jsonify({'error': '无原图链接'}), 400
 
+    _queued_downloads.add(pixiv_id)
     download_executor.submit(_download_illust, pixiv_id)
     return jsonify({'status': 'accepted', 'message': '已加入下载队列'})
 
@@ -324,6 +380,7 @@ def batch_download():
             if illust.download_status in ('done', 'downloading'):
                 skipped += 1
                 continue
+            _queued_downloads.add(pid)
             download_executor.submit(_download_illust, pid)
             accepted += 1
 
@@ -337,9 +394,11 @@ def cancel_download(pixiv_id):
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
             return jsonify({'error': '作品不存在'}), 404
-        if illust.download_status != 'downloading':
+        is_queued = pixiv_id in _queued_downloads
+        if illust.download_status != 'downloading' and not is_queued:
             return jsonify({'error': '该作品未在下载中'}), 400
 
+    _queued_downloads.discard(pixiv_id)
     download_cancellations.add(pixiv_id)
     return jsonify({'status': 'cancelling', 'message': '正在取消...'})
 
@@ -351,9 +410,11 @@ def reset_download(pixiv_id):
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
             return jsonify({'error': '作品不存在'}), 404
-        if illust.download_status != 'downloading':
+        is_queued = pixiv_id in _queued_downloads
+        if illust.download_status != 'downloading' and not is_queued:
             return jsonify({'error': '该作品未在下载中'}), 400
 
+        _queued_downloads.discard(pixiv_id)
         download_cancellations.add(pixiv_id)
         # Clean up partial files
         work_dir = _get_download_dir(pixiv_id)
@@ -372,6 +433,7 @@ def reset_download(pixiv_id):
         db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message='下载已手动重置'))
         safe_commit(db)
         download_cancellations.discard(pixiv_id)
+        _queued_downloads.discard(pixiv_id)
         return jsonify({'status': 'reset', 'message': '已重置'})
 
 
@@ -491,12 +553,15 @@ def gallery():
 
 @app.route('/api/gallery')
 def api_gallery():
+    tag_filter = request.args.get('tag', '').strip()
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
         illusts = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).all()
         results = []
         for i in illusts:
             if blocked and set(i.tags_list) & blocked:
+                continue
+            if tag_filter and tag_filter not in i.tags_list:
                 continue
             d = i.to_dict()
             paths = i.local_paths_list or []
@@ -506,6 +571,17 @@ def api_gallery():
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
         return jsonify(results)
+
+
+@app.route('/api/gallery/tags')
+def api_gallery_tags():
+    with get_session() as db:
+        illusts = db.query(Illust).filter(Illust.download_status == 'done').all()
+        tags = set()
+        for i in illusts:
+            for t in i.tags_list:
+                tags.add(t)
+        return jsonify(sorted(tags))
 
 
 @app.route('/api/gallery/<int:pixiv_id>', methods=['DELETE'])
@@ -574,7 +650,137 @@ def api_logs():
         })
 
 
+# ── Auto-Follow Control ──
+
+@app.route('/api/auto-follow/status')
+def auto_follow_status():
+    return jsonify(_auto_follow_state)
+
+@app.route('/api/auto-follow/config', methods=['POST'])
+def auto_follow_config():
+    body = request.get_json(silent=True) or {}
+    if 'interval' in body:
+        try:
+            _auto_follow_state['interval'] = max(0, int(body['interval']))
+        except (ValueError, TypeError):
+            return jsonify({'error': 'interval must be integer seconds'}), 400
+    if 'auto_download' in body:
+        _auto_follow_state['auto_download'] = bool(body['auto_download'])
+    return jsonify(_auto_follow_state)
+
+
+# ── Bulk Download ──
+
+_bulk_tasks: dict[str, dict] = {}
+
+def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, max_pages: int):
+    task = _bulk_tasks[task_id]
+    page = 1
+    while page <= max_pages and not task['cancelled']:
+        task['current_page'] = page
+        task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索第 {page} 页...'))
+        try:
+            results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or')
+        except Exception as e:
+            task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索失败: {e}'))
+            break
+        task['log'].append((datetime.now(timezone.utc).isoformat(), f'第 {page} 页找到 {len(results)} 件'))
+        for r in results:
+            if task['cancelled']:
+                break
+            pixiv_id = r['pixiv_id']
+            with get_session() as db:
+                existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+                if not existing:
+                    illust = Illust(
+                        pixiv_id=pixiv_id, title=r['title'], user_id=r['user_id'],
+                        user_name=r['user_name'], page_count=r['page_count'],
+                        bookmark_count=r['bookmark_count'], thumb_url=r['thumb_url'],
+                        upload_date=r['upload_date'],
+                    )
+                    illust.tags_list = r.get('tags', [])
+                    illust.original_urls_list = r.get('original_urls', [])
+                    db.add(illust)
+                    safe_commit(db)
+            if r.get('download_status') != 'done':
+                _download_illust(pixiv_id)
+            with get_session() as db:
+                illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+                if illust and illust.download_status == 'done':
+                    task['downloaded'] += 1
+                    task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {r.get("title","")[:30]}'))
+                else:
+                    task['failed'] += 1
+                    task['log'].append((datetime.now(timezone.utc).isoformat(), f'✗ #{pixiv_id} 下载失败'))
+            if task['cancelled']:
+                break
+            time.sleep(1.5)
+        if not has_more:
+            break
+        page += 1
+        time.sleep(2)
+    task['status'] = 'stopped' if task['cancelled'] else 'done'
+    task['log'].append((datetime.now(timezone.utc).isoformat(),
+        f'完成: 下载 {task["downloaded"]} 件, 失败 {task["failed"]} 件'))
+
+
+@app.route('/api/bulk/start', methods=['POST'])
+@_csrf_required
+def bulk_start():
+    body = request.get_json(silent=True) or {}
+    tag = body.get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '请输入标签'}), 400
+    min_bookmarks = max(0, int(body.get('min_bookmarks', 0) or 0))
+    sort_order = body.get('sort', 'date_d')
+    if sort_order not in ('popular_d', 'date_d'):
+        sort_order = 'date_d'
+    max_pages = max(1, min(100, int(body.get('max_pages', 10) or 10)))
+    task_id = secrets.token_hex(8)
+    _bulk_tasks[task_id] = {
+        'tag': tag, 'min_bookmarks': min_bookmarks, 'sort': sort_order,
+        'max_pages': max_pages, 'current_page': 0, 'downloaded': 0, 'failed': 0,
+        'status': 'running', 'cancelled': False, 'log': [],
+    }
+    _bulk_tasks[task_id]['log'].append((datetime.now(timezone.utc).isoformat(),
+        f'开始: 标签={tag}, 收藏≥{min_bookmarks}, 排序={sort_order}, 最多{max_pages}页'))
+    threading.Thread(target=_bulk_worker, args=(task_id, tag, min_bookmarks, sort_order, max_pages), daemon=True).start()
+    return jsonify({'task_id': task_id})
+
+
+@app.route('/api/bulk/status/<task_id>')
+def bulk_status(task_id):
+    task = _bulk_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    return jsonify({k: v for k, v in task.items() if k != 'cancelled'})
+
+
+@app.route('/api/bulk/running')
+def bulk_running():
+    """Return the currently running task if any."""
+    for task_id, task in _bulk_tasks.items():
+        if task['status'] == 'running':
+            return jsonify({'task_id': task_id, **{k: v for k, v in task.items() if k != 'cancelled'}})
+    return jsonify({'task_id': None})
+
+
+@app.route('/api/bulk/stop/<task_id>', methods=['POST'])
+@_csrf_required
+def bulk_stop(task_id):
+    task = _bulk_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    task['cancelled'] = True
+    return jsonify({'status': 'stopping'})
+
+
 # ── Download Management ──
+
+@app.route('/bulk')
+def bulk_page():
+    return render_template('bulk.html', csrf_token=_get_csrf_token())
+
 
 @app.route('/downloads')
 def downloads_page():
@@ -585,8 +791,9 @@ def downloads_page():
 def api_downloads():
     with get_session() as db:
         active = db.query(Illust).filter(Illust.download_status == 'downloading').order_by(Illust.created_at.desc()).all()
+        queued_ids = list(_queued_downloads)
+        queued = db.query(Illust).filter(Illust.pixiv_id.in_(queued_ids)).order_by(Illust.created_at.desc()).all() if queued_ids else []
         completed = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).limit(30).all()
-        failed = db.query(Illust).filter(Illust.download_status == 'failed').order_by(Illust.created_at.desc()).limit(20).all()
         logs = (
             db.query(DownloadLog)
             .order_by(DownloadLog.created_at.desc())
@@ -594,8 +801,8 @@ def api_downloads():
         )
         return jsonify({
             'active': [i.to_dict() for i in active],
+            'queued': [i.to_dict() for i in queued],
             'completed': [i.to_dict() for i in completed],
-            'failed': [i.to_dict() for i in failed],
             'logs': [l.to_dict() for l in logs],
         })
 

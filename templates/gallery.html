@@ -133,6 +133,20 @@ body {
 .empty-state { text-align: center; padding: 5rem 1rem; color: var(--text-muted); }
 .empty-state svg { width: 64px; height: 64px; margin-bottom: 1rem; opacity: 0.25; }
 
+/* ── Tag Filter ── */
+.tag-filter-badge {
+  font-size: 0.72rem;
+  cursor: pointer;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
+  color: var(--text-secondary);
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  transition: all 0.15s;
+}
+.tag-filter-badge:hover { background: rgba(124,58,237,.15); color: #c4b5fd; }
+.tag-filter-badge.active { background: rgba(124,58,237,.25); color: #ddd6fe; border-color: rgba(124,58,237,.3); }
+
 /* ── Stats ── */
 #stats { color: var(--text-muted) !important; }
 
@@ -165,6 +179,7 @@ body {
     <div class="d-flex gap-1">
       <a class="nav-link" href="/">搜索</a>
       <a class="nav-link active" href="/gallery">图库</a>
+      <a class="nav-link" href="/bulk">批量</a>
       <a class="nav-link" href="/downloads">下载</a>
       <a class="nav-link" href="/logs">日志</a>
     </div>
@@ -173,6 +188,7 @@ body {
 
 <div class="container mt-3">
   <h5 class="mb-3">已下载作品</h5>
+  <div id="tagFilter" class="d-flex flex-wrap gap-1 mb-3"></div>
   <div id="cardGrid" class="row"></div>
   <div id="emptyState" class="empty-state" style="display:none;">
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
@@ -231,25 +247,55 @@ body {
 const csrfToken = '{{ csrf_token | safe }}';
 const $ = s => document.querySelector(s);
 
-let deleteTarget = null;
+let deleteTarget = null, activeTag = '';
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
-fetch('/api/gallery')
-  .then(r => r.json())
-  .then(data => {
-    if (data.length === 0) {
-      $('#emptyState').style.display = 'block';
-      return;
-    }
-    let totalSize = 0;
-    data.forEach(item => {
-      totalSize += item.file_size || 0;
-      renderCard(item);
+loadGallery();
+loadTags();
+
+function loadGallery() {
+  let url = '/api/gallery';
+  if (activeTag) url += `?tag=${encodeURIComponent(activeTag)}`;
+  fetch(url)
+    .then(r => r.json())
+    .then(data => {
+      $('#cardGrid').innerHTML = '';
+      if (data.length === 0) {
+        $('#emptyState').style.display = 'block';
+        $('#stats').style.display = 'none';
+        return;
+      }
+      $('#emptyState').style.display = 'none';
+      let totalSize = 0;
+      data.forEach(item => {
+        totalSize += item.file_size || 0;
+        renderCard(item);
+      });
+      $('#stats').style.display = 'block';
+      $('#stats').textContent = `共 ${data.length} 个作品，总大小 ${fmtSize(totalSize)}` + (activeTag ? ` · 标签: ${escHtml(activeTag)}` : '');
+    })
+    .catch(() => showToast('加载图库失败'));
+}
+
+function loadTags() {
+  fetch('/api/gallery/tags')
+    .then(r => r.json())
+    .then(tags => {
+      const filter = $('#tagFilter');
+      filter.innerHTML = tags.map(t => {
+        const cls = t === activeTag ? 'tag-filter-badge active' : 'tag-filter-badge';
+        return `<span class="${cls}" data-tag="${escAttr(t)}">${escHtml(t)}</span>`;
+      }).join('');
+      filter.querySelectorAll('.tag-filter-badge').forEach(b => {
+        b.addEventListener('click', () => {
+          const tag = b.dataset.tag;
+          activeTag = activeTag === tag ? '' : tag;
+          loadTags();
+          loadGallery();
+        });
+      });
     });
-    $('#stats').style.display = 'block';
-    $('#stats').textContent = `共 ${data.length} 个作品，总大小 ${fmtSize(totalSize)}`;
-  })
-  .catch(() => showToast('加载图库失败'));
+}
 
 function renderCard(r) {
   const tags = (r.tags || []).slice(0, 6).map(t =>
