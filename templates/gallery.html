@@ -144,6 +144,7 @@ body {
 
 /* ── Card Checkbox ── */
 .card-checkbox {
+  display: none;
   position: absolute;
   top: 8px; left: 8px;
   z-index: 5;
@@ -151,6 +152,7 @@ body {
   accent-color: var(--accent);
   cursor: pointer;
 }
+.batch-mode .card-checkbox { display: block; }
 
 /* ── Tag Filter ── */
 .tag-filter-badge {
@@ -207,12 +209,13 @@ body {
 
 <div class="container mt-3">
   <h5 class="mb-3">已下载作品</h5>
-  <div id="batchToolbar" class="d-flex align-items-center gap-2 mb-2" style="display:none;">
-    <input type="checkbox" id="selectAll" class="form-check-input" title="全选/取消全选">
-    <button id="btnSelectAll" class="btn btn-outline-secondary btn-sm">全选</button>
-    <button id="btnDeselectAll" class="btn btn-outline-secondary btn-sm">取消全选</button>
-    <button id="btnBatchDelete" class="btn btn-outline-danger btn-sm" disabled>删除选中</button>
-    <span id="batchCount" class="small" style="color:var(--text-muted);"></span>
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <button id="btnBatchMode" class="btn btn-outline-secondary btn-sm">多选</button>
+    <div id="batchToolbar" class="d-flex align-items-center gap-2" style="display:none;">
+      <button id="btnSelectAll" class="btn btn-outline-secondary btn-sm">全选</button>
+      <button id="btnBatchDelete" class="btn btn-outline-danger btn-sm" disabled>删除选中</button>
+      <span id="batchCount" class="small" style="color:var(--text-muted);"></span>
+    </div>
   </div>
   <div id="tagFilter" class="d-flex flex-wrap gap-1 mb-3"></div>
   <div id="cardGrid" class="row"></div>
@@ -274,7 +277,7 @@ const csrfToken = '{{ csrf_token | safe }}';
 const $ = s => document.querySelector(s);
 
 let deleteTarget = null, deleteMode = 'single', activeTag = '';
-let selectedPids = new Set();
+let selectedPids = new Set(), batchMode = false;
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
 loadGallery();
@@ -425,15 +428,29 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
 
 // ── Batch Selection ──
 
+function toggleBatchMode() {
+  batchMode = !batchMode;
+  if (batchMode) {
+    $('#cardGrid').classList.add('batch-mode');
+    $('#batchToolbar').style.display = 'flex';
+    $('#btnBatchMode').textContent = '取消';
+  } else {
+    $('#cardGrid').classList.remove('batch-mode');
+    $('#batchToolbar').style.display = 'none';
+    $('#btnBatchMode').textContent = '多选';
+    selectedPids.clear();
+    document.querySelectorAll('.card-checkbox').forEach(cb => cb.checked = false);
+  }
+  updateBatchUI();
+}
+
+$('#btnBatchMode').addEventListener('click', toggleBatchMode);
+
 function updateBatchUI() {
   const count = selectedPids.size;
   $('#btnBatchDelete').disabled = count === 0;
   $('#btnBatchDelete').textContent = count ? `删除选中 (${count})` : '删除选中';
   $('#batchCount').textContent = count ? `已选 ${count} 个` : '';
-  const totalCards = document.querySelectorAll('.card-checkbox').length;
-  $('#selectAll').checked = count === totalCards && totalCards > 0;
-  $('#selectAll').indeterminate = count > 0 && count < totalCards;
-  $('#batchToolbar').style.display = totalCards > 0 ? 'flex' : 'none';
 }
 
 $('#btnSelectAll').addEventListener('click', () => {
@@ -441,29 +458,6 @@ $('#btnSelectAll').addEventListener('click', () => {
     cb.checked = true;
     selectedPids.add(parseInt(cb.dataset.pid));
   });
-  updateBatchUI();
-});
-
-$('#btnDeselectAll').addEventListener('click', () => {
-  document.querySelectorAll('.card-checkbox').forEach(cb => {
-    cb.checked = false;
-    selectedPids.delete(parseInt(cb.dataset.pid));
-  });
-  updateBatchUI();
-});
-
-$('#selectAll').addEventListener('change', function() {
-  if (this.checked) {
-    document.querySelectorAll('.card-checkbox').forEach(cb => {
-      cb.checked = true;
-      selectedPids.add(parseInt(cb.dataset.pid));
-    });
-  } else {
-    document.querySelectorAll('.card-checkbox').forEach(cb => {
-      cb.checked = false;
-      selectedPids.delete(parseInt(cb.dataset.pid));
-    });
-  }
   updateBatchUI();
 });
 
