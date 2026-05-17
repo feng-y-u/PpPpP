@@ -233,10 +233,9 @@ function renderActive(items) {
            onerror="this.style.display='none'" loading="lazy">
       <div class="dl-info">
         <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
-        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P</div>
+        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P${progressText(i)}</div>
         <div class="progress mt-1">
-          <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
-               style="width:100%"></div>
+          <div class="progress-bar bg-primary" style="width:${progressPct(i)}%"></div>
         </div>
       </div>
       <div class="dl-status d-flex gap-1">
@@ -293,9 +292,9 @@ function renderQueued(items) {
            onerror="this.style.display='none'" loading="lazy">
       <div class="dl-info">
         <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
-        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P</div>
+        <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P · 等待中</div>
         <div class="progress mt-1">
-          <div class="progress-bar bg-info" style="width:100%"></div>
+          <div class="progress-bar bg-info" style="width:0%"></div>
         </div>
       </div>
       <div class="dl-status d-flex gap-1">
@@ -360,6 +359,16 @@ function renderLogs(logs) {
       <span class="text-muted float-end" style="font-size:0.7rem;">${time}</span>
     </div>`;
   }).join('');
+}
+
+function progressPct(i) {
+  if (i.progress && i.progress.total > 0) return Math.round((i.progress.current / i.progress.total) * 100);
+  return 0;
+}
+
+function progressText(i) {
+  if (i.progress && i.progress.total > 0) return ` · ${i.progress.current}/${i.progress.total}`;
+  return ' · ?/?';
 }
 
 function proxyThumb(url) {

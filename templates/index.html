@@ -708,6 +708,7 @@ function renderCard(r) {
   else btnHtml = `<button class="btn btn-dl btn-sm dl-btn" data-pid="${r.pixiv_id}">下载原图</button>`;
 
   const badges = [];
+  if (isDone) badges.push(`<span class="photo-badge" style="background:rgba(5,150,105,.7);">已下载</span>`);
   badges.push(`<span class="photo-badge">♥ ${fmtNum(r.bookmark_count)}</span>`);
   if (r.page_count > 1) badges.push(`<span class="photo-badge" style="background:rgba(124,58,237,.7);">${r.page_count}P</span>`);
 

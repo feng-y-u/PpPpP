@@ -5,6 +5,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -14,7 +15,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from config import (
-    COOKIE_PATH, SEARCH_PAGES, PER_PAGE,
+    COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
 )
 from models import Illust, BlockedTag, get_session, safe_commit
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _cookie_mtime = 0
 _cookie_value = ''
+_pixiv_hostname = urlparse(PIXIV_BASE_URL).hostname or 'www.pixiv.net'
 
 
 def _load_cookie():
@@ -46,11 +48,11 @@ def _build_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': 'https://www.pixiv.net/',
+        'Referer': '{PIXIV_BASE_URL}/',
         'Accept-Language': 'ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7',
     })
     s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
-    s.cookies.set('PHPSESSID', _cookie_value, domain='.pixiv.net')
+    s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
     s.verify = False
     retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503])
     adapter = HTTPAdapter(max_retries=retry)
@@ -127,7 +129,7 @@ def _extract_original_urls(detail_body: dict) -> list[str]:
 
 
 def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
-    url = f'https://www.pixiv.net/ajax/illust/{pixiv_id}'
+    url = f'{PIXIV_BASE_URL}/ajax/illust/{pixiv_id}'
     time.sleep(random.uniform(0.1, 0.6))
     for attempt in range(DETAIL_MAX_RETRIES + 1):
         try:
@@ -200,7 +202,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
     quoted = requests.utils.quote(pixiv_query)
     search_url = (
-        f'https://www.pixiv.net/ajax/search/illustrations/{quoted}'
+        f'{PIXIV_BASE_URL}/ajax/search/illustrations/{quoted}'
         f'?word={quoted}&order={sort_order}&mode={r18_mode}&p={page}'
         f'&s_mode=s_tag&type=illust'
     )
@@ -287,7 +289,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
     """Browse Pixiv discovery (all works) without a specific tag."""
     session = _build_session()
     url = (
-        f'https://www.pixiv.net/ajax/discovery/artworks'
+        f'{PIXIV_BASE_URL}/ajax/discovery/artworks'
         f'?mode={r18_mode}&p={page}&limit=60&order={sort_order}'
     )
 
@@ -368,7 +370,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
     """Search by user ID. page is 1-based. Returns (results, has_more)."""
     session = _build_session()
 
-    profile_url = f'https://www.pixiv.net/ajax/user/{user_id}/profile/all'
+    profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
     try:
         resp = session.get(profile_url, timeout=DETAIL_TIMEOUT)
         resp.raise_for_status()
@@ -450,7 +452,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
 def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], bool]:
     """Fetch latest works from followed artists."""
     session = _build_session()
-    url = f'https://www.pixiv.net/ajax/follow_latest/illust?mode={r18_mode}&p={page}'
+    url = f'{PIXIV_BASE_URL}/ajax/follow_latest/illust?mode={r18_mode}&p={page}'
     try:
         resp = session.get(url, timeout=DETAIL_TIMEOUT)
         resp.raise_for_status()
