@@ -133,6 +133,25 @@ body {
 .empty-state { text-align: center; padding: 5rem 1rem; color: var(--text-muted); }
 .empty-state svg { width: 64px; height: 64px; margin-bottom: 1rem; opacity: 0.25; }
 
+/* ── Batch Toolbar ── */
+#batchToolbar .form-check-input {
+  width: 18px; height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  background-color: rgba(255,255,255,.1);
+  border-color: rgba(255,255,255,.2);
+}
+
+/* ── Card Checkbox ── */
+.card-checkbox {
+  position: absolute;
+  top: 8px; left: 8px;
+  z-index: 5;
+  width: 18px; height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 /* ── Tag Filter ── */
 .tag-filter-badge {
   font-size: 0.72rem;
@@ -188,6 +207,13 @@ body {
 
 <div class="container mt-3">
   <h5 class="mb-3">已下载作品</h5>
+  <div id="batchToolbar" class="d-flex align-items-center gap-2 mb-2" style="display:none;">
+    <input type="checkbox" id="selectAll" class="form-check-input" title="全选/取消全选">
+    <button id="btnSelectAll" class="btn btn-outline-secondary btn-sm">全选</button>
+    <button id="btnDeselectAll" class="btn btn-outline-secondary btn-sm">取消全选</button>
+    <button id="btnBatchDelete" class="btn btn-outline-danger btn-sm" disabled>删除选中</button>
+    <span id="batchCount" class="small" style="color:var(--text-muted);"></span>
+  </div>
   <div id="tagFilter" class="d-flex flex-wrap gap-1 mb-3"></div>
   <div id="cardGrid" class="row"></div>
   <div id="emptyState" class="empty-state" style="display:none;">
@@ -247,7 +273,8 @@ body {
 const csrfToken = '{{ csrf_token | safe }}';
 const $ = s => document.querySelector(s);
 
-let deleteTarget = null, activeTag = '';
+let deleteTarget = null, deleteMode = 'single', activeTag = '';
+let selectedPids = new Set();
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
 loadGallery();
@@ -271,6 +298,7 @@ function loadGallery() {
         totalSize += item.file_size || 0;
         renderCard(item);
       });
+      updateBatchUI();
       $('#stats').style.display = 'block';
       $('#stats').textContent = `共 ${data.length} 个作品，总大小 ${fmtSize(totalSize)}` + (activeTag ? ` · 标签: ${escHtml(activeTag)}` : '');
     })
@@ -315,6 +343,7 @@ function renderCard(r) {
   col.innerHTML = `
     <div class="gallery-card" data-urls="${urlsAttr}" style="cursor:${hasImages ? 'pointer' : 'default'}">
       <div class="card-img-wrap">
+        <input type="checkbox" class="card-checkbox" data-pid="${r.pixiv_id}">
         <img src="${thumbUrl}" loading="lazy" onerror="this.style.display='none'">
         <span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
@@ -329,20 +358,53 @@ function renderCard(r) {
 
   if (hasImages) {
     col.querySelector('.gallery-card').addEventListener('click', function(e) {
-      if (e.target.closest('.delete-btn')) return;
+      if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox')) return;
       openLightbox(JSON.parse(this.dataset.urls), r.title || `#${r.pixiv_id}`);
     });
   }
 
   col.querySelector('.delete-btn').addEventListener('click', function() {
     deleteTarget = r.pixiv_id;
+    deleteMode = 'single';
     $('#deleteModalBody').textContent = `确定删除 #${r.pixiv_id} 的所有已下载文件？`;
     deleteModal.show();
+  });
+
+  col.querySelector('.card-checkbox').addEventListener('change', function() {
+    const pid = parseInt(this.dataset.pid);
+    if (this.checked) selectedPids.add(pid);
+    else selectedPids.delete(pid);
+    updateBatchUI();
   });
 }
 
 $('#confirmDeleteBtn').addEventListener('click', async () => {
   if (!deleteTarget) return;
+  deleteModal.hide();
+
+  if (deleteMode === 'batch') {
+    const ids = deleteTarget;
+    try {
+      const resp = await fetch('/api/gallery/batch-delete', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      const data = await resp.json();
+      if (resp.ok) {
+        showToast(data.message);
+        setTimeout(() => location.reload(), 800);
+      } else {
+        showToast(data.error || '批量删除失败');
+      }
+    } catch {
+      showToast('网络错误');
+    }
+    deleteTarget = null;
+    deleteMode = 'single';
+    return;
+  }
+
   try {
     const resp = await fetch(`/api/gallery/${deleteTarget}`, {
       method: 'DELETE',
@@ -358,8 +420,59 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
   } catch {
     showToast('网络错误');
   }
-  deleteModal.hide();
   deleteTarget = null;
+});
+
+// ── Batch Selection ──
+
+function updateBatchUI() {
+  const count = selectedPids.size;
+  $('#btnBatchDelete').disabled = count === 0;
+  $('#btnBatchDelete').textContent = count ? `删除选中 (${count})` : '删除选中';
+  $('#batchCount').textContent = count ? `已选 ${count} 个` : '';
+  const totalCards = document.querySelectorAll('.card-checkbox').length;
+  $('#selectAll').checked = count === totalCards && totalCards > 0;
+  $('#selectAll').indeterminate = count > 0 && count < totalCards;
+  $('#batchToolbar').style.display = totalCards > 0 ? 'flex' : 'none';
+}
+
+$('#btnSelectAll').addEventListener('click', () => {
+  document.querySelectorAll('.card-checkbox').forEach(cb => {
+    cb.checked = true;
+    selectedPids.add(parseInt(cb.dataset.pid));
+  });
+  updateBatchUI();
+});
+
+$('#btnDeselectAll').addEventListener('click', () => {
+  document.querySelectorAll('.card-checkbox').forEach(cb => {
+    cb.checked = false;
+    selectedPids.delete(parseInt(cb.dataset.pid));
+  });
+  updateBatchUI();
+});
+
+$('#selectAll').addEventListener('change', function() {
+  if (this.checked) {
+    document.querySelectorAll('.card-checkbox').forEach(cb => {
+      cb.checked = true;
+      selectedPids.add(parseInt(cb.dataset.pid));
+    });
+  } else {
+    document.querySelectorAll('.card-checkbox').forEach(cb => {
+      cb.checked = false;
+      selectedPids.delete(parseInt(cb.dataset.pid));
+    });
+  }
+  updateBatchUI();
+});
+
+$('#btnBatchDelete').addEventListener('click', () => {
+  if (selectedPids.size === 0) return;
+  deleteTarget = Array.from(selectedPids);
+  deleteMode = 'batch';
+  $('#deleteModalBody').textContent = `确定删除选中的 ${selectedPids.size} 个作品的所有已下载文件？此操作不可恢复。`;
+  deleteModal.show();
 });
 
 // ── Lightbox ──

@@ -298,6 +298,10 @@ def search():
     if sort_order not in ('popular_d', 'date_d'):
         sort_order = 'date_d'
 
+    r18_mode = request.args.get('r18_mode', 'all')
+    if r18_mode not in ('all', 'safe'):
+        r18_mode = 'all'
+
     logger.info(f'Search: type={search_type}, query={query!r}, min={min_bookmarks}, start={start_page}, sort={sort_order}, tag_mode={tag_mode}')
 
     all_results = []
@@ -307,13 +311,13 @@ def search():
             if len(query) > 200:
                 return jsonify({'error': '搜索关键词过长'}), 400
             if not query:
-                all_results, has_more = browse_discovery(start_page, sort_order, min_bookmarks)
+                all_results, has_more = browse_discovery(start_page, sort_order, min_bookmarks, r18_mode=r18_mode)
             else:
-                all_results, has_more = search_by_tag(query, min_bookmarks, start_page, sort_order, 9999, tag_mode)
+                all_results, has_more = search_by_tag(query, min_bookmarks, start_page, sort_order, 9999, tag_mode, r18_mode=r18_mode)
         else:
             if not query.isdigit():
                 return jsonify({'error': '画师ID必须为数字'}), 400
-            all_results, has_more = search_by_user(query, min_bookmarks, start_page)
+            all_results, has_more = search_by_user(query, min_bookmarks, start_page, hide_r18=(r18_mode == 'safe'))
     except FileNotFoundError as e:
         logger.error(f'Search failed - file not found: {e}')
         return jsonify({'error': f'缺少文件: {e}'}), 500
@@ -332,7 +336,10 @@ def api_following():
         page = max(1, int(page))
     except (ValueError, TypeError):
         page = 1
-    results, has_more = fetch_following(page)
+    r18_mode = request.args.get('r18_mode', 'all')
+    if r18_mode not in ('all', 'safe'):
+        r18_mode = 'all'
+    results, has_more = fetch_following(page, r18_mode=r18_mode)
     results = _enrich_with_download_status(results)
     return jsonify({'results': results, 'has_more': has_more})
 
@@ -619,6 +626,62 @@ def delete_gallery(pixiv_id):
         return jsonify({'status': 'deleted', 'message': f'已删除 {deleted} 个文件'})
 
 
+@app.route('/api/gallery/batch-delete', methods=['POST'])
+@_csrf_required
+def batch_delete_gallery():
+    body = request.get_json(silent=True) or {}
+    ids = body.get('ids', [])
+    if not ids or not isinstance(ids, list):
+        return jsonify({'error': '请提供作品ID列表'}), 400
+
+    deleted_count = 0
+    failed_count = 0
+    total_files = 0
+    with get_session() as db:
+        for pid in ids:
+            if not isinstance(pid, int) and not (isinstance(pid, str) and pid.isdigit()):
+                failed_count += 1
+                continue
+            pid = int(pid)
+            try:
+                illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+                if not illust:
+                    failed_count += 1
+                    continue
+
+                paths = illust.local_paths_list or []
+                for p in paths:
+                    try:
+                        if os.path.isfile(p):
+                            os.remove(p)
+                            total_files += 1
+                    except OSError:
+                        pass
+                if paths:
+                    work_dir = os.path.dirname(paths[0])
+                    try:
+                        if os.path.isdir(work_dir) and not os.listdir(work_dir):
+                            os.rmdir(work_dir)
+                    except OSError:
+                        pass
+
+                illust.download_status = None
+                illust.local_paths = None
+                db.add(DownloadLog(pixiv_id=pid, action='deleted', message=f'已删除 {len(paths)} 个文件'))
+                deleted_count += 1
+            except Exception:
+                failed_count += 1
+        safe_commit(db)
+
+    return jsonify({
+        'status': 'done',
+        'deleted': deleted_count,
+        'failed': failed_count,
+        'total_files': total_files,
+        'message': f'已删除 {deleted_count} 个作品 ({total_files} 个文件)' + (f', {failed_count} 个失败' if failed_count else ''),
+    })
+
+
 @app.route('/logs')
 def logs():
     return render_template('logs.html')
@@ -673,14 +736,14 @@ def auto_follow_config():
 
 _bulk_tasks: dict[str, dict] = {}
 
-def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, max_pages: int):
+def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, max_pages: int, r18_mode: str = 'all'):
     task = _bulk_tasks[task_id]
     page = 1
     while page <= max_pages and not task['cancelled']:
         task['current_page'] = page
         task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索第 {page} 页...'))
         try:
-            results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or')
+            results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or', r18_mode=r18_mode)
         except Exception as e:
             task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索失败: {e}'))
             break
@@ -735,16 +798,19 @@ def bulk_start():
     sort_order = body.get('sort', 'date_d')
     if sort_order not in ('popular_d', 'date_d'):
         sort_order = 'date_d'
+    r18_mode = body.get('r18_mode', 'all')
+    if r18_mode not in ('all', 'safe'):
+        r18_mode = 'all'
     max_pages = max(1, min(100, int(body.get('max_pages', 10) or 10)))
     task_id = secrets.token_hex(8)
     _bulk_tasks[task_id] = {
         'tag': tag, 'min_bookmarks': min_bookmarks, 'sort': sort_order,
         'max_pages': max_pages, 'current_page': 0, 'downloaded': 0, 'failed': 0,
-        'status': 'running', 'cancelled': False, 'log': [],
+        'status': 'running', 'cancelled': False, 'r18_mode': r18_mode, 'log': [],
     }
     _bulk_tasks[task_id]['log'].append((datetime.now(timezone.utc).isoformat(),
         f'开始: 标签={tag}, 收藏≥{min_bookmarks}, 排序={sort_order}, 最多{max_pages}页'))
-    threading.Thread(target=_bulk_worker, args=(task_id, tag, min_bookmarks, sort_order, max_pages), daemon=True).start()
+    threading.Thread(target=_bulk_worker, args=(task_id, tag, min_bookmarks, sort_order, max_pages, r18_mode), daemon=True).start()
     return jsonify({'task_id': task_id})
 
 

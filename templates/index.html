@@ -437,6 +437,11 @@ body {
       <input id="startPage" type="number" value="1" min="1">
       <label>收藏≥</label>
       <input id="minBookmarks" type="number" value="0" min="0" step="100">
+      <label>R18</label>
+      <select id="r18Mode">
+        <option value="all">显示全部</option>
+        <option value="safe">隐藏R18</option>
+      </select>
       <button id="toggleBlockedBtn" class="btn btn-outline-secondary btn-sm">屏蔽标签 ▾</button>
       <span id="blockedCount" style="color:var(--text-muted);display:none;"></span>
     </div>
@@ -495,12 +500,13 @@ const csrfToken = '{{ csrf_token | safe }}';
 
 let lastSearchParams = null, allResults = [], currentPage = 1, hasMorePages = false;
 const SEARCH_STATE_KEY = 'pixiv_search_state';
+const R18_STATE_KEY = 'pixiv_r18_mode';
 const $ = s => document.querySelector(s), $$ = s => document.querySelectorAll(s);
 
 // ── State ──
 function saveSearchState(results) {
   try { sessionStorage.setItem(SEARCH_STATE_KEY, JSON.stringify({
-    ...lastSearchParams, results, currentPage, hasMorePages
+    ...lastSearchParams, r18Mode: $('#r18Mode').value, results, currentPage, hasMorePages
   })); } catch {}
 }
 
@@ -516,10 +522,11 @@ function restoreSearchState() {
     $('#sortOrder').value = s.sort || 'date_d';
     $('#startPage').value = s.startPage || 1;
     $('#tagMode').value = s.tagMode || 'or';
+    if (s.r18Mode) $('#r18Mode').value = s.r18Mode;
     updateSearchUI();
 
     lastSearchParams = { type:s.type, query:s.query, minBookmarks:s.minBookmarks,
-      sort:s.sort||'date_d', startPage:s.startPage||1, tagMode:s.tagMode||'or' };
+      sort:s.sort||'date_d', startPage:s.startPage||1, tagMode:s.tagMode||'or', r18Mode:s.r18Mode||'all' };
     allResults = s.results || [];
     currentPage = s.currentPage || (s.startPage || 1);
     hasMorePages = s.hasMorePages || false;
@@ -577,6 +584,11 @@ async function removeBlockedTag(tag) {
 }
 function refreshCurrentSearch() { if (lastSearchParams) doSearch(); }
 
+$('#r18Mode').addEventListener('change', () => {
+  sessionStorage.setItem(R18_STATE_KEY, $('#r18Mode').value);
+  if (lastSearchParams) doSearch();
+});
+
 $('#toggleBlockedBtn').addEventListener('click', () => {
   const p = $('#blockedPanel');
   const s = p.style.display === 'none';
@@ -605,7 +617,8 @@ async function doSearch() {
   const startPage = Math.max(1, parseInt($('#startPage').value) || 1);
   const tagMode = $('#tagMode').value || 'or';
 
-  lastSearchParams = { type, query, minBookmarks, sort, startPage, tagMode };
+  const r18Mode = $('#r18Mode').value;
+  lastSearchParams = { type, query, minBookmarks, sort, startPage, tagMode, r18Mode };
   currentPage = startPage;
   allResults = [];
   hasMorePages = false;
@@ -619,8 +632,8 @@ async function doSearch() {
   showLoading(true);
   try {
     let url;
-    if (type === 'following') url = `/api/following?page=${startPage}`;
-    else url = `/search?${new URLSearchParams({type,query,min_bookmarks:minBookmarks,page:String(startPage),sort,tag_mode:tagMode})}`;
+    if (type === 'following') url = `/api/following?page=${startPage}&r18_mode=${r18Mode}`;
+    else url = `/search?${new URLSearchParams({type,query,min_bookmarks:minBookmarks,page:String(startPage),sort,tag_mode:tagMode,r18_mode:r18Mode})}`;
 
     const resp = await fetch(url);
     if (!resp.ok) {
@@ -653,8 +666,8 @@ async function loadMore() {
   try {
     const p = lastSearchParams;
     let url;
-    if (p.type === 'following') url = `/api/following?page=${currentPage}`;
-    else url = `/search?${new URLSearchParams({type:p.type,query:p.query,min_bookmarks:p.minBookmarks,page:String(currentPage),sort:p.sort,tag_mode:p.tagMode})}`;
+    if (p.type === 'following') url = `/api/following?page=${currentPage}&r18_mode=${p.r18Mode || 'all'}`;
+    else url = `/search?${new URLSearchParams({type:p.type,query:p.query,min_bookmarks:p.minBookmarks,page:String(currentPage),sort:p.sort,tag_mode:p.tagMode,r18_mode:p.r18Mode||'all'})}`;
 
     const resp = await fetch(url);
     if (!resp.ok) { showToast('加载失败'); return; }
@@ -845,8 +858,16 @@ function fmtNum(n) { return n>=10000 ? (n/10000).toFixed(1)+'w' : String(n); }
 function escHtml(s) { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 function escAttr(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+function loadR18Mode() {
+  try {
+    const saved = sessionStorage.getItem(R18_STATE_KEY);
+    if (saved === 'safe' || saved === 'all') $('#r18Mode').value = saved;
+  } catch {}
+}
+
 // ── Init ──
 loadBlockedTags();
+loadR18Mode();
 if (!restoreSearchState()) sessionStorage.removeItem(SEARCH_STATE_KEY);
 </script>
 </body>

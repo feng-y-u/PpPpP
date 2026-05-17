@@ -75,6 +75,13 @@ def _is_blocked(tags: list[str], blocked: set[str]) -> bool:
     return bool(set(tags) & blocked)
 
 
+R18_TAGS = {"R-18", "R-18G"}
+
+
+def _is_r18(tags: list[str]) -> bool:
+    return bool(set(tags) & R18_TAGS)
+
+
 def _parse_tags(tags_data) -> list[str]:
     if not tags_data:
         return []
@@ -176,7 +183,7 @@ def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
 
 def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
                   sort_order: str = 'popular_d', max_pages: int = 10,
-                  tag_mode: str = 'or') -> tuple[list[dict], bool]:
+                  tag_mode: str = 'or', r18_mode: str = 'all') -> tuple[list[dict], bool]:
     """Search Pixiv by tag(s). tag_mode: 'or' = any tag, 'and' = all tags."""
     if page > max_pages:
         return [], False
@@ -194,7 +201,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
     quoted = requests.utils.quote(pixiv_query)
     search_url = (
         f'https://www.pixiv.net/ajax/search/illustrations/{quoted}'
-        f'?word={quoted}&order={sort_order}&mode=all&p={page}'
+        f'?word={quoted}&order={sort_order}&mode={r18_mode}&p={page}'
         f'&s_mode=s_tag&type=illust'
     )
 
@@ -276,12 +283,12 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
 
 def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
-                     min_bookmarks: int = 0) -> tuple[list[dict], bool]:
+                     min_bookmarks: int = 0, r18_mode: str = 'all') -> tuple[list[dict], bool]:
     """Browse Pixiv discovery (all works) without a specific tag."""
     session = _build_session()
     url = (
         f'https://www.pixiv.net/ajax/discovery/artworks'
-        f'?mode=all&p={page}&limit=60&order={sort_order}'
+        f'?mode={r18_mode}&p={page}&limit=60&order={sort_order}'
     )
 
     try:
@@ -356,7 +363,8 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
     return results, has_more
 
 
-def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1) -> tuple[list[dict], bool]:
+def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
+                    hide_r18: bool = False) -> tuple[list[dict], bool]:
     """Search by user ID. page is 1-based. Returns (results, has_more)."""
     session = _build_session()
 
@@ -397,7 +405,8 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1) -> tuple
             existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if existing:
                 if existing.bookmark_count >= min_bookmarks and not _is_blocked(existing.tags_list, blocked):
-                    results.append(existing.to_dict())
+                    if not (hide_r18 and _is_r18(existing.tags_list)):
+                        results.append(existing.to_dict())
                 continue
 
             to_fetch.append(pixiv_id)
@@ -410,6 +419,8 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1) -> tuple
                 if detail is None or detail['bookmark_count'] < min_bookmarks:
                     continue
                 if _is_blocked(detail.get('tags', []), blocked):
+                    continue
+                if hide_r18 and _is_r18(detail.get('tags', [])):
                     continue
 
                 illust = Illust(
@@ -436,10 +447,10 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1) -> tuple
     return results, has_more
 
 
-def fetch_following(page: int = 1) -> tuple[list[dict], bool]:
+def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], bool]:
     """Fetch latest works from followed artists."""
     session = _build_session()
-    url = f'https://www.pixiv.net/ajax/follow_latest/illust?mode=all&p={page}'
+    url = f'https://www.pixiv.net/ajax/follow_latest/illust?mode={r18_mode}&p={page}'
     try:
         resp = session.get(url, timeout=DETAIL_TIMEOUT)
         resp.raise_for_status()
