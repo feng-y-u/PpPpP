@@ -142,6 +142,7 @@ download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
 download_locks: dict[int, threading.Lock] = {}
 download_cancellations: set[int] = set()
 _queued_downloads: set[int] = set()
+_download_progress: dict[int, dict] = {}
 
 
 def _enrich_with_download_status(results: list[dict]) -> list[dict]:
@@ -172,6 +173,7 @@ def _download_illust(pixiv_id: int):
             safe_commit(db)
 
             urls = illust.original_urls_list
+            _download_progress[pixiv_id] = {'current': 0, 'total': len(urls)}
             work_dir = _get_download_dir(pixiv_id)
             os.makedirs(work_dir, exist_ok=True)
 
@@ -197,6 +199,7 @@ def _download_illust(pixiv_id: int):
                         for chunk in resp.iter_content(chunk_size=8192):
                             f.write(chunk)
                     local_paths.append(filepath)
+                    _download_progress[pixiv_id]['current'] = i + 1
 
                     if i < len(urls) - 1:
                         time.sleep(PAGE_DOWNLOAD_INTERVAL)
@@ -235,6 +238,7 @@ def _download_illust(pixiv_id: int):
                 db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
             safe_commit(db)
     finally:
+        _download_progress.pop(pixiv_id, None)
         lock.release()
         download_locks.pop(pixiv_id, None)
         download_cancellations.discard(pixiv_id)
@@ -865,8 +869,15 @@ def api_downloads():
             .order_by(DownloadLog.created_at.desc())
             .limit(50).all()
         )
+        def _with_progress(i):
+            d = i.to_dict()
+            p = _download_progress.get(i.pixiv_id)
+            if p and p['total'] > 0:
+                d['progress'] = {'current': p['current'], 'total': p['total']}
+            return d
+
         return jsonify({
-            'active': [i.to_dict() for i in active],
+            'active': [_with_progress(i) for i in active],
             'queued': [i.to_dict() for i in queued],
             'completed': [i.to_dict() for i in completed],
             'logs': [l.to_dict() for l in logs],

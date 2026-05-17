@@ -190,6 +190,75 @@ body {
 .modal-header { border-color: rgba(255,255,255,.06); }
 .modal-footer { border-color: rgba(255,255,255,.06); }
 .bg-dark { background: #0d0d1a !important; }
+
+/* ── Immersive Lightbox ── */
+.lightbox-dialog {
+  width: 100vw;
+  height: 100vh;
+  max-width: 100vw;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lightbox-dialog .modal-content {
+  background: transparent !important;
+  width: 100vw;
+  height: 100vh;
+}
+.lightbox-body {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+.lightbox-body img {
+  max-width: 100vw;
+  max-height: 100vh;
+  object-fit: contain;
+}
+.lightbox-info {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  opacity: 0.5;
+  transition: opacity 0.2s;
+}
+.lightbox-info:hover { opacity: 1; }
+.lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 10;
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
+.lightbox-close:hover { opacity: 1; }
+.lightbox-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255,255,255,.08);
+  border: none;
+  color: rgba(255,255,255,.5);
+  font-size: 2rem;
+  width: 48px;
+  height: 80px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  z-index: 5;
+}
+.lightbox-arrow:hover {
+  background: rgba(255,255,255,.15);
+  color: #fff;
+}
+.lightbox-arrow-left { left: 12px; }
+.lightbox-arrow-right { right: 12px; }
+body.lightbox-open .navbar { opacity: 0; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -238,17 +307,17 @@ body {
 
 <!-- Lightbox Modal -->
 <div class="modal fade" id="lightboxModal" tabindex="-1">
-  <div class="modal-dialog modal-xl modal-dialog-centered">
-    <div class="modal-content bg-dark border-0">
-      <div class="modal-header border-0 py-1">
-        <span id="lightboxTitle" class="text-white small"></span>
-        <span id="lightboxPage" class="text-white-50 small ms-2"></span>
-        <button class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body text-center p-0 position-relative">
-        <img id="lightboxImg" src="" class="img-fluid" style="max-height:85vh;" alt="">
-        <button id="lightboxPrev" class="btn btn-dark position-absolute start-0 top-50 translate-middle-y ms-2 opacity-75" style="display:none;">&#9664;</button>
-        <button id="lightboxNext" class="btn btn-dark position-absolute end-0 top-50 translate-middle-y me-2 opacity-75" style="display:none;">&#9654;</button>
+  <div class="modal-dialog modal-dialog-centered lightbox-dialog">
+    <div class="modal-content bg-black border-0">
+      <div class="modal-body text-center p-0 position-relative lightbox-body">
+        <img id="lightboxImg" src="" alt="">
+        <div class="lightbox-info">
+          <span id="lightboxTitle" class="text-white-50 small"></span>
+          <span id="lightboxPage" class="text-white-50 small ms-2"></span>
+        </div>
+        <button class="btn-close btn-close-white lightbox-close" data-bs-dismiss="modal"></button>
+        <button id="lightboxPrev" class="lightbox-arrow lightbox-arrow-left" style="display:none;">&#9664;</button>
+        <button id="lightboxNext" class="lightbox-arrow lightbox-arrow-right" style="display:none;">&#9654;</button>
       </div>
     </div>
   </div>
@@ -490,20 +559,34 @@ function showLightboxImage() {
   $('#lightboxNext').style.display = lightboxUrls.length > 1 ? '' : 'none';
 }
 
-$('#lightboxPrev').addEventListener('click', () => {
+$('#lightboxModal').addEventListener('shown.bs.modal', () => document.body.classList.add('lightbox-open'));
+$('#lightboxModal').addEventListener('hidden.bs.modal', () => document.body.classList.remove('lightbox-open'));
+
+function lightboxPrev() {
+  if (lightboxUrls.length <= 1) return;
   lightboxIndex = (lightboxIndex - 1 + lightboxUrls.length) % lightboxUrls.length;
   showLightboxImage();
-});
+}
 
-$('#lightboxNext').addEventListener('click', () => {
+function lightboxNext() {
+  if (lightboxUrls.length <= 1) return;
   lightboxIndex = (lightboxIndex + 1) % lightboxUrls.length;
   showLightboxImage();
+}
+
+$('#lightboxPrev').addEventListener('click', lightboxPrev);
+$('#lightboxNext').addEventListener('click', lightboxNext);
+
+$('#lightboxModal').addEventListener('keydown', function(e) {
+  if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') { e.preventDefault(); lightboxPrev(); }
+  if (e.key === 'ArrowRight' || e.code === 'ArrowRight') { e.preventDefault(); lightboxNext(); }
 });
 
-document.addEventListener('keydown', (e) => {
+// fallback: document-level keydown when lightbox is shown
+document.addEventListener('keydown', function(e) {
   if (!document.querySelector('#lightboxModal.show')) return;
-  if (e.key === 'ArrowLeft') $('#lightboxPrev').click();
-  if (e.key === 'ArrowRight') $('#lightboxNext').click();
+  if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') { e.preventDefault(); lightboxPrev(); }
+  if (e.key === 'ArrowRight' || e.code === 'ArrowRight') { e.preventDefault(); lightboxNext(); }
 });
 
 function showToast(msg) {
