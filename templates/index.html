@@ -5,57 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pixiv Viewer</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="/static/style.css" rel="stylesheet">
 <style>
-:root {
-  --accent: #7c3aed;
-  --accent-light: #a78bfa;
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --radius: 12px;
-}
-
-* { box-sizing: border-box; }
-
-body {
-  background: #0b0b12;
-  color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
-}
-
-/* ── Navbar ── */
-.navbar {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: rgba(11,11,18,.82);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  border-bottom: 1px solid rgba(255,255,255,.06);
-  padding: 0.75rem 0;
-}
-.navbar-brand {
-  font-size: 1.15rem;
-  font-weight: 700;
-  letter-spacing: -0.3px;
-  color: #fff;
-  text-decoration: none;
-}
-.navbar-brand:hover { color: #fff; }
-.nav-link {
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--text-secondary) !important;
-  padding: 0.4rem 0.9rem !important;
-  border-radius: 6px;
-  transition: all 0.15s;
-  text-decoration: none;
-}
-.nav-link:hover { color: #fff !important; background: rgba(255,255,255,.06); }
-.nav-link.active { color: #fff !important; background: rgba(124,58,237,.2); }
-
 /* ── Hero Search Area ── */
 .search-hero {
   padding: 3rem 0 2.5rem;
@@ -185,27 +136,6 @@ body {
 }
 .toolbar-left { display: flex; align-items: center; gap: 0.75rem; }
 
-/* ── Buttons ── */
-.btn {
-  font-weight: 500;
-  border-radius: 8px;
-  transition: all 0.15s;
-}
-.btn-primary { background: var(--accent); border-color: var(--accent); }
-.btn-primary:hover { background: #6d28d9; border-color: #6d28d9; box-shadow: 0 4px 12px rgba(124,58,237,.25); }
-.btn-outline-primary {
-  color: var(--accent-light);
-  border-color: rgba(124,58,237,.3);
-}
-.btn-outline-primary:hover { background: rgba(124,58,237,.1); color: #c4b5fd; }
-.btn-success { background: #059669; border-color: #059669; }
-.btn-success:hover { background: #07b87a; }
-.btn-outline-secondary { color: var(--text-secondary); border-color: rgba(255,255,255,.1); }
-.btn-outline-secondary:hover { background: rgba(255,255,255,.05); color: #fff; }
-.btn-outline-danger { color: #f87171; border-color: rgba(239,68,68,.2); }
-.btn-outline-danger:hover { background: rgba(239,68,68,.1); color: #fca5a5; }
-.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.76rem; }
-
 /* ── Masonry Grid ── */
 .masonry {
   display: flex;
@@ -218,10 +148,6 @@ body {
 @media (max-width: 992px) { .masonry-item { width: calc((100% - 2rem) / 3); } }
 @media (max-width: 768px) { .masonry-item { width: calc((100% - 1rem) / 2); } }
 @media (max-width: 480px) { .masonry-item { width: calc((100% - 0.4rem) / 2); } .masonry { gap: 0.4rem; } }
-
-.masonry-item {
-  /* flex item, no extra margin needed — gap handles spacing */
-}
 
 /* ── Photo Card ── */
 .photo-card {
@@ -336,14 +262,6 @@ body {
 .tag-block-x { opacity: 0.35; margin-left: 2px; transition: opacity 0.15s; }
 .tag-block-x:hover { opacity: 1; color: #f87171; }
 
-/* ── Empty State ── */
-.empty-state {
-  text-align: center;
-  padding: 5rem 1rem;
-  color: var(--text-muted);
-}
-.empty-state svg { width: 64px; height: 64px; margin-bottom: 1rem; opacity: 0.25; }
-
 /* ── Loading ── */
 .loading-overlay {
   display: none;
@@ -356,18 +274,6 @@ body {
   align-items: center;
 }
 .loading-overlay.show { display: flex; }
-.spinner { width: 36px; height: 36px; border: 2px solid rgba(255,255,255,.1); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ── Toast ── */
-.toast-container { z-index: 1060; }
-#liveToast {
-  background: rgba(30,27,46,.92);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(239,68,68,.15);
-  border-radius: 10px;
-  color: #fca5a5;
-}
 
 /* ── Blocked Tags Panel ── */
 .blocked-panel {
@@ -494,13 +400,13 @@ body {
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/app.js"></script>
 <script>
 const csrfToken = '{{ csrf_token | safe }}';
 
 let lastSearchParams = null, allResults = [], currentPage = 1, hasMorePages = false;
 const SEARCH_STATE_KEY = 'pixiv_search_state';
 const R18_STATE_KEY = 'pixiv_r18_mode';
-const $ = s => document.querySelector(s), $$ = s => document.querySelectorAll(s);
 
 // ── State ──
 function saveSearchState(results) {
@@ -636,7 +542,7 @@ async function doSearch() {
 
     const resp = await fetch(url);
     if (!resp.ok) {
-      showToast(resp.status===429 ? '请求过于频繁' : ((await resp.json().catch(()=>({}))).error||'搜索失败'));
+      showToast(resp.status===429 ? '请求过于频繁' : ((await resp.json().catch(()=>({}))).error||'搜索失败'), true);
       return;
     }
     const data = await resp.json();
@@ -654,7 +560,7 @@ async function doSearch() {
     showToolbar(true);
     updateLoadMore();
     lazyLoad();
-  } catch { showToast('网络错误'); }
+  } catch { showToast('网络错误', true); }
   finally { showLoading(false); }
 }
 
@@ -669,7 +575,7 @@ async function loadMore() {
     else url = `/search?${new URLSearchParams({type:p.type,query:p.query,min_bookmarks:p.minBookmarks,page:String(currentPage),sort:p.sort,tag_mode:p.tagMode,r18_mode:p.r18Mode||'all'})}`;
 
     const resp = await fetch(url);
-    if (!resp.ok) { showToast('加载失败'); return; }
+    if (!resp.ok) { showToast('加载失败', true); return; }
     const data = await resp.json();
 
     if (!data.results.length) { hasMorePages = false; updateLoadMore(); return; }
@@ -682,7 +588,7 @@ async function loadMore() {
     saveSearchState(allResults);
     updateLoadMore();
     lazyLoad();
-  } catch { showToast('网络错误'); }
+  } catch { showToast('网络错误', true); }
   finally { showLoading(false); }
 }
 
@@ -693,11 +599,6 @@ function updateLoadMore() {
 $('#loadMoreBtn').addEventListener('click', loadMore);
 
 // ── Render Card ──
-function proxyThumb(url) {
-  if (!url) return '';
-  return `/thumb/${btoa(url).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`;
-}
-
 function renderCard(r) {
   const isDone = r.download_status === 'done';
   const isDl = r.download_status === 'downloading';
@@ -781,10 +682,10 @@ async function triggerDownload(pixivId, btn) {
   try {
     const r = await fetch(`/download/${pixivId}`, { method:'POST', headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/json'} });
     const d = await r.json();
-    if (!r.ok) { showToast(d.error||'失败'); resetDlBtn(pixivId); return; }
+    if (!r.ok) { showToast(d.error||'失败', true); resetDlBtn(pixivId); return; }
     if (d.status === 'done') { updateDlDone(pixivId); return; }
     pollDl(pixivId);
-  } catch { showToast('网络错误'); resetDlBtn(pixivId); }
+  } catch { showToast('网络错误', true); resetDlBtn(pixivId); }
 }
 
 function pollDl(pixivId) {
@@ -792,7 +693,7 @@ function pollDl(pixivId) {
     try {
       const d = await fetch(`/download_status/${pixivId}`).then(r => r.json());
       if (d.status === 'done') { clearInterval(iv); updateDlDone(pixivId); }
-      else if (d.status === 'failed') { clearInterval(iv); showToast(`#${pixivId} 下载失败`); resetDlBtn(pixivId); }
+      else if (d.status === 'failed') { clearInterval(iv); showToast(`#${pixivId} 下载失败`, true); resetDlBtn(pixivId); }
     } catch {}
   }, 2000);
   setTimeout(() => clearInterval(iv), 300000);
@@ -829,8 +730,8 @@ $('#downloadAllBtn').addEventListener('click', async () => {
     const r = await fetch('/api/download/batch', { method:'POST', headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/json'}, body:JSON.stringify({ids}) });
     const d = await r.json();
     if (r.ok) { st.textContent = d.message; btn.textContent='下载中...'; btn.className='btn btn-secondary btn-sm'; pollBatch(ids); }
-    else { showToast(d.error||'失败'); btn.disabled=false; }
-  } catch { showToast('网络错误'); btn.disabled=false; batchInProgress=false; }
+    else { showToast(d.error||'失败', true); btn.disabled=false; }
+  } catch { showToast('网络错误', true); btn.disabled=false; batchInProgress=false; }
 });
 
 function pollBatch(ids) {
@@ -858,11 +759,7 @@ function lazyLoad() {
     });
   });
 }
-function showToast(msg) { $('#toastMsg').textContent=msg; bootstrap.Toast.getOrCreateInstance($('#liveToast')).show(); }
 function showLoading(on) { $('#loadingOverlay').classList.toggle('show',on); $('#searchBtn').disabled=on; }
-function fmtNum(n) { return n>=10000 ? (n/10000).toFixed(1)+'w' : String(n); }
-function escHtml(s) { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
-function escAttr(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function loadR18Mode() {
   try {

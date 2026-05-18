@@ -1,0 +1,72 @@
+/* ── Pixiv Viewer — Shared Base Styles ── */
+:root {
+  --accent: #7c3aed;
+  --accent-hover: #6d28d9;
+  --accent-light: #a78bfa;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: #0b0b12;
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+/* ── Navbar ── */
+.navbar {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(11,11,18,.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  padding: 0.75rem 0;
+}
+.navbar-brand { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.3px; color: #fff; text-decoration: none; }
+.navbar-brand:hover { color: #fff; }
+.nav-link {
+  font-size: 0.8rem; font-weight: 500; color: var(--text-secondary) !important;
+  padding: 0.4rem 0.9rem !important; border-radius: 6px;
+  transition: all 0.15s; text-decoration: none;
+}
+.nav-link:hover { color: #fff !important; background: rgba(255,255,255,.06); }
+.nav-link.active { color: #fff !important; background: rgba(124,58,237,.2); }
+
+/* ── Buttons ── */
+.btn {
+  font-weight: 500; border-radius: 8px; transition: all 0.15s;
+}
+.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.76rem; }
+.btn-outline-secondary { color: var(--text-secondary); border-color: rgba(255,255,255,.1); }
+.btn-outline-secondary:hover { background: rgba(255,255,255,.05); color: #fff; }
+.btn-outline-danger { color: #f87171; border-color: rgba(239,68,68,.2); }
+.btn-outline-danger:hover { background: rgba(239,68,68,.1); color: #fca5a5; }
+.btn-primary { background: var(--accent); border-color: var(--accent); }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-success { background: #059669; border-color: #059669; }
+.btn-success:hover { background: #07b87a; }
+
+/* ── Toast ── */
+.toast-container { z-index: 1060; }
+#liveToast {
+  background: rgba(30,27,46,.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(239,68,68,.15);
+  border-radius: 10px;
+  color: #fca5a5;
+}
+
+/* ── Empty State ── */
+.empty-state { text-align: center; padding: 5rem 1rem; color: var(--text-muted); }
+.empty-state svg { width: 64px; height: 64px; margin-bottom: 1rem; opacity: 0.25; }
+
+/* ── Spinner ── */
+.spinner { width: 36px; height: 36px; border: 2px solid rgba(255,255,255,.1); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

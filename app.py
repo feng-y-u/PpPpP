@@ -18,6 +18,7 @@ from flask import (
     Flask, jsonify, render_template, request, session,
     send_file, abort, Response,
 )
+from sqlalchemy import text
 
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
@@ -568,6 +569,14 @@ def detail_page(pixiv_id):
         paths = illust.local_paths_list or []
         local_urls = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
 
+        file_size = None
+        if paths:
+            total = 0
+            for p in paths:
+                if os.path.isfile(p):
+                    total += os.path.getsize(p)
+            file_size = total
+
         # Related: same user, exclude self
         related = db.query(Illust).filter(
             Illust.user_id == illust.user_id,
@@ -591,6 +600,7 @@ def detail_page(pixiv_id):
             'detail.html',
             illust=data,
             local_urls=local_urls,
+            file_size=file_size,
             related=related,
             proxy_thumb=proxy_thumb,
             fmt_num=fmt_num,
@@ -621,6 +631,11 @@ def gallery():
 @app.route('/api/gallery')
 def api_gallery():
     tag_filter = request.args.get('tag', '').strip()
+    limit = request.args.get('limit', 50, type=int)
+    offset = request.args.get('offset', 0, type=int)
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
         illusts = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).all()
@@ -637,18 +652,22 @@ def api_gallery():
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
-        return jsonify(results)
+
+        total = len(results)
+        page = results[offset:offset + limit]
+        return jsonify({'data': page, 'total': total, 'has_more': offset + limit < total})
 
 
 @app.route('/api/gallery/tags')
 def api_gallery_tags():
     with get_session() as db:
-        illusts = db.query(Illust).filter(Illust.download_status == 'done').all()
-        tags = set()
-        for i in illusts:
-            for t in i.tags_list:
-                tags.add(t)
-        return jsonify(sorted(tags))
+        rows = db.execute(text("""
+            SELECT DISTINCT j.value AS tag
+            FROM illusts, json_each(illusts.tags) AS j
+            WHERE illusts.download_status = 'done'
+            ORDER BY tag
+        """)).all()
+        return jsonify([row[0] for row in rows])
 
 
 @app.route('/api/gallery/<int:pixiv_id>', methods=['DELETE'])
@@ -750,6 +769,7 @@ def auto_follow_status():
     return jsonify(_auto_follow_state)
 
 @app.route('/api/auto-follow/config', methods=['POST'])
+@_csrf_required
 def auto_follow_config():
     body = request.get_json(silent=True) or {}
     if 'interval' in body:
@@ -758,7 +778,8 @@ def auto_follow_config():
         except (ValueError, TypeError):
             return jsonify({'error': 'interval must be integer seconds'}), 400
     if 'auto_download' in body:
-        _auto_follow_state['auto_download'] = bool(body['auto_download'])
+        val = body['auto_download']
+        _auto_follow_state['auto_download'] = val if isinstance(val, bool) else str(val).lower() == 'true'
     return jsonify(_auto_follow_state)
 
 
@@ -815,6 +836,8 @@ def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, ma
     task['status'] = 'stopped' if task['cancelled'] else 'done'
     task['log'].append((datetime.now(timezone.utc).isoformat(),
         f'完成: 下载 {task["downloaded"]} 件, 失败 {task["failed"]} 件'))
+    # 5 分钟后清理任务记录，防止内存泄漏
+    threading.Timer(300, lambda: _bulk_tasks.pop(task_id, None)).start()
 
 
 @app.route('/api/bulk/start', methods=['POST'])
@@ -920,6 +943,7 @@ def list_blocked_tags():
 
 
 @app.route('/api/blocked-tags', methods=['POST'])
+@_csrf_required
 def add_blocked_tag():
     tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
     if not tag:
@@ -933,6 +957,7 @@ def add_blocked_tag():
 
 
 @app.route('/api/blocked-tags/<path:tag>', methods=['DELETE'])
+@_csrf_required
 def remove_blocked_tag(tag):
     with get_session() as db:
         entry = db.query(BlockedTag).filter(BlockedTag.tag == tag).first()
@@ -944,4 +969,4 @@ def remove_blocked_tag(tag):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=False, host='127.0.0.1', port=5000)
