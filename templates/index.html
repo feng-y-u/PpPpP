@@ -748,6 +748,12 @@ function renderCard(r) {
     });
   });
 
+  // Card click → detail page
+  item.querySelector('.photo-card').addEventListener('click', e => {
+    if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-actions')) return;
+    window.location.href = `/detail/${r.pixiv_id}`;
+  });
+
   // Artist click
   const al = item.querySelector('.artist-link');
   if (al) al.addEventListener('click', e => {

@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 import zipfile
-from base64 import urlsafe_b64decode
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -555,6 +555,62 @@ def serve_image(pixiv_id, index):
         if not os.path.isfile(filepath):
             abort(404)
         return send_file(filepath)
+
+
+@app.route('/detail/<int:pixiv_id>')
+def detail_page(pixiv_id):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            abort(404)
+
+        data = illust.to_dict()
+        paths = illust.local_paths_list or []
+        local_urls = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
+
+        # Related: same user, exclude self
+        related = db.query(Illust).filter(
+            Illust.user_id == illust.user_id,
+            Illust.pixiv_id != pixiv_id,
+            Illust.download_status == 'done',
+        ).order_by(Illust.created_at.desc()).limit(6).all()
+        related = [r.to_dict() for r in related]
+
+        def proxy_thumb(url):
+            if not url:
+                return ''
+            return '/thumb/' + urlsafe_b64encode(url.encode()).decode().rstrip('=').replace('+', '-').replace('/', '_')
+
+        def fmt_num(n):
+            if not n:
+                return '0'
+            n = int(n)
+            return f'{n/10000:.1f}w' if n >= 10000 else str(n)
+
+        return render_template(
+            'detail.html',
+            illust=data,
+            local_urls=local_urls,
+            related=related,
+            proxy_thumb=proxy_thumb,
+            fmt_num=fmt_num,
+            csrf_token=_get_csrf_token(),
+        )
+
+
+@app.route('/api/detail/<int:pixiv_id>')
+def detail_api(pixiv_id):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            return jsonify({'error': '作品不存在'}), 404
+        d = illust.to_dict()
+        paths = illust.local_paths_list or []
+        d['local_urls'] = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
+        if paths:
+            d['file_count'] = len(paths)
+            d['file_size'] = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
+        return jsonify(d)
 
 
 @app.route('/gallery')
