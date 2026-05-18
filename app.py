@@ -686,36 +686,6 @@ def batch_delete_gallery():
     })
 
 
-@app.route('/logs')
-def logs():
-    return render_template('logs.html')
-
-
-@app.route('/api/logs')
-def api_logs():
-    page = request.args.get('page', '1')
-    try:
-        page = max(1, int(page))
-    except (ValueError, TypeError):
-        page = 1
-
-    per_page = 50
-    with get_session() as db:
-        total = db.query(DownloadLog).count()
-        entries = (
-            db.query(DownloadLog)
-            .order_by(DownloadLog.created_at.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-            .all()
-        )
-        return jsonify({
-            'entries': [e.to_dict() for e in entries],
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-        })
-
 
 # ── Auto-Follow Control ──
 

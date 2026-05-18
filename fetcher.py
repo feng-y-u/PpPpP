@@ -14,14 +14,10 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-import socket
-from urllib3.connection import HTTPSConnection, _ssl_wrap_socket_and_match_hostname
-from urllib3.connectionpool import HTTPSConnectionPool
-
 from config import (
     COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY, BYPASS_SNI, PIXIV_ORIGIN_IPS,
+    PROXY,
 )
 from models import Illust, BlockedTag, get_session, safe_commit
 
@@ -53,7 +49,7 @@ def _build_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': '{PIXIV_BASE_URL}/',
+        'Referer': f'{PIXIV_BASE_URL}/',
         'Accept-Language': 'ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7',
     })
     s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
@@ -63,95 +59,13 @@ def _build_session() -> requests.Session:
     if PROXY:
         s.proxies = {'https': PROXY, 'http': PROXY}
 
-    if BYPASS_SNI:
-        adapter = _create_sni_bypass_adapter()
-    else:
-        adapter = HTTPAdapter()
+    adapter = HTTPAdapter()
 
     retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503])
     adapter.max_retries = retry
 
     s.mount('https://', adapter)
     return s
-
-
-def _probe_pixiv_ip() -> str | None:
-    """Test Pixiv origin IPs and return the first reachable one."""
-    for ip in PIXIV_ORIGIN_IPS:
-        try:
-            sock = socket.create_connection((ip, 443), timeout=3)
-            sock.close()
-            logger.info(f'SNI bypass: using Pixiv IP {ip}')
-            return ip
-        except OSError:
-            continue
-    logger.warning('SNI bypass: no Pixiv origin IP is reachable')
-    return None
-
-
-_pixiv_bypass_ip = None
-
-
-def _create_sni_bypass_adapter() -> HTTPAdapter:
-    """Create an HTTPAdapter that connects to hardcoded Pixiv origin IPs
-    and omits SNI from the TLS handshake to bypass GFW detection."""
-    global _pixiv_bypass_ip
-
-    if _pixiv_bypass_ip is None:
-        _pixiv_bypass_ip = _probe_pixiv_ip()
-    ip = _pixiv_bypass_ip
-    if not ip:
-        return HTTPAdapter()
-
-    class BypassHTTPSConnection(HTTPSConnection):
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self.server_hostname = ''
-            self.assert_hostname = False
-
-        def connect(self):
-            self.sock = socket.create_connection(
-                (ip, self.port),
-                timeout=self.timeout,
-                source_address=self.source_address,
-                socket_options=self.socket_options,
-            )
-            if self._tunnel_host:
-                self._tunnel()
-            server_hostname_rm_dot = (self.server_hostname or '').rstrip('.')
-            sock_and_verified = _ssl_wrap_socket_and_match_hostname(
-                sock=self.sock,
-                cert_reqs=self.cert_reqs,
-                ssl_version=self.ssl_version,
-                ssl_minimum_version=self.ssl_minimum_version,
-                ssl_maximum_version=self.ssl_maximum_version,
-                ca_certs=self.ca_certs,
-                ca_cert_dir=self.ca_cert_dir,
-                ca_cert_data=self.ca_cert_data,
-                cert_file=self.cert_file,
-                key_file=self.key_file,
-                key_password=self.key_password,
-                server_hostname=server_hostname_rm_dot,
-                ssl_context=self.ssl_context,
-                tls_in_tls=False,
-                assert_hostname=False,
-                assert_fingerprint=self.assert_fingerprint,
-            )
-            self.sock = sock_and_verified.socket
-            self.is_verified = sock_and_verified.is_verified
-            self._has_connected_to_proxy = bool(self.proxy)
-            if self._has_connected_to_proxy and self.proxy_is_verified is None:
-                self.proxy_is_verified = sock_and_verified.is_verified
-
-    class BypassPool(HTTPSConnectionPool):
-        connection_cls = BypassHTTPSConnection
-
-    class BypassAdapter(HTTPAdapter):
-        def init_poolmanager(self, *args, **kwargs):
-            super().init_poolmanager(*args, **kwargs)
-            self.poolmanager.pool_classes_by_scheme['https'] = BypassPool
-
-    return BypassAdapter()
 
 
 def _split_tags(keyword: str) -> list[str]:
