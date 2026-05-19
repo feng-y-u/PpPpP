@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from config import (
     COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY,
+    PROXY, SSL_VERIFY,
 )
 from models import Illust, BlockedTag, get_session, safe_commit
 
@@ -53,7 +53,7 @@ def _build_session() -> requests.Session:
     })
     s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
     s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
-    s.verify = False
+    s.verify = SSL_VERIFY
 
     if PROXY:
         s.proxies = {'https': PROXY, 'http': PROXY}

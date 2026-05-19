@@ -36,3 +36,6 @@ AUTO_FOLLOW_DOWNLOAD = False # 是否自动下载新作品
 
 # 网络代理
 PROXY = ''                   # HTTP/SOCKS5 代理, 如 'http://127.0.0.1:7890', 留空禁用
+
+# SSL 证书验证
+SSL_VERIFY = True            # 生产环境建议启用
