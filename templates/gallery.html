@@ -220,8 +220,21 @@ let allTags = [];
 const PAGE_SIZE = 50;
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
+// Read ?tag= from URL on load
+const urlParams = new URLSearchParams(location.search);
+if (urlParams.has('tag')) {
+  activeTag = urlParams.get('tag');
+}
+
 loadGallery(0);
 loadTags();
+
+if (activeTag) {
+  const el = $('#tagFilterActive');
+  el.style.display = 'inline-block';
+  el.innerHTML = `${escHtml(activeTag)} <span class="tag-filter-clear">✕</span>`;
+  $('#tagFilter').value = activeTag;
+}
 
 function setActiveTag(tag) {
   activeTag = tag;

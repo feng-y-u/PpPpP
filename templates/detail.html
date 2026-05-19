@@ -378,10 +378,10 @@ function resetDlBtn() {
   btn.disabled = false;
 }
 
-// ── Tag click → search ──
+// ── Tag click → gallery ──
 $('#tagList')?.addEventListener('click', e => {
   const tag = e.target.closest('.tag-item');
-  if (tag) window.location.href = `/?type=tag&query=${encodeURIComponent(tag.dataset.tag)}`;
+  if (tag) window.location.href = `/gallery?tag=${encodeURIComponent(tag.dataset.tag)}`;
 });
 
 // ── Init ──

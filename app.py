@@ -649,11 +649,16 @@ def api_gallery():
                 continue
             if tag_filter and tag_filter not in i.tags_list:
                 continue
-            d = i.to_dict()
             paths = i.local_paths_list or []
+            if not i.file_size and paths:
+                total = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
+                if total:
+                    i.file_size = total
+            d = i.to_dict()
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
+        safe_commit(db)
 
         return jsonify({'data': results, 'total': total, 'has_more': offset + limit < total})
 
