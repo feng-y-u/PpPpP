@@ -204,9 +204,16 @@ def _process_items(db, items, id_extractor, illust_factory, blocked, *,
     results = []
     to_fetch = []
 
+    if not items:
+        return results
+
+    pixiv_ids = [id_extractor(item) for item in items]
+    existing_list = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
+    existing_map = {i.pixiv_id: i for i in existing_list}
+
     for item in items:
         pixiv_id = id_extractor(item)
-        existing = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        existing = existing_map.get(pixiv_id)
         if existing:
             if not _is_blocked(existing.tags_list, blocked) \
                and existing.bookmark_count >= min_bookmarks \

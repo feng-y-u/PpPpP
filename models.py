@@ -3,7 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, event, Integer, String, Text, DateTime
+from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, Index, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -45,11 +45,14 @@ class Base(DeclarativeBase):
 
 class Illust(Base):
     __tablename__ = 'illusts'
+    __table_args__ = (
+        Index('ix_illusts_dl_status_created', 'download_status', 'created_at'),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     pixiv_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
     title: Mapped[str] = mapped_column(String, default='')
-    user_id: Mapped[int] = mapped_column(Integer, default=0)
+    user_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
     user_name: Mapped[str] = mapped_column(String, default='')
     tags: Mapped[str] = mapped_column(Text, default='[]')
     page_count: Mapped[int] = mapped_column(Integer, default=1)
@@ -59,6 +62,7 @@ class Illust(Base):
     original_urls: Mapped[str] = mapped_column(Text, default='[]')
     local_paths: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -114,6 +118,7 @@ class Illust(Base):
             'original_urls': self.original_urls_list,
             'local_paths': self.local_paths_list,
             'download_status': self.download_status,
+            'file_size': self.file_size,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -147,6 +152,17 @@ class DownloadLog(Base):
 
 def init_db():
     Base.metadata.create_all(engine)
+
+    # Schema migrations for existing DBs
+    from sqlalchemy import inspect as sa_inspect
+    inspector = sa_inspect(engine)
+    columns = [c['name'] for c in inspector.get_columns('illusts')]
+    if 'file_size' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN file_size INTEGER DEFAULT 0'))
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
+            conn.commit()
 
 
 def get_session() -> Session:

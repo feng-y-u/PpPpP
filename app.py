@@ -236,6 +236,7 @@ def _download_illust(pixiv_id: int):
                 illust.local_paths_list = local_paths
                 illust.download_status = 'done'
                 total_size = sum(os.path.getsize(p) for p in local_paths if os.path.isfile(p))
+                illust.file_size = total_size
                 db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
             safe_commit(db)
     finally:
@@ -569,13 +570,7 @@ def detail_page(pixiv_id):
         paths = illust.local_paths_list or []
         local_urls = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
 
-        file_size = None
-        if paths:
-            total = 0
-            for p in paths:
-                if os.path.isfile(p):
-                    total += os.path.getsize(p)
-            file_size = total
+        file_size = illust.file_size or None
 
         # Related: same user, exclude self
         related = db.query(Illust).filter(
@@ -617,9 +612,7 @@ def detail_api(pixiv_id):
         d = illust.to_dict()
         paths = illust.local_paths_list or []
         d['local_urls'] = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
-        if paths:
-            d['file_count'] = len(paths)
-            d['file_size'] = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
+        d['file_count'] = len(paths)
         return jsonify(d)
 
 
@@ -638,7 +631,11 @@ def api_gallery():
 
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
-        illusts = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).all()
+
+        base_q = db.query(Illust).filter(Illust.download_status == 'done')
+        total = base_q.count()
+        illusts = base_q.order_by(Illust.created_at.desc()).limit(limit).offset(offset).all()
+
         results = []
         for i in illusts:
             if blocked and set(i.tags_list) & blocked:
@@ -647,15 +644,11 @@ def api_gallery():
                 continue
             d = i.to_dict()
             paths = i.local_paths_list or []
-            total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
-            d['file_size'] = total_size
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
 
-        total = len(results)
-        page = results[offset:offset + limit]
-        return jsonify({'data': page, 'total': total, 'has_more': offset + limit < total})
+        return jsonify({'data': results, 'total': total, 'has_more': offset + limit < total})
 
 
 @app.route('/api/gallery/tags')
@@ -817,7 +810,7 @@ def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, ma
                     db.add(illust)
                     safe_commit(db)
             if r.get('download_status') != 'done':
-                _download_illust(pixiv_id)
+                download_executor.submit(_download_illust, pixiv_id).result()
             with get_session() as db:
                 illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
                 if illust and illust.download_status == 'done':
