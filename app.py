@@ -135,7 +135,7 @@ def _auto_follow_worker():
                 with get_session() as db:
                     db.add_all(new_illusts)
                     safe_commit(db)
-                new_count = len(new_illusts)
+            new_count = len(new_illusts)
             _auto_follow_state['last_check'] = datetime.now(timezone.utc).isoformat()
             _auto_follow_state['last_count'] = new_count
             if new_count:
