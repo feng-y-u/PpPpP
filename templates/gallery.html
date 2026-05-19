@@ -88,18 +88,43 @@
 .batch-mode .card-checkbox { display: block; }
 
 /* ── Tag Filter ── */
-.tag-filter-badge {
-  font-size: 0.72rem;
-  cursor: pointer;
-  background: rgba(255,255,255,.04);
-  border: 1px solid rgba(255,255,255,.08);
-  color: var(--text-secondary);
-  padding: 0.25rem 0.6rem;
-  border-radius: 6px;
-  transition: all 0.15s;
+.tag-filter-wrap {
+  position: relative;
+  margin-bottom: 12px;
 }
-.tag-filter-badge:hover { background: rgba(124,58,237,.15); color: #c4b5fd; }
-.tag-filter-badge.active { background: rgba(124,58,237,.25); color: #ddd6fe; border-color: rgba(124,58,237,.3); }
+.tag-filter-input {
+  background: rgba(255,255,255,.05) !important;
+  border: 1px solid rgba(255,255,255,.1) !important;
+  color: #fff !important;
+  font-size: 0.82rem;
+  border-radius: 8px;
+  padding: 6px 12px;
+  width: 100%;
+  max-width: 320px;
+}
+.tag-filter-input:focus {
+  border-color: rgba(124,58,237,.4) !important;
+  box-shadow: 0 0 0 3px rgba(124,58,237,.1) !important;
+  outline: none;
+}
+.tag-filter-input::placeholder { color: var(--text-muted); }
+.tag-filter-active {
+  display: inline-block;
+  font-size: 0.75rem;
+  background: rgba(124,58,237,.2);
+  color: #c4b5fd;
+  border: 1px solid rgba(124,58,237,.3);
+  padding: 2px 10px;
+  border-radius: 6px;
+  margin-left: 8px;
+}
+.tag-filter-clear {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-left: 4px;
+}
+.tag-filter-clear:hover { color: #f87171; }
 
 /* ── Stats ── */
 #stats { color: var(--text-muted) !important; }
@@ -140,7 +165,11 @@
       <span id="batchCount" class="small" style="color:var(--text-muted);"></span>
     </div>
   </div>
-  <div id="tagFilter" class="d-flex flex-wrap gap-1 mb-3"></div>
+  <div class="tag-filter-wrap">
+    <input id="tagFilter" class="tag-filter-input" type="text" placeholder="搜索标签..." list="tagList" autocomplete="off">
+    <datalist id="tagList"></datalist>
+    <span id="tagFilterActive" class="tag-filter-active" style="display:none;"></span>
+  </div>
   <div id="cardGrid" class="row"></div>
   <div id="emptyState" class="empty-state" style="display:none;">
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
@@ -187,11 +216,44 @@ const csrfToken = '{{ csrf_token | safe }}';
 let deleteTarget = null, deleteMode = 'single', activeTag = '';
 let selectedPids = new Set(), batchMode = false;
 let galleryOffset = 0, galleryTotal = 0, galleryHasMore = false;
+let allTags = [];
 const PAGE_SIZE = 50;
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
 loadGallery(0);
 loadTags();
+
+function setActiveTag(tag) {
+  activeTag = tag;
+  const el = $('#tagFilterActive');
+  const input = $('#tagFilter');
+  if (tag) {
+    el.style.display = 'inline-block';
+    el.innerHTML = `${escHtml(tag)} <span class="tag-filter-clear">✕</span>`;
+    input.value = tag;
+  } else {
+    el.style.display = 'none';
+    input.value = '';
+  }
+  loadGallery(0);
+}
+
+$('#tagFilter').addEventListener('input', function() {
+  const val = this.value.trim();
+  if (!val) { setActiveTag(''); return; }
+  if (allTags.includes(val)) { setActiveTag(val); }
+});
+
+$('#tagFilter').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    const val = this.value.trim();
+    if (val && allTags.includes(val)) setActiveTag(val);
+  }
+});
+
+$('#tagFilterActive')?.addEventListener('click', function(e) {
+  if (e.target.classList.contains('tag-filter-clear')) setActiveTag('');
+});
 
 function showToast(msg) {
   const toast = $('#liveToast');
@@ -246,19 +308,8 @@ function loadTags() {
   fetch('/api/gallery/tags')
     .then(r => r.json())
     .then(tags => {
-      const filter = $('#tagFilter');
-      filter.innerHTML = tags.map(t => {
-        const cls = t === activeTag ? 'tag-filter-badge active' : 'tag-filter-badge';
-        return `<span class="${cls}" data-tag="${escAttr(t)}">${escHtml(t)}</span>`;
-      }).join('');
-      filter.querySelectorAll('.tag-filter-badge').forEach(b => {
-        b.addEventListener('click', () => {
-          const tag = b.dataset.tag;
-          activeTag = activeTag === tag ? '' : tag;
-          loadTags();
-          loadGallery(0);
-        });
-      });
+      allTags = tags;
+      $('#tagList').innerHTML = tags.map(t => `<option value="${escAttr(t)}">`).join('');
     });
 }
 
@@ -384,6 +435,7 @@ function updateBatchUI() {
 }
 
 $('#btnSelectAll').addEventListener('click', () => {
+  if (!batchMode) toggleBatchMode();
   document.querySelectorAll('.card-checkbox').forEach(cb => {
     cb.checked = true;
     selectedPids.add(parseInt(cb.dataset.pid));
