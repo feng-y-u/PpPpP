@@ -731,7 +731,7 @@ $('#downloadAllBtn').addEventListener('click', async () => {
     const r = await fetch('/api/download/batch', { method:'POST', headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/json'}, body:JSON.stringify({ids}) });
     const d = await r.json();
     if (r.ok) { st.textContent = d.message; btn.textContent='下载中...'; btn.className='btn btn-secondary btn-sm'; pollBatch(ids); }
-    else { showToast(d.error||'失败', true); btn.disabled=false; }
+    else { showToast(d.error||'失败', true); btn.disabled=false; batchInProgress=false; }
   } catch { showToast('网络错误', true); btn.disabled=false; batchInProgress=false; }
 });
 
@@ -739,12 +739,15 @@ function pollBatch(ids) {
   const pending = new Set(ids); let n = 0;
   const iv = setInterval(async () => {
     n++;
-    for (const pid of [...pending]) {
-      try { const d = await fetch(`/download_status/${pid}`).then(r=>r.json());
-        if (d.status==='done') { pending.delete(pid); updateDlDone(pid); }
-        else if (d.status==='failed') { pending.delete(pid); resetDlBtn(pid); }
-      } catch {}
-    }
+    try {
+      const r = await fetch(`/api/download/status/batch?ids=${[...pending].join(',')}`);
+      const d = await r.json();
+      for (const [pid, status] of Object.entries(d.statuses || {})) {
+        const pidNum = parseInt(pid);
+        if (status === 'done') { pending.delete(pidNum); updateDlDone(pidNum); }
+        else if (status === 'failed') { pending.delete(pidNum); resetDlBtn(pidNum); }
+      }
+    } catch {}
     if (pending.size===0) { clearInterval(iv); $('#downloadAllStatus').textContent='全部完成'; batchInProgress=false; }
     else if (n>=150) { clearInterval(iv); $('#downloadAllStatus').textContent=`部分完成(${pending.size})`; batchInProgress=false; }
     else $('#downloadAllStatus').textContent = `剩余 ${pending.size} 个...`;
@@ -753,12 +756,17 @@ function pollBatch(ids) {
 
 // ── Helpers ──
 function lazyLoad() {
-  requestAnimationFrame(() => {
-    $$('img[data-src]').forEach(img => {
-      img.src = img.dataset.src;
-      img.removeAttribute('data-src');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const img = entry.target;
+        img.src = img.dataset.src;
+        img.removeAttribute('data-src');
+        observer.unobserve(img);
+      }
     });
-  });
+  }, { rootMargin: '200px' });
+  $$('img[data-src]').forEach(img => observer.observe(img));
 }
 function showLoading(on) { $('#loadingOverlay').classList.toggle('show',on); $('#searchBtn').disabled=on; }
 

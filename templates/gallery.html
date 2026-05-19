@@ -287,13 +287,6 @@ $('#tagFilterActive')?.addEventListener('click', function(e) {
   if (e.target.classList.contains('tag-filter-clear')) setActiveTag('');
 });
 
-function showToast(msg) {
-  const toast = $('#liveToast');
-  toast.className = 'toast align-items-center border-0';
-  toast.style.background = msg.includes('失败') || msg.includes('错误') ? 'rgba(30,27,46,.92)' : 'rgba(5,150,105,.85)';
-  $('#toastMsg').textContent = msg;
-  bootstrap.Toast.getOrCreateInstance(toast).show();
-}
 
 function loadGallery(offset) {
   const params = new URLSearchParams();
@@ -343,7 +336,7 @@ function loadGallery(offset) {
       $('#stats').textContent = statsText;
       $('#loadMoreWrap').style.display = data.has_more ? 'block' : 'none';
     })
-    .catch(() => showToast('加载图库失败'));
+    .catch(() => showToast('加载图库失败', true));
 }
 
 $('#loadMoreBtn').addEventListener('click', () => loadGallery(galleryOffset));
@@ -423,10 +416,10 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
         showToast(data.message);
         setTimeout(() => location.reload(), 800);
       } else {
-        showToast(data.error || '批量删除失败');
+        showToast(data.error || '批量删除失败', true);
       }
     } catch {
-      showToast('网络错误');
+      showToast('网络错误', true);
     }
     deleteTarget = null;
     deleteMode = 'single';
@@ -443,10 +436,10 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
       showToast(data.message);
       setTimeout(() => location.reload(), 800);
     } else {
-      showToast(data.error || '删除失败');
+      showToast(data.error || '删除失败', true);
     }
   } catch {
-    showToast('网络错误');
+    showToast('网络错误', true);
   }
   deleteTarget = null;
 });
