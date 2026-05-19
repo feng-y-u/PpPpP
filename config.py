@@ -1,3 +1,4 @@
+import json
 import os
 import platform
 
@@ -39,3 +40,29 @@ PROXY = ''                   # HTTP/SOCKS5 代理, 如 'http://127.0.0.1:7890', 
 
 # SSL 证书验证
 SSL_VERIFY = False           # 生产环境建议设为 True，需安装 CA 证书
+
+# Pixiv OAuth 自动登录（可选）
+# 配置后自动通过 OAuth 维护会话，不再需要手动填写 cookies.txt
+PIXIV_USERNAME = os.environ.get('PIXIV_USERNAME', '')
+PIXIV_PASSWORD = os.environ.get('PIXIV_PASSWORD', '')
+
+# ── 从 settings.json 覆盖配置（运行时通过设置页面修改） ──
+_settings_path = os.path.join(BASE_DIR, 'instance', 'settings.json')
+if os.path.exists(_settings_path):
+    try:
+        with open(_settings_path, 'r', encoding='utf-8') as _f:
+            _overrides = json.load(_f)
+        _key_map = {
+            'proxy': 'PROXY',
+            'download_max_workers': 'DOWNLOAD_MAX_WORKERS',
+            'per_page': 'PER_PAGE',
+            'search_pages': 'SEARCH_PAGES',
+            'max_bookmarks_default': 'MAX_BOOKMARKS_DEFAULT',
+            'auto_follow_interval': 'AUTO_FOLLOW_INTERVAL',
+            'auto_follow_download': 'AUTO_FOLLOW_DOWNLOAD',
+        }
+        for _json_key, _const_name in _key_map.items():
+            if _json_key in _overrides and _overrides[_json_key] != '':
+                globals()[_const_name] = _overrides[_json_key]
+    except Exception:
+        pass  # settings.json invalid → silently use defaults

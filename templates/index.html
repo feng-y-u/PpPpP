@@ -305,6 +305,7 @@
       <a class="nav-link" href="/gallery">图库</a>
       <a class="nav-link" href="/bulk">批量</a>
       <a class="nav-link" href="/downloads">下载</a>
+      <a class="nav-link" href="/settings">设置</a>
     </div>
   </div>
 </nav>
@@ -771,7 +772,17 @@ function loadR18Mode() {
 // ── Init ──
 loadBlockedTags();
 loadR18Mode();
-if (!restoreSearchState()) sessionStorage.removeItem(SEARCH_STATE_KEY);
+
+// 检查 URL 参数（从详情页等跳转过来）
+const urlParams = new URLSearchParams(location.search);
+if (urlParams.has('query')) {
+  $('#searchQuery').value = urlParams.get('query');
+  if (urlParams.has('type')) $('#searchType').value = urlParams.get('type');
+  updateSearchUI();
+  doSearch();
+} else if (!restoreSearchState()) {
+  sessionStorage.removeItem(SEARCH_STATE_KEY);
+}
 </script>
 </body>
 </html>

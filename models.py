@@ -3,7 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, Index, text
+from sqlalchemy import create_engine, event, Boolean, Integer, String, Text, DateTime, Index, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -63,6 +63,8 @@ class Illust(Base):
     local_paths: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    favorited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -119,6 +121,8 @@ class Illust(Base):
             'local_paths': self.local_paths_list,
             'download_status': self.download_status,
             'file_size': self.file_size,
+            'is_favorite': self.is_favorite,
+            'favorited_at': self.favorited_at.isoformat() if self.favorited_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -162,6 +166,11 @@ def init_db():
             conn.execute(text('ALTER TABLE illusts ADD COLUMN file_size INTEGER DEFAULT 0'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
+            conn.commit()
+    if 'is_favorite' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN is_favorite BOOLEAN DEFAULT 0'))
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN favorited_at DATETIME'))
             conn.commit()
 
 

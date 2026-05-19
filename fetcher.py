@@ -3,6 +3,7 @@ import os
 import random
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.parse import urlparse
@@ -17,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from config import (
     COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY, SSL_VERIFY,
+    PROXY, SSL_VERIFY, PIXIV_USERNAME, PIXIV_PASSWORD,
 )
 from models import Illust, BlockedTag, get_session, safe_commit
 
@@ -43,16 +44,89 @@ def _load_cookie():
         _cookie_mtime = mtime
 
 
+# ── OAuth ──
+
+PIXIV_CLIENT_ID = 'MOBrBDS8blbauoSck0ZfDbtuzpyT'
+PIXIV_CLIENT_SECRET = 'lsACyCD94FhDUtGTXi3QjcFE2uP2qW'
+
+_token_data = {}  # { 'access_token': str, 'refresh_token': str, 'expires_at': float }
+_device_token = str(uuid.uuid4())
+
+
+def _oauth_login():
+    """First-time login: username/password → access_token + refresh_token."""
+    global _token_data
+    try:
+        resp = requests.post('https://oauth.secure.pixiv.net/auth/token', data={
+            'client_id': PIXIV_CLIENT_ID,
+            'client_secret': PIXIV_CLIENT_SECRET,
+            'grant_type': 'password',
+            'username': PIXIV_USERNAME,
+            'password': PIXIV_PASSWORD,
+            'device_token': _device_token,
+        }, verify=SSL_VERIFY, timeout=(5, 15))
+        resp.raise_for_status()
+        body = resp.json()
+        _token_data = {
+            'access_token': body['access_token'],
+            'refresh_token': body['refresh_token'],
+            'expires_at': time.time() + body.get('expires_in', 3600),
+        }
+        logger.info('OAuth login successful')
+    except Exception as e:
+        logger.error(f'OAuth login failed: {e}')
+        raise
+
+
+def _oauth_refresh():
+    """Refresh token using refresh_token."""
+    global _token_data
+    try:
+        resp = requests.post('https://oauth.secure.pixiv.net/auth/token', data={
+            'client_id': PIXIV_CLIENT_ID,
+            'client_secret': PIXIV_CLIENT_SECRET,
+            'grant_type': 'refresh_token',
+            'refresh_token': _token_data['refresh_token'],
+            'device_token': _device_token,
+        }, verify=SSL_VERIFY, timeout=(5, 15))
+        resp.raise_for_status()
+        body = resp.json()
+        _token_data = {
+            'access_token': body['access_token'],
+            'refresh_token': body['refresh_token'],
+            'expires_at': time.time() + body.get('expires_in', 3600),
+        }
+        logger.info('OAuth token refreshed')
+    except Exception as e:
+        logger.error(f'OAuth refresh failed: {e}')
+        _token_data = {}
+        raise
+
+
+def _ensure_token():
+    """Ensure a valid token exists (login or refresh if needed)."""
+    if not _token_data:
+        _oauth_login()
+    elif _token_data['expires_at'] - time.time() < 300:  # 5 min buffer
+        _oauth_refresh()
+
+
 def _build_session() -> requests.Session:
-    _load_cookie()
     s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         'Referer': f'{PIXIV_BASE_URL}/',
         'Accept-Language': 'ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7',
     })
-    s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
-    s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
+
+    if PIXIV_USERNAME and PIXIV_PASSWORD:
+        _ensure_token()
+        s.headers.update({'Authorization': f'Bearer {_token_data["access_token"]}'})
+    else:
+        _load_cookie()
+        s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
+        s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
+
     s.verify = SSL_VERIFY
 
     if PROXY:

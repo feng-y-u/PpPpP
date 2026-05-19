@@ -179,6 +179,7 @@
       <a class="nav-link" href="/gallery">图库</a>
       <a class="nav-link" href="/bulk">批量</a>
       <a class="nav-link" href="/downloads">下载</a>
+      <a class="nav-link" href="/settings">设置</a>
     </div>
   </div>
 </nav>
@@ -224,11 +225,12 @@
     </div>
 
     <div class="info-actions">
+      {% set is_fav = illust.get('is_favorite', False) %}
       {% if has_images %}
-        <button class="btn btn-primary-accent" id="dlBtn">♥ 收藏</button>
+        <button class="btn {% if is_fav %}btn-dl-done{% else %}btn-primary-accent{% endif %}" id="dlBtn">{% if is_fav %}❤ 已收藏{% else %}♥ 收藏{% endif %}</button>
         <a href="/download_file/{{ illust.pixiv_id }}" class="btn btn-dl-done" id="downloadBtn">⬇ 下载原图</a>
       {% else %}
-        <button class="btn btn-primary-accent" id="dlBtn">♥ 收藏</button>
+        <button class="btn {% if is_fav %}btn-dl-done{% else %}btn-primary-accent{% endif %}" id="dlBtn">{% if is_fav %}❤ 已收藏{% else %}♥ 收藏{% endif %}</button>
         <button class="btn btn-soft" id="downloadBtn" data-pid="{{ illust.pixiv_id }}">⬇ 下载原图</button>
       {% endif %}
     </div>
@@ -290,6 +292,7 @@ const csrfToken = '{{ csrf_token | safe }}';
 const illust = {{ illust | tojson }};
 const isDownloaded = {{ 'true' if is_downloaded else 'false' }};
 const pageCount = {{ page_count }};
+let isFavorite = {{ 'true' if illust.get('is_favorite', False) else 'false' }};
 
 // ── Image URLs ──
 const localUrls = {{ local_urls | tojson if local_urls else '[]' }};
@@ -330,6 +333,32 @@ $('#backBtn').addEventListener('click', () => history.back());
 document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') { e.preventDefault(); showPage(currentPage - 1); }
   if (e.key === 'ArrowRight' || e.code === 'ArrowRight') { e.preventDefault(); showPage(currentPage + 1); }
+});
+
+// ── Favorite Toggle ──
+$('#dlBtn').addEventListener('click', async function() {
+  if (this.disabled) return;
+  this.disabled = true;
+  try {
+    const r = await fetch(`/api/favorite/${illust.pixiv_id}`, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+    });
+    const d = await r.json();
+    if (r.ok) {
+      isFavorite = d.is_favorite;
+      if (isFavorite) {
+        this.className = 'btn btn-dl-done';
+        this.textContent = '❤ 已收藏';
+      } else {
+        this.className = 'btn btn-primary-accent';
+        this.textContent = '♥ 收藏';
+      }
+    } else {
+      showToast(d.error || '操作失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+  finally { this.disabled = false; }
 });
 
 // ── Download ──

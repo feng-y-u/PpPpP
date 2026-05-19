@@ -633,6 +633,7 @@ def api_gallery():
     tag_filter = request.args.get('tag', '').strip()
     limit = request.args.get('limit', 50, type=int)
     offset = request.args.get('offset', 0, type=int)
+    favorites_only = request.args.get('favorites', '').lower() == 'true'
     limit = max(1, min(200, limit))
     offset = max(0, offset)
 
@@ -640,6 +641,8 @@ def api_gallery():
         blocked = {t.tag for t in db.query(BlockedTag).all()}
 
         base_q = db.query(Illust).filter(Illust.download_status == 'done')
+        if favorites_only:
+            base_q = base_q.filter(Illust.is_favorite == True)
         total = base_q.count()
         illusts = base_q.order_by(Illust.created_at.desc()).limit(limit).offset(offset).all()
 
@@ -651,16 +654,27 @@ def api_gallery():
                 continue
             paths = i.local_paths_list or []
             if not i.file_size and paths:
-                total = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
-                if total:
-                    i.file_size = total
+                total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
+                if total_size:
+                    i.file_size = total_size
             d = i.to_dict()
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
         safe_commit(db)
 
-        return jsonify({'data': results, 'total': total, 'has_more': offset + limit < total})
+        # 计算收藏总数
+        fav_total = db.query(Illust).filter(
+            Illust.download_status == 'done',
+            Illust.is_favorite == True,
+        ).count()
+
+        return jsonify({
+            'data': results,
+            'total': total,
+            'favorite_total': fav_total,
+            'has_more': offset + limit < total,
+        })
 
 
 @app.route('/api/gallery/tags')
@@ -951,6 +965,100 @@ def remove_blocked_tag(tag):
         db.delete(entry)
         safe_commit(db)
         return jsonify({'status': 'deleted', 'tag': tag})
+
+
+# ── Settings ──
+
+import json as json_module
+
+_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'settings.json')
+
+_SETTINGS_DEFAULTS = {
+    'proxy': '',
+    'download_max_workers': 2,
+    'per_page': 60,
+    'search_pages': 10,
+    'max_bookmarks_default': 0,
+    'auto_follow_interval': 600,
+    'auto_follow_download': False,
+}
+
+
+def _load_settings():
+    if os.path.exists(_SETTINGS_PATH):
+        try:
+            with open(_SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                data = json_module.load(f)
+            result = dict(_SETTINGS_DEFAULTS)
+            result.update(data)
+            return result
+        except Exception:
+            pass
+    return dict(_SETTINGS_DEFAULTS)
+
+
+@app.route('/settings')
+def settings_page():
+    return render_template('settings.html', csrf_token=_get_csrf_token())
+
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    if request.method == 'GET':
+        return jsonify(_load_settings())
+
+    # POST requires CSRF
+    token = request.headers.get('X-CSRF-Token', '')
+    if not token or token != session.get('_csrf_token', ''):
+        return jsonify({'error': 'CSRF校验失败'}), 403
+
+    body = request.get_json(silent=True) or {}
+    current = _load_settings()
+    # Merge only known keys
+    for key in _SETTINGS_DEFAULTS:
+        if key in body:
+            val = body[key]
+            if key in ('auto_follow_download',):
+                val = bool(val)
+            elif key in ('download_max_workers', 'per_page', 'search_pages',
+                         'max_bookmarks_default', 'auto_follow_interval'):
+                try:
+                    val = max(0, int(val))
+                except (ValueError, TypeError):
+                    continue
+            current[key] = val
+    try:
+        os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
+        with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
+            json_module.dump(current, f, ensure_ascii=False, indent=2)
+        return jsonify(current)
+    except Exception as e:
+        return jsonify({'error': f'保存失败: {e}'}), 500
+
+
+# ── Favorites ──
+
+
+@app.route('/api/favorite/<int:pixiv_id>', methods=['GET', 'POST'])
+def api_favorite(pixiv_id):
+    if request.method == 'GET':
+        with get_session() as db:
+            illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+            return jsonify({'is_favorite': illust.is_favorite if illust else False})
+
+    # POST — 需要 CSRF
+    token = request.headers.get('X-CSRF-Token', '')
+    if not token or token != session.get('_csrf_token', ''):
+        return jsonify({'error': 'CSRF校验失败'}), 403
+
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            return jsonify({'error': '作品不存在'}), 404
+        illust.is_favorite = not illust.is_favorite
+        illust.favorited_at = datetime.now(timezone.utc) if illust.is_favorite else None
+        safe_commit(db)
+        return jsonify({'is_favorite': illust.is_favorite})
 
 
 if __name__ == '__main__':
