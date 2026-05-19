@@ -10,15 +10,15 @@
 .settings-card {
   border: none;
   border-radius: var(--radius);
-  background: rgba(255,255,255,.02);
-  border: 1px solid rgba(255,255,255,.05);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-card);
   margin-bottom: 1.25rem;
   overflow: hidden;
 }
 .settings-card .card-header {
   font-weight: 600;
   font-size: 0.82rem;
-  border-bottom: 1px solid rgba(255,255,255,.06);
+  border-bottom: 1px solid var(--border-subtle);
   padding: 0.7rem 1.25rem;
 }
 .settings-card .card-body { padding: 1.25rem; }
@@ -40,9 +40,9 @@
   margin-top: 0.2rem;
 }
 .form-input {
-  background: rgba(255,255,255,.05) !important;
-  border: 1px solid rgba(255,255,255,.1) !important;
-  color: #fff !important;
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-input) !important;
+  color: var(--text-primary) !important;
   font-size: 0.85rem;
   border-radius: 8px;
   padding: 8px 12px;
@@ -51,8 +51,8 @@
   transition: border-color 0.15s;
 }
 .form-input:focus {
-  border-color: rgba(124,58,237,.4) !important;
-  box-shadow: 0 0 0 3px rgba(124,58,237,.1) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-subtle) !important;
   outline: none;
 }
 .form-input::placeholder { color: var(--text-muted); }
@@ -84,21 +84,24 @@
   border-radius: 8px;
   transition: all 0.15s;
 }
-.btn-save:hover { background: var(--accent-hover); box-shadow: 0 4px 14px rgba(124,58,237,.25); color: #fff; }
+.btn-save:hover { background: var(--accent-hover); box-shadow: 0 4px 14px rgba(212,67,107,.25); color: #fff; }
 .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
 
 <nav class="navbar">
-  <div class="container">
-    <a class="navbar-brand" href="/">Pixiv Viewer</a>
-    <div class="d-flex gap-1">
-      <a class="nav-link" href="/">搜索</a>
-      <a class="nav-link" href="/gallery">图库</a>
-      <a class="nav-link" href="/bulk">批量</a>
-      <a class="nav-link" href="/downloads">下载</a>
-      <a class="nav-link active" href="/settings">设置</a>
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      Pixiv Viewer
+    </a>
+    <div class="navbar-links">
+      <a class="navbar-link" href="/">搜索</a>
+      <a class="navbar-link" href="/gallery">图库</a>
+      <a class="navbar-link" href="/bulk">批量</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link active" href="/settings">设置</a>
     </div>
   </div>
 </nav>
@@ -177,7 +180,7 @@
   <div id="liveToast" class="toast align-items-center border-0" role="alert">
     <div class="d-flex">
       <div class="toast-body" id="toastMsg"></div>
-      <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+      <button class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
     </div>
   </div>
 </div>

@@ -10,21 +10,20 @@
 /* ── Gallery Cards ── */
 .gallery-card {
   border: none;
-  border-radius: var(--radius);
+  border-radius: var(--radius-card);
   overflow: hidden;
-  background: rgba(255,255,255,.03);
-  border: 1px solid rgba(255,255,255,.05);
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  background: var(--bg-elevated);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
   height: 100%;
 }
 .gallery-card:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 8px 24px rgba(0,0,0,.3);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
 }
 
 .card-img-wrap {
   position: relative;
-  background: #1e1b2e;
+  background: var(--bg-thumb);
   aspect-ratio: 250 / 250;
   overflow: hidden;
 }
@@ -35,51 +34,41 @@
 }
 .size-badge {
   position: absolute;
-  bottom: 8px;
-  right: 8px;
-  background: rgba(0,0,0,.65);
+  bottom: 6px;
+  right: 6px;
+  background: rgba(255,255,255,.85);
   backdrop-filter: blur(6px);
-  color: #fff;
-  font-size: 0.7rem;
-  padding: 2px 8px;
-  border-radius: 5px;
+  color: #2b2b2b;
+  font-size: 0.68rem;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-weight: 500;
 }
 
-.card-body { padding: 0.75rem; }
+.card-body { padding: 0.6rem 0.7rem; }
 .card-title {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.card-info { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.3rem; }
-.tags-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin: 0.3rem 0; }
+.card-info { font-size: 0.73rem; color: var(--text-secondary); margin-bottom: 0.2rem; }
+.tags-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin: 0.25rem 0; }
 .tag-badge {
-  font-size: 0.65rem;
-  background: rgba(255,255,255,.05) !important;
+  font-size: 0.62rem;
+  background: var(--accent-subtle) !important;
   color: var(--text-muted) !important;
-  border-radius: 4px;
-  padding: 2px 6px;
+  border-radius: 3px;
+  padding: 1px 6px;
 }
-
-.btn-close-white { filter: invert(1); }
 
 /* ── Favorites Toggle ── */
 #btnFavorites.active {
-  background: rgba(239,68,68,.15);
-  border-color: rgba(239,68,68,.3);
-  color: #fca5a5;
-}
-
-/* ── Batch Toolbar ── */
-#batchToolbar .form-check-input {
-  width: 18px; height: 18px;
-  accent-color: var(--accent);
-  cursor: pointer;
-  background-color: rgba(255,255,255,.1);
-  border-color: rgba(255,255,255,.2);
+  background: rgba(212,67,107,.08);
+  border-color: rgba(212,67,107,.2);
+  color: var(--accent);
 }
 
 /* ── Card Checkbox ── */
@@ -100,9 +89,9 @@
   margin-bottom: 12px;
 }
 .tag-filter-input {
-  background: rgba(255,255,255,.05) !important;
-  border: 1px solid rgba(255,255,255,.1) !important;
-  color: #fff !important;
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-input) !important;
+  color: var(--text-primary) !important;
   font-size: 0.82rem;
   border-radius: 8px;
   padding: 6px 12px;
@@ -110,19 +99,19 @@
   max-width: 320px;
 }
 .tag-filter-input:focus {
-  border-color: rgba(124,58,237,.4) !important;
-  box-shadow: 0 0 0 3px rgba(124,58,237,.1) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-subtle) !important;
   outline: none;
 }
 .tag-filter-input::placeholder { color: var(--text-muted); }
 .tag-filter-active {
   display: inline-block;
-  font-size: 0.75rem;
-  background: rgba(124,58,237,.2);
-  color: #c4b5fd;
-  border: 1px solid rgba(124,58,237,.3);
+  font-size: 0.73rem;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border: 1px solid rgba(212,67,107,.2);
   padding: 2px 10px;
-  border-radius: 6px;
+  border-radius: 5px;
   margin-left: 8px;
 }
 .tag-filter-clear {
@@ -131,34 +120,35 @@
   cursor: pointer;
   margin-left: 4px;
 }
-.tag-filter-clear:hover { color: #f87171; }
+.tag-filter-clear:hover { color: var(--danger); }
 
 /* ── Stats ── */
 #stats { color: var(--text-muted) !important; }
 
 /* ── Modals ── */
 .modal-content {
-  background: #1a1a2e;
-  border: 1px solid rgba(255,255,255,.08);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-card);
   color: var(--text-primary);
 }
-.modal-header { border-color: rgba(255,255,255,.06); }
-.modal-footer { border-color: rgba(255,255,255,.06); }
-.bg-dark { background: #0d0d1a !important; }
-
+.modal-header { border-color: var(--border-subtle); }
+.modal-footer { border-color: var(--border-subtle); }
 </style>
 </head>
 <body>
 
 <nav class="navbar">
-  <div class="container">
-    <a class="navbar-brand" href="/">Pixiv Viewer</a>
-    <div class="d-flex gap-1">
-      <a class="nav-link" href="/">搜索</a>
-      <a class="nav-link active" href="/gallery">图库</a>
-      <a class="nav-link" href="/bulk">批量</a>
-      <a class="nav-link" href="/downloads">下载</a>
-      <a class="nav-link" href="/settings">设置</a>
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      Pixiv Viewer
+    </a>
+    <div class="navbar-links">
+      <a class="navbar-link" href="/">搜索</a>
+      <a class="navbar-link active" href="/gallery">图库</a>
+      <a class="navbar-link" href="/bulk">批量</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link" href="/settings">设置</a>
     </div>
   </div>
 </nav>
@@ -197,7 +187,7 @@
   <div id="liveToast" class="toast align-items-center border-0" role="alert">
     <div class="d-flex">
       <div class="toast-body" id="toastMsg"></div>
-      <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+      <button class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
     </div>
   </div>
 </div>
@@ -208,7 +198,7 @@
     <div class="modal-content">
       <div class="modal-header py-2">
         <h6 class="modal-title">确认删除</h6>
-        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        <button class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body small" id="deleteModalBody"></div>
       <div class="modal-footer py-1">
@@ -356,10 +346,6 @@ function renderCard(r) {
   ).join('');
 
   const thumbUrl = proxyThumb(r.thumb_url);
-
-  const localUrls = r.local_urls || [];
-  const urlsAttr = escAttr(JSON.stringify(localUrls));
-  const hasImages = localUrls.length > 0;
 
   const col = document.createElement('div');
   col.className = 'col-lg-3 col-md-4 col-sm-6 col-12 mb-3';

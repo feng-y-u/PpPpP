@@ -9,47 +9,47 @@
 <style>
 /* ── Hero Search Area ── */
 .search-hero {
-  padding: 3rem 0 2.5rem;
+  padding: 2.5rem 0 2rem;
   text-align: center;
 }
 
 .search-hero-title {
-  font-size: 1.8rem;
+  font-size: 1.6rem;
   font-weight: 700;
-  margin-bottom: 0.3rem;
-  letter-spacing: -0.5px;
+  margin-bottom: 0.2rem;
+  letter-spacing: -0.3px;
+  color: var(--text-primary);
 }
 .search-hero-sub {
-  font-size: 0.9rem;
-  color: var(--text-muted);
-  margin-bottom: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 1.3rem;
 }
 
 .search-bar-wrap {
-  max-width: 680px;
+  max-width: 640px;
   margin: 0 auto;
 }
 
 .search-bar {
   display: flex;
-  background: rgba(255,255,255,.06);
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-input);
+  border-radius: 10px;
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .search-bar:focus-within {
-  border-color: rgba(124,58,237,.4);
-  box-shadow: 0 0 0 4px rgba(124,58,237,.1);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
 }
 
 .search-bar select, .search-bar input, .search-bar .form-control, .search-bar .form-select {
-  background-color: transparent !important;
   background: transparent !important;
   border: none;
-  color: #fff;
-  font-size: 0.9rem;
-  padding: 0.65rem 0.9rem;
+  color: var(--text-primary);
+  font-size: 0.88rem;
+  padding: 0.6rem 0.85rem;
   outline: none;
   box-shadow: none;
   -webkit-appearance: none;
@@ -60,14 +60,14 @@
   color: var(--text-secondary);
   width: auto;
   cursor: pointer;
-  border-left: 1px solid rgba(255,255,255,.06) !important;
+  border-left: 1px solid var(--border-subtle) !important;
   border-radius: 0;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23888' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%238a8a82' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
   background-repeat: no-repeat !important;
   background-position: right 0.6rem center !important;
   padding-right: 1.8rem !important;
 }
-.search-bar select option, .search-bar .form-select option { background: #1a1a2e; color: #fff; }
+.search-bar select option, .search-bar .form-select option { background: #fff; color: #2b2b2b; }
 
 .search-bar .btn-search {
   background: var(--accent);
@@ -75,12 +75,12 @@
   color: #fff;
   font-weight: 600;
   font-size: 0.85rem;
-  padding: 0.65rem 1.5rem;
+  padding: 0.6rem 1.4rem;
   cursor: pointer;
   transition: background 0.2s;
   white-space: nowrap;
 }
-.search-bar .btn-search:hover { background: #6d28d9; }
+.search-bar .btn-search:hover { background: var(--accent-hover); }
 
 /* ── Filters Row ── */
 .filters-row {
@@ -88,18 +88,17 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
-  margin-top: 1rem;
+  gap: 0.4rem 0.6rem;
+  margin-top: 0.8rem;
   font-size: 0.78rem;
 }
-.filters-row label { color: var(--text-muted); margin: 0 0 0 0.5rem; align-self: center; font-size: 0.72rem; }
+.filters-row label { color: var(--text-secondary); margin: 0 0 0 0.3rem; align-self: center; font-size: 0.72rem; }
 .filters-row select, .filters-row input, .filters-row .form-select, .filters-row .form-control {
-  background-color: rgba(255,255,255,.04) !important;
-  background: rgba(255,255,255,.04) !important;
-  border: 1px solid rgba(255,255,255,.08) !important;
-  color: var(--text-secondary);
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-input) !important;
+  color: var(--text-primary);
   border-radius: 7px;
-  padding: 0.35rem 0.5rem;
+  padding: 0.3rem 0.5rem;
   font-size: 0.78rem;
   width: auto;
   min-width: 60px;
@@ -107,25 +106,23 @@
   appearance: none;
   -moz-appearance: textfield;
 }
-/* Hide number input spinners */
 .filters-row input[type="number"]::-webkit-inner-spin-button,
 .filters-row input[type="number"]::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
 .filters-row select, .filters-row .form-select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23888' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%238a8a82' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
   background-repeat: no-repeat !important;
   background-position: right 0.4rem center !important;
   padding-right: 1.3rem !important;
 }
 .filters-row select:focus, .filters-row input:focus, .filters-row .form-select:focus, .filters-row .form-control:focus {
-  border-color: rgba(124,58,237,.3) !important;
-  box-shadow: 0 0 0 2px rgba(124,58,237,.08) !important;
-  color: #fff;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--accent-subtle) !important;
   outline: none;
 }
-.filters-row select option, .filters-row .form-select option { background: #1a1a2e; color: #fff; }
+.filters-row select option, .filters-row .form-select option { background: #fff; color: #2b2b2b; }
 
 /* ── Toolbar ── */
 .toolbar {
@@ -140,134 +137,116 @@
 .masonry {
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: 0.8rem;
 }
 .masonry-item {
-  width: calc((100% - 3rem) / 4);
+  width: calc((100% - 2.4rem) / 4);
 }
-@media (max-width: 992px) { .masonry-item { width: calc((100% - 2rem) / 3); } }
-@media (max-width: 768px) { .masonry-item { width: calc((100% - 1rem) / 2); } }
+@media (max-width: 992px) { .masonry-item { width: calc((100% - 1.6rem) / 3); } }
+@media (max-width: 768px) { .masonry-item { width: calc((100% - 0.8rem) / 2); } }
 @media (max-width: 480px) { .masonry-item { width: calc((100% - 0.4rem) / 2); } .masonry { gap: 0.4rem; } }
 
 /* ── Photo Card ── */
 .photo-card {
   position: relative;
-  border-radius: var(--radius);
+  border-radius: var(--radius-card);
   overflow: hidden;
   cursor: pointer;
-  background: rgba(255,255,255,.03);
-  transition: transform 0.25s ease;
+  background: var(--bg-thumb);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
-.photo-card:hover { transform: translateY(-3px); }
+.photo-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
+}
 
 .photo-card img {
   display: block;
   width: 100%;
   height: auto;
-  background: #1e1b2e;
+  transition: transform 0.3s ease;
+  background: var(--bg-thumb);
+}
+.photo-card:hover img {
+  transform: scale(1.02);
 }
 
-/* Overlay on hover */
-.photo-overlay {
+.photo-badges {
   position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, rgba(0,0,0,.7) 0%, transparent 50%);
-  opacity: 0;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 3px;
   pointer-events: none;
-  transition: opacity 0.25s ease;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  padding: 0.75rem;
 }
-.photo-card:hover .photo-overlay { opacity: 1; pointer-events: auto; }
-
-.photo-overlay-top {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  display: flex;
-  gap: 0.3rem;
-}
-
 .photo-badge {
-  background: rgba(0,0,0,.65);
-  backdrop-filter: blur(6px);
-  color: #fff;
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 600;
-  padding: 0.2rem 0.5rem;
-  border-radius: 5px;
+  background: rgba(255,255,255,.85);
+  backdrop-filter: blur(6px);
+  color: #2b2b2b;
+  padding: 1px 7px;
+  border-radius: 4px;
+  pointer-events: none;
 }
 
-.photo-info {
-  color: #fff;
+/* Card info below image */
+.photo-card-info {
+  padding: 0.5rem 0.4rem;
 }
-.photo-title {
-  font-size: 0.8rem;
+.photo-card-title {
+  font-size: 0.78rem;
   font-weight: 600;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-bottom: 0.15rem;
+  margin-bottom: 0.1rem;
 }
-.photo-artist {
+.photo-card-artist {
   font-size: 0.7rem;
-  color: rgba(255,255,255,.75);
+  color: var(--text-secondary);
+  cursor: pointer;
 }
+.photo-card-artist:hover { color: var(--accent); }
 
-.photo-actions {
-  display: flex;
-  gap: 0.3rem;
-  margin-top: 0.4rem;
-}
-.photo-actions .btn {
-  font-size: 0.68rem;
-  padding: 0.25rem 0.6rem;
-  border-radius: 5px;
-  backdrop-filter: blur(6px);
-  font-weight: 500;
-}
-.btn-dl {
-  background: rgba(255,255,255,.15);
-  border: 1px solid rgba(255,255,255,.2);
-  color: #fff;
-}
-.btn-dl:hover { background: rgba(255,255,255,.25); color: #fff; }
-.btn-dl-done {
-  background: rgba(5,150,105,.5);
-  border: 1px solid rgba(5,150,105,.4);
-  color: #fff;
-}
-.btn-dl-done:hover { background: rgba(5,150,105,.7); color: #fff; }
-
-/* Tags below image */
+/* Tags below card */
 .photo-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.2rem;
-  padding: 0.45rem 0.5rem;
+  gap: 3px;
+  margin-top: 0.15rem;
 }
 .photo-tag {
-  font-size: 0.65rem;
+  font-size: 0.62rem;
   color: var(--text-muted);
   cursor: pointer;
-  padding: 0.15rem 0.45rem;
-  border-radius: 4px;
-  background: rgba(255,255,255,.03);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--accent-subtle);
   transition: all 0.15s;
-  border: 1px solid transparent;
 }
-.photo-tag:hover { color: #c4b5fd; background: rgba(124,58,237,.12); border-color: rgba(124,58,237,.15); }
+.photo-tag:hover { color: var(--accent); }
 .tag-block-x { opacity: 0.35; margin-left: 2px; transition: opacity 0.15s; }
-.tag-block-x:hover { opacity: 1; color: #f87171; }
+.tag-block-x:hover { opacity: 1; color: var(--danger); }
+
+/* Card actions (download) */
+.photo-card-actions {
+  margin-top: 0.35rem;
+}
+.photo-card-actions .btn {
+  font-size: 0.68rem;
+  padding: 0.2rem 0.7rem;
+  border-radius: 5px;
+  font-weight: 500;
+}
 
 /* ── Loading ── */
 .loading-overlay {
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(11,11,18,.5);
+  background: rgba(245,245,240,.6);
   backdrop-filter: blur(3px);
   z-index: 1050;
   justify-content: center;
@@ -284,13 +263,13 @@
   font-size: 0.78rem;
 }
 .blocked-panel .form-control {
-  background-color: rgba(255,255,255,.04) !important;
-  border: 1px solid rgba(255,255,255,.08) !important;
-  color: #fff;
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-input) !important;
+  color: var(--text-primary);
 }
 .blocked-panel .form-control:focus {
-  border-color: rgba(124,58,237,.3) !important;
-  box-shadow: 0 0 0 2px rgba(124,58,237,.08) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px var(--accent-subtle) !important;
 }
 .blocked-panel .form-control::placeholder { color: var(--text-muted); }
 </style>
@@ -298,14 +277,17 @@
 <body>
 
 <nav class="navbar">
-  <div class="container">
-    <a class="navbar-brand" href="/">Pixiv Viewer</a>
-    <div class="d-flex gap-1">
-      <a class="nav-link active" href="/">搜索</a>
-      <a class="nav-link" href="/gallery">图库</a>
-      <a class="nav-link" href="/bulk">批量</a>
-      <a class="nav-link" href="/downloads">下载</a>
-      <a class="nav-link" href="/settings">设置</a>
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      Pixiv Viewer
+    </a>
+    <div class="navbar-links">
+      <a class="navbar-link active" href="/">搜索</a>
+      <a class="navbar-link" href="/gallery">图库</a>
+      <a class="navbar-link" href="/bulk">批量</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link" href="/settings">设置</a>
     </div>
   </div>
 </nav>
@@ -395,7 +377,7 @@
   <div id="liveToast" class="toast align-items-center border-0" role="alert">
     <div class="d-flex">
       <div class="toast-body" id="toastMsg"></div>
-      <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+      <button class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
     </div>
   </div>
 </div>
@@ -604,14 +586,14 @@ function renderCard(r) {
   const isDone = r.download_status === 'done';
   const isDl = r.download_status === 'downloading';
   let btnHtml;
-  if (isDl) btnHtml = '<span style="font-size:0.68rem;color:rgba(255,255,255,.5);">下载中...</span>';
+  if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
   else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
-  else btnHtml = `<button class="btn btn-dl btn-sm dl-btn" data-pid="${r.pixiv_id}">下载原图</button>`;
+  else btnHtml = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>`;
 
   const badges = [];
-  if (isDone) badges.push(`<span class="photo-badge" style="background:rgba(5,150,105,.7);">已下载</span>`);
   badges.push(`<span class="photo-badge">♥ ${fmtNum(r.bookmark_count)}</span>`);
-  if (r.page_count > 1) badges.push(`<span class="photo-badge" style="background:rgba(124,58,237,.7);">${r.page_count}P</span>`);
+  if (r.page_count > 1) badges.push(`<span class="photo-badge">${r.page_count}P</span>`);
+  if (isDone) badges.push(`<span class="photo-badge" style="background:rgba(59,138,94,.85);color:#fff;">已下载</span>`);
 
   const tags = (r.tags||[]).slice(0,6).map(t =>
     `<span class="photo-tag" data-tag="${escAttr(t)}">${escHtml(t)}<span class="tag-block-x" data-block="${escAttr(t)}">&times;</span></span>`).join('');
@@ -620,18 +602,16 @@ function renderCard(r) {
   item.className = 'masonry-item';
   item.innerHTML = `
     <div class="photo-card" data-pixiv-id="${r.pixiv_id}">
-      <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%231e1b2e'%3E%3C/svg%3E"
+      <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23ecece7'%3E%3C/svg%3E"
            data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" alt="">
-      <div class="photo-overlay">
-        <div class="photo-overlay-top">${badges.join('')}</div>
-        <div class="photo-info">
-          <div class="photo-title">${escHtml(r.title)}</div>
-          <div class="photo-artist artist-link" data-uid="${r.user_id}">${escHtml(r.user_name)}</div>
-          <div class="photo-actions">${btnHtml}</div>
-        </div>
+      <div class="photo-badges">${badges.join('')}</div>
+      <div class="photo-card-info">
+        <div class="photo-card-title">${escHtml(r.title)}</div>
+        <div class="photo-card-artist artist-link" data-uid="${r.user_id}">${escHtml(r.user_name)}</div>
+        <div class="photo-tags">${tags}</div>
+        <div class="photo-card-actions">${btnHtml}</div>
       </div>
-    </div>
-    <div class="photo-tags">${tags}</div>`;
+    </div>`;
   $('#masonryGrid').appendChild(item);
 
   // Tag click → search; × → block
@@ -652,7 +632,7 @@ function renderCard(r) {
 
   // Card click → detail page
   item.querySelector('.photo-card').addEventListener('click', e => {
-    if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-actions')) return;
+    if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
     window.location.href = `/detail/${r.pixiv_id}`;
   });
 
@@ -703,7 +683,7 @@ function pollDl(pixivId) {
 function updateDlDone(pixivId) {
   const card = $(`.photo-card[data-pixiv-id="${pixivId}"]`);
   if (!card) return;
-  const actions = card.querySelector('.photo-actions');
+  const actions = card.querySelector('.photo-card-actions');
   actions.innerHTML = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${pixivId}">下载</button>`;
   card.querySelector('.dl-file-btn')?.addEventListener('click', e => { e.stopPropagation(); downloadFile(pixivId); });
 }
@@ -711,8 +691,8 @@ function updateDlDone(pixivId) {
 function resetDlBtn(pixivId) {
   const card = $(`.photo-card[data-pixiv-id="${pixivId}"]`);
   if (!card) return;
-  const actions = card.querySelector('.photo-actions');
-  actions.innerHTML = `<button class="btn btn-dl btn-sm dl-btn" data-pid="${pixivId}">下载原图</button>`;
+  const actions = card.querySelector('.photo-card-actions');
+  actions.innerHTML = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${pixivId}">下载</button>`;
   card.querySelector('.dl-btn')?.addEventListener('click', function(e) { e.stopPropagation(); triggerDownload(pixivId, this); });
 }
 

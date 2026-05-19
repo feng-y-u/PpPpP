@@ -1,0 +1,135 @@
+/* ============================================
+   Pixiv Viewer — Design Tokens
+   Extracted from Flask application templates
+   ============================================ */
+
+:root {
+  /* ── Colors ── */
+  --accent: #7c3aed;
+  --accent-hover: #6d28d9;
+  --accent-light: #a78bfa;
+  --accent-glow: rgba(124, 58, 237, .25);
+  --accent-focus: rgba(124, 58, 237, .4);
+  --accent-focus-shadow: 0 0 0 3px rgba(124, 58, 237, .1);
+
+  /* Surfaces */
+  --bg-page: #0b0b12;
+  --bg-elevated: rgba(255, 255, 255, .03);
+  --bg-card: rgba(255, 255, 255, .02);
+  --bg-navbar: rgba(11, 11, 18, .82);
+  --bg-input: rgba(255, 255, 255, .05);
+  --bg-modal: #1a1a2e;
+  --bg-thumb: #1e1b2e;
+
+  /* Text */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, .06);
+  --border-card: rgba(255, 255, 255, .05);
+  --border-input: rgba(255, 255, 255, .1);
+  --border-active: rgba(124, 58, 237, .3);
+
+  /* Semantic */
+  --success: #059669;
+  --success-bg: rgba(5, 150, 105, .5);
+  --danger: #f87171;
+  --danger-border: rgba(239, 68, 68, .2);
+  --warning: #fbbf24;
+  --warning-border: rgba(251, 191, 36, .2);
+
+  /* ── Border Radius ── */
+  --radius: 12px;
+  --radius-card: 12px;
+  --radius-btn: 8px;
+  --radius-nav: 6px;
+  --radius-badge: 5px;
+  --radius-tag: 4px;
+  --radius-thumb: 6px;
+
+  /* ── Typography ── */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --fs-hero: 1.8rem;
+  --fs-brand: 1.15rem;
+  --fs-title: 0.85rem;
+  --fs-body: 0.8rem;
+  --fs-small: 0.72rem;
+  --fs-tiny: 0.65rem;
+
+  /* ── Effects ── */
+  --glass-bg: rgba(255, 255, 255, .08);
+  --glass-blur: blur(20px) saturate(180%);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, .3);
+  --transition-hover: all 0.15s ease;
+
+  /* ── Layout ── */
+  --navbar-height: 56px;
+  --container-max: 1280px;
+}
+
+/* ── Global Reset ── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ── Glass Surface ── */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.glass-strong {
+  background: var(--bg-navbar);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* ── Focus Ring ── */
+:focus-visible {
+  outline: none;
+  border-color: var(--accent-focus) !important;
+  box-shadow: var(--accent-focus-shadow) !important;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .1);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, .2);
+}
+
+/* ── Selection ── */
+::selection {
+  background: rgba(124, 58, 237, .3);
+  color: #fff;
+}

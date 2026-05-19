@@ -10,8 +10,8 @@
 /* ── Card ── */
 .setup-card {
   max-width: 560px; margin: 2rem auto;
-  background: rgba(255,255,255,.03);
-  border: 1px solid rgba(255,255,255,.06);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-card);
   border-radius: var(--radius);
   padding: 1.5rem;
 }
@@ -21,21 +21,21 @@ label {
   font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.25rem; display: block;
 }
 .form-control, .form-select {
-  background: rgba(255,255,255,.05) !important;
-  border: 1px solid rgba(255,255,255,.1) !important;
-  color: #fff !important; font-size: 0.85rem; border-radius: 8px;
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-input) !important;
+  color: var(--text-primary) !important; font-size: 0.85rem; border-radius: 8px;
 }
 .form-control:focus, .form-select:focus {
-  border-color: rgba(124,58,237,.4) !important;
-  box-shadow: 0 0 0 3px rgba(124,58,237,.1) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-subtle) !important;
 }
 .form-control::placeholder { color: var(--text-muted); }
 .form-select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23888' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%238a8a82' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
   background-repeat: no-repeat !important; background-position: right 0.6rem center !important;
   padding-right: 1.8rem !important; -webkit-appearance: none; appearance: none;
 }
-.form-select option { background: #1a1a2e; color: #fff; }
+.form-select option { background: #fff; color: #2b2b2b; }
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input[type="number"] { -moz-appearance: textfield; }
@@ -50,21 +50,21 @@ input[type="number"] { -moz-appearance: textfield; }
 .stat-item { text-align: center; min-width: 80px; }
 .stat-value { font-size: 1.5rem; font-weight: 700; }
 .stat-label { font-size: 0.7rem; color: var(--text-muted); }
-.progress { height: 6px; background: rgba(255,255,255,.06); border-radius: 3px; }
+.progress { height: 6px; background: var(--border-subtle); border-radius: 3px; }
 .progress-bar { transition: width 0.3s ease; background: var(--accent); }
 
 /* ── Log ── */
 .log-panel {
   max-width: 600px; margin: 1rem auto;
   max-height: 340px; overflow-y: auto;
-  background: rgba(255,255,255,.02);
-  border: 1px solid rgba(255,255,255,.04);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-card);
   border-radius: var(--radius);
   padding: 0.75rem;
 }
 .log-entry {
   font-size: 0.73rem; color: var(--text-secondary); padding: 3px 0;
-  border-bottom: 1px solid rgba(255,255,255,.02);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .log-entry:last-child { border-bottom: none; }
 .log-time { color: var(--text-muted); font-size: 0.68rem; margin-right: 0.5rem; }
@@ -73,14 +73,17 @@ input[type="number"] { -moz-appearance: textfield; }
 <body>
 
 <nav class="navbar">
-  <div class="container">
-    <a class="navbar-brand" href="/">Pixiv Viewer</a>
-    <div class="d-flex gap-1">
-      <a class="nav-link" href="/">搜索</a>
-      <a class="nav-link" href="/gallery">图库</a>
-      <a class="nav-link active" href="/bulk">批量</a>
-      <a class="nav-link" href="/downloads">下载</a>
-      <a class="nav-link" href="/settings">设置</a>
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      Pixiv Viewer
+    </a>
+    <div class="navbar-links">
+      <a class="navbar-link" href="/">搜索</a>
+      <a class="navbar-link" href="/gallery">图库</a>
+      <a class="navbar-link active" href="/bulk">批量</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link" href="/settings">设置</a>
     </div>
   </div>
 </nav>

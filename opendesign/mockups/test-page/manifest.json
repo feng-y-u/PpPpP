@@ -1,0 +1,12 @@
+{
+  "title": "flowyu.xyz 服务器测试页",
+  "description": "日系简约风格的域名解析验证页，包含「你好，风予」问候语和服务器状态信息",
+  "design": {
+    "style": "日系简约 / 温暖米白 / 克制排版",
+    "font": "system-ui + Hiragino Sans + Noto Sans SC",
+    "accent": "#d4436b 珊瑚红",
+    "background": "#f5f5f0"
+  },
+  "file": "index.html",
+  "status": "ready"
+}
