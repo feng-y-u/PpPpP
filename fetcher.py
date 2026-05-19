@@ -343,7 +343,7 @@ def _illust_from_item(item, detail):
 def _illust_from_detail(item, detail):
     """Create Illust from user-profile search (all fields from detail)."""
     illust = Illust(
-        pixiv_id=detail['pixiv_id'],
+        pixiv_id=item,  # item IS the pixiv_id for user searches
         title=detail['title'],
         user_id=detail['user_id'],
         user_name=detail['user_name'],
