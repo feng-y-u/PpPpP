@@ -41,6 +41,10 @@ PROXY = ''                   # HTTP/SOCKS5 代理, 如 'http://127.0.0.1:7890', 
 # SSL 证书验证
 SSL_VERIFY = False           # 生产环境建议设为 True，需安装 CA 证书
 
+# 设置页访问密码（留空则不启用）
+# 可通过环境变量 SETTINGS_PASSWORD 或 settings.json 的 settings_password 设置
+SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
+
 # Pixiv OAuth 自动登录（可选）
 # 配置后自动通过 OAuth 维护会话，不再需要手动填写 cookies.txt
 PIXIV_USERNAME = os.environ.get('PIXIV_USERNAME', '')
@@ -54,6 +58,7 @@ if os.path.exists(_settings_path):
             _overrides = json.load(_f)
         _key_map = {
             'proxy': 'PROXY',
+            'settings_password': 'SETTINGS_PASSWORD',
             'download_max_workers': 'DOWNLOAD_MAX_WORKERS',
             'per_page': 'PER_PAGE',
             'search_pages': 'SEARCH_PAGES',

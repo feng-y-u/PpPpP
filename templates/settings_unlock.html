@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>验证 - Pixiv Viewer</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="/static/style.css" rel="stylesheet">
+<style>
+.unlock-wrap {
+  min-height: calc(100vh - 52px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 2rem;
+}
+.unlock-card {
+  width: 100%; max-width: 360px;
+  text-align: center;
+}
+.unlock-icon {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 1rem;
+  font-size: 1.3rem;
+}
+.unlock-card h5 { margin-bottom: 0.3rem; }
+.unlock-card .text-muted { margin-bottom: 1.5rem; font-size: 0.82rem; }
+.unlock-card .form-control {
+  text-align: center;
+  font-size: 1rem;
+  padding: 0.6rem 0.75rem;
+  letter-spacing: 2px;
+}
+.unlock-card .btn { width: 100%; margin-top: 0.75rem; }
+.unlock-error {
+  color: var(--danger);
+  font-size: 0.78rem;
+  margin-top: 0.5rem;
+  display: none;
+}
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      Pixiv Viewer
+    </a>
+    <div class="navbar-links">
+      <a class="navbar-link" href="/">搜索</a>
+      <a class="navbar-link" href="/gallery">图库</a>
+      <a class="navbar-link" href="/bulk">批量</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link" href="/settings">设置</a>
+    </div>
+  </div>
+</nav>
+
+<div class="unlock-wrap">
+  <div class="unlock-card">
+    <div class="unlock-icon">🔒</div>
+    <h5>设置已加密</h5>
+    <p class="text-muted">请输入密码以访问设置页面</p>
+
+    <input id="passwordInput" class="form-control" type="password" placeholder="请输入密码" autofocus>
+    <button id="unlockBtn" class="btn btn-primary">验证</button>
+    <div id="unlockError" class="unlock-error">密码错误，请重试</div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const csrfToken = '{{ csrf_token | safe }}';
+
+$('#passwordInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') $('#unlockBtn').click();
+});
+
+$('#unlockBtn').addEventListener('click', async () => {
+  const pw = $('#passwordInput').value;
+  if (!pw) return;
+  $('#unlockBtn').disabled = true;
+  $('#unlockBtn').textContent = '验证中...';
+  $('#unlockError').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/settings/unlock', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    if (r.ok) {
+      window.location.href = '/settings';
+    } else {
+      $('#unlockError').style.display = 'block';
+    }
+  } catch {
+    $('#unlockError').textContent = '网络错误';
+    $('#unlockError').style.display = 'block';
+  } finally {
+    $('#unlockBtn').disabled = false;
+    $('#unlockBtn').textContent = '验证';
+  }
+});
+</script>
+</body>
+</html>

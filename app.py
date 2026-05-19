@@ -23,6 +23,7 @@ from sqlalchemy import text
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
+    SETTINGS_PASSWORD,
     SSL_VERIFY,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, safe_commit
@@ -1018,11 +1019,28 @@ def _load_settings():
 
 @app.route('/settings')
 def settings_page():
+    if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
+        return render_template('settings_unlock.html', csrf_token=_get_csrf_token())
     return render_template('settings.html', csrf_token=_get_csrf_token())
+
+
+@app.route('/api/settings/unlock', methods=['POST'])
+def settings_unlock():
+    token = request.headers.get('X-CSRF-Token', '')
+    if not token or token != session.get('_csrf_token', ''):
+        return jsonify({'error': 'CSRF校验失败'}), 403
+    body = request.get_json(silent=True) or {}
+    if body.get('password') == SETTINGS_PASSWORD:
+        session['settings_unlocked'] = True
+        return jsonify({'ok': True})
+    return jsonify({'error': '密码错误'}), 403
 
 
 @app.route('/api/settings', methods=['GET', 'POST'])
 def api_settings():
+    if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
+        return jsonify({'error': '需要密码访问'}), 403
+
     if request.method == 'GET':
         return jsonify(_load_settings())
 
