@@ -73,7 +73,7 @@
 
 <script src="/static/app.js"></script>
 <script>
-const csrfToken = '{{ csrf_token | safe }}';
+const csrfToken = {{ csrf_token | tojson }};
 
 $('#passwordInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') $('#unlockBtn').click();

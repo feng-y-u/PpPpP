@@ -161,14 +161,10 @@ input[type="number"] { -moz-appearance: textfield; }
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
 <script>
-const csrfToken = '{{ csrf_token | safe }}';
+const csrfToken = {{ csrf_token | tojson }};
 const R18_STATE_KEY = 'pixiv_r18_mode';
 
 let taskId = null, pollTimer = null;
-
-async function getToken() {
-  return (await fetch('/csrf-token').then(r => r.json())).token;
-}
 
 $('#startBtn').addEventListener('click', async () => {
   const tag = $('#tagInput').value.trim();
@@ -181,10 +177,9 @@ $('#startBtn').addEventListener('click', async () => {
   $('#startBtn').textContent = '启动中...';
 
   try {
-    const token = csrfToken || await getToken();
     const resp = await fetch('/api/bulk/start', {
       method: 'POST',
-      headers: { 'X-CSRF-Token': token, 'Content-Type': 'application/json' },
+      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
       body: JSON.stringify({ tag, min_bookmarks: minBookmarks, sort_order: sort, max_pages: maxPages, r18_mode: $('#r18Mode').value }),
     });
     if (!resp.ok) { showToast(((await resp.json().catch(()=>({ error:'启动失败' }))).error), true); resetUI(); return; }
@@ -203,10 +198,9 @@ $('#stopBtn').addEventListener('click', async () => {
   $('#stopBtn').disabled = true;
   $('#stopBtn').textContent = '停止中...';
   try {
-    const token = csrfToken || await getToken();
     const resp = await fetch(`/api/bulk/stop/${taskId}`, {
       method: 'POST',
-      headers: { 'X-CSRF-Token': token },
+      headers: { 'X-CSRF-Token': csrfToken },
     });
     if (!resp.ok) throw new Error();
     $('#stopBtn').textContent = '已请求停止';

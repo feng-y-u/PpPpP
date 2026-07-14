@@ -385,7 +385,7 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
 <script>
-const csrfToken = '{{ csrf_token | safe }}';
+const csrfToken = {{ csrf_token | tojson }};
 
 let lastSearchParams = null, allResults = [], currentPage = 1, hasMorePages = false;
 const SEARCH_STATE_KEY = 'pixiv_search_state';
@@ -656,47 +656,6 @@ function renderCard(r) {
     downloadFile(r.pixiv_id);
   });
 }
-
-// ── Download ──
-async function triggerDownload(pixivId, btn) {
-  btn.disabled = true; btn.textContent = '...'; btn.className = 'btn btn-sm';
-  try {
-    const r = await fetch(`/download/${pixivId}`, { method:'POST', headers:{'X-CSRF-Token':csrfToken,'Content-Type':'application/json'} });
-    const d = await r.json();
-    if (!r.ok) { showToast(d.error||'失败', true); resetDlBtn(pixivId); return; }
-    if (d.status === 'done') { updateDlDone(pixivId); return; }
-    pollDl(pixivId);
-  } catch { showToast('网络错误', true); resetDlBtn(pixivId); }
-}
-
-function pollDl(pixivId) {
-  const iv = setInterval(async () => {
-    try {
-      const d = await fetch(`/download_status/${pixivId}`).then(r => r.json());
-      if (d.status === 'done') { clearInterval(iv); updateDlDone(pixivId); }
-      else if (d.status === 'failed') { clearInterval(iv); showToast(`#${pixivId} 下载失败`, true); resetDlBtn(pixivId); }
-    } catch {}
-  }, 2000);
-  setTimeout(() => clearInterval(iv), 300000);
-}
-
-function updateDlDone(pixivId) {
-  const card = $(`.photo-card[data-pixiv-id="${pixivId}"]`);
-  if (!card) return;
-  const actions = card.querySelector('.photo-card-actions');
-  actions.innerHTML = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${pixivId}">下载</button>`;
-  card.querySelector('.dl-file-btn')?.addEventListener('click', e => { e.stopPropagation(); downloadFile(pixivId); });
-}
-
-function resetDlBtn(pixivId) {
-  const card = $(`.photo-card[data-pixiv-id="${pixivId}"]`);
-  if (!card) return;
-  const actions = card.querySelector('.photo-card-actions');
-  actions.innerHTML = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${pixivId}">下载</button>`;
-  card.querySelector('.dl-btn')?.addEventListener('click', function(e) { e.stopPropagation(); triggerDownload(pixivId, this); });
-}
-
-function downloadFile(pixivId) { window.open(`/download_file/${pixivId}`, '_blank'); }
 
 // ── Batch Download ──
 let batchInProgress = false;

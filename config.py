@@ -50,7 +50,11 @@ SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
 PIXIV_USERNAME = os.environ.get('PIXIV_USERNAME', '')
 PIXIV_PASSWORD = os.environ.get('PIXIV_PASSWORD', '')
 
-# ── 从 settings.json 覆盖配置（运行时通过设置页面修改） ──
+# ── ⚠ 从 settings.json 覆盖配置（运行时通过设置页面修改） ──────────
+# 注意：这里在模块 import 时修改全局常量。因为运行在 import 时，
+# settings.json 必须在模块首次被 import 前存在。import 之后修改
+# settings.json 需要重启进程才能生效。
+# 未来可改为 Config 类延迟加载，消除 import 时副作用。
 _settings_path = os.path.join(BASE_DIR, 'instance', 'settings.json')
 if os.path.exists(_settings_path):
     try:

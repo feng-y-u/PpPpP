@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import re
@@ -88,6 +89,19 @@ def _reset_stuck_downloads():
 
 
 _reset_stuck_downloads()
+
+# ── ⚠ Multi-Process Limitation ─────────────────────────────────────
+# The state variables below (_auto_follow_state, download_locks,
+# download_cancellations, _queued_downloads, _download_progress,
+# _bulk_tasks) live in process memory. With multiple gunicorn workers
+# (or any multi-process deployment), each worker has its own copy, so
+# state is NOT shared across workers. A download started by worker A
+# is invisible to worker B.
+#
+# For correct multi-worker operation, these would need a shared store
+# (Redis / SQLite KV table). Until then, run with a single worker:
+#   gunicorn -w 1 app:app
+# ─────────────────────────────────────────────────────────────────────
 
 # ── Auto-Follow Worker ──
 _auto_follow_state = {
@@ -252,6 +266,37 @@ def _extract_ext(url: str) -> str:
     """Extract file extension from image URL."""
     match = re.search(r'\.(jpg|jpeg|png|gif|webp)(?:\?|$)', url, re.IGNORECASE)
     return match.group(1) if match else 'jpg'
+
+
+# ── Simple in-memory rate limiter ──
+_rate_limit_store: dict[str, list[float]] = {}
+_rate_limit_cleanup_counter = 0
+
+def _rate_limit(max_attempts: int = 5, window: int = 60):
+    """Decorator: limit requests from the same IP to max_attempts per window seconds."""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            global _rate_limit_cleanup_counter
+            ip = request.remote_addr or 'unknown'
+            now = time.time()
+            records = _rate_limit_store.setdefault(ip, [])
+            # Remove expired entries
+            records[:] = [t for t in records if now - t < window]
+            if len(records) >= max_attempts:
+                return jsonify({'error': '请求过于频繁，请稍后再试'}), 429
+            records.append(now)
+            # Periodic cleanup of stale IPs
+            _rate_limit_cleanup_counter += 1
+            if _rate_limit_cleanup_counter >= 100:
+                _rate_limit_cleanup_counter = 0
+                cutoff = now - window
+                stale = [k for k, v in _rate_limit_store.items() if v and max(v) < cutoff]
+                for k in stale:
+                    del _rate_limit_store[k]
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
 
 def _get_csrf_token() -> str:
@@ -443,9 +488,9 @@ def _cancel_download_internal(pixiv_id, reset=False):
             safe_commit(db)
             download_cancellations.discard(pixiv_id)
             _queued_downloads.discard(pixiv_id)
-            return jsonify({'status': 'reset', 'message': '已重置'})
+            return jsonify({'status': 'reset', 'message': '已重置'}), 200
 
-        return jsonify({'status': 'cancelling', 'message': '正在取消...'})
+        return jsonify({'status': 'cancelling', 'message': '正在取消...'}), 200
 
 
 @app.route('/download/cancel/<int:pixiv_id>', methods=['POST'])
@@ -561,7 +606,7 @@ def thumb_proxy(url_b64):
 
     cache_timeout = timedelta(hours=6)
     return Response(
-        resp.content,
+        resp.iter_content(chunk_size=8192),
         mimetype=resp.headers.get('Content-Type', 'image/jpeg'),
         headers={
             'Cache-Control': f'public, max-age={int(cache_timeout.total_seconds())}',
@@ -648,18 +693,44 @@ def api_gallery():
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
 
-        base_q = db.query(Illust).filter(Illust.download_status == 'done')
+        wheres = ["illusts.download_status = 'done'"]
+        params = {}
         if favorites_only:
-            base_q = base_q.filter(Illust.is_favorite == True)
-        total = base_q.count()
-        illusts = base_q.order_by(Illust.created_at.desc()).limit(limit).offset(offset).all()
+            wheres.append('illusts.is_favorite = 1')
+        if blocked:
+            blk_list = list(blocked)
+            phs = ','.join(f':blk_{i}' for i in range(len(blk_list)))
+            wheres.append(f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value IN ({phs}))')
+            for i, t in enumerate(blk_list):
+                params[f'blk_{i}'] = t
+        if tag_filter:
+            wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value = :tag_filter)')
+            params['tag_filter'] = tag_filter
+
+        where_clause = ' AND '.join(wheres)
+
+        # Combined total + favorite count
+        row = db.execute(
+            text(f'SELECT COUNT(*) AS total, SUM(CASE WHEN is_favorite=1 THEN 1 ELSE 0 END) AS fav_total FROM illusts WHERE {where_clause}'),
+            params
+        ).one()
+        total = row[0] or 0
+        fav_total = row[1] or 0
+
+        # Paginated IDs
+        page_params = {**params, 'lim': limit, 'off': offset}
+        pk_ids = db.execute(
+            text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY created_at DESC LIMIT :lim OFFSET :off'),
+            page_params
+        ).scalars().all()
+
+        # Fetch full ORM objects preserving order
+        illusts = db.query(Illust).filter(Illust.id.in_(pk_ids)).all()
+        id_order = {id_: i for i, id_ in enumerate(pk_ids)}
+        illusts.sort(key=lambda x: id_order.get(x.id, 0))
 
         results = []
         for i in illusts:
-            if blocked and set(i.tags_list) & blocked:
-                continue
-            if tag_filter and tag_filter not in i.tags_list:
-                continue
             paths = i.local_paths_list or []
             if not i.file_size and paths:
                 total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
@@ -670,12 +741,6 @@ def api_gallery():
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
         safe_commit(db)
-
-        # 计算收藏总数
-        fav_total = db.query(Illust).filter(
-            Illust.download_status == 'done',
-            Illust.is_favorite == True,
-        ).count()
 
         return jsonify({
             'data': results,
@@ -693,6 +758,7 @@ def api_gallery_tags():
             FROM illusts, json_each(illusts.tags) AS j
             WHERE illusts.download_status = 'done'
             ORDER BY tag
+            LIMIT 1000
         """)).all()
         return jsonify([row[0] for row in rows])
 
@@ -822,32 +888,45 @@ def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, ma
 
         # Process already-done items immediately, submit remaining for concurrent download
         futures = {}
+        id_result_map = {}
         for r in results:
             if task['cancelled']:
                 break
             pixiv_id = r['pixiv_id']
+            id_result_map[pixiv_id] = r
             if r.get('download_status') == 'done':
                 task['downloaded'] += 1
                 task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {r.get("title","")[:30]}'))
             else:
-                futures[download_executor.submit(_download_illust, pixiv_id)] = (pixiv_id, r)
+                futures[download_executor.submit(_download_illust, pixiv_id)] = pixiv_id
 
+        processed_ids = []
         for future in as_completed(futures):
-            pixiv_id, r = futures[future]
+            pixiv_id = futures[future]
             try:
                 future.result()
             except Exception as e:
                 logger.error(f'Bulk download failed for #{pixiv_id}: {e}')
-            with get_session() as db:
-                illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-                if illust and illust.download_status == 'done':
-                    task['downloaded'] += 1
-                    task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {r.get("title","")[:30]}'))
-                else:
-                    task['failed'] += 1
-                    task['log'].append((datetime.now(timezone.utc).isoformat(), f'✗ #{pixiv_id} 下载失败'))
+            processed_ids.append(pixiv_id)
             if task['cancelled']:
                 break
+
+        # Batch query: single round-trip for all processed items
+        if processed_ids:
+            with get_session() as db:
+                status_map = {
+                    i.pixiv_id: i.download_status
+                    for i in db.query(Illust).filter(Illust.pixiv_id.in_(processed_ids)).all()
+                }
+                for pixiv_id in processed_ids:
+                    r = id_result_map.get(pixiv_id)
+                    title = r.get('title', '')[:30] if r else ''
+                    if status_map.get(pixiv_id) == 'done':
+                        task['downloaded'] += 1
+                        task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {title}'))
+                    else:
+                        task['failed'] += 1
+                        task['log'].append((datetime.now(timezone.utc).isoformat(), f'✗ #{pixiv_id} 下载失败'))
         if not has_more:
             break
         page += 1
@@ -989,8 +1068,6 @@ def remove_blocked_tag(tag):
 
 # ── Settings ──
 
-import json as json_module
-
 _SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'settings.json')
 
 _SETTINGS_DEFAULTS = {
@@ -1008,7 +1085,7 @@ def _load_settings():
     if os.path.exists(_SETTINGS_PATH):
         try:
             with open(_SETTINGS_PATH, 'r', encoding='utf-8') as f:
-                data = json_module.load(f)
+                data = json.load(f)
             result = dict(_SETTINGS_DEFAULTS)
             result.update(data)
             return result
@@ -1025,10 +1102,9 @@ def settings_page():
 
 
 @app.route('/api/settings/unlock', methods=['POST'])
+@_rate_limit(max_attempts=5, window=60)
+@_csrf_required
 def settings_unlock():
-    token = request.headers.get('X-CSRF-Token', '')
-    if not token or token != session.get('_csrf_token', ''):
-        return jsonify({'error': 'CSRF校验失败'}), 403
     body = request.get_json(silent=True) or {}
     if body.get('password') == SETTINGS_PASSWORD:
         session['settings_unlocked'] = True
@@ -1036,18 +1112,18 @@ def settings_unlock():
     return jsonify({'error': '密码错误'}), 403
 
 
-@app.route('/api/settings', methods=['GET', 'POST'])
-def api_settings():
+@app.route('/api/settings', methods=['GET'])
+def api_settings_get():
     if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
         return jsonify({'error': '需要密码访问'}), 403
+    return jsonify(_load_settings())
 
-    if request.method == 'GET':
-        return jsonify(_load_settings())
 
-    # POST requires CSRF
-    token = request.headers.get('X-CSRF-Token', '')
-    if not token or token != session.get('_csrf_token', ''):
-        return jsonify({'error': 'CSRF校验失败'}), 403
+@app.route('/api/settings', methods=['POST'])
+@_csrf_required
+def api_settings_post():
+    if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
+        return jsonify({'error': '需要密码访问'}), 403
 
     body = request.get_json(silent=True) or {}
     current = _load_settings()
@@ -1067,7 +1143,7 @@ def api_settings():
     try:
         os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
         with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
-            json_module.dump(current, f, ensure_ascii=False, indent=2)
+            json.dump(current, f, ensure_ascii=False, indent=2)
         return jsonify(current)
     except Exception as e:
         return jsonify({'error': f'保存失败: {e}'}), 500
@@ -1076,18 +1152,16 @@ def api_settings():
 # ── Favorites ──
 
 
-@app.route('/api/favorite/<int:pixiv_id>', methods=['GET', 'POST'])
-def api_favorite(pixiv_id):
-    if request.method == 'GET':
-        with get_session() as db:
-            illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-            return jsonify({'is_favorite': illust.is_favorite if illust else False})
+@app.route('/api/favorite/<int:pixiv_id>', methods=['GET'])
+def api_favorite_get(pixiv_id):
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        return jsonify({'is_favorite': illust.is_favorite if illust else False})
 
-    # POST — 需要 CSRF
-    token = request.headers.get('X-CSRF-Token', '')
-    if not token or token != session.get('_csrf_token', ''):
-        return jsonify({'error': 'CSRF校验失败'}), 403
 
+@app.route('/api/favorite/<int:pixiv_id>', methods=['POST'])
+@_csrf_required
+def api_favorite_post(pixiv_id):
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:

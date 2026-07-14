@@ -292,7 +292,7 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
 <script>
-const csrfToken = '{{ csrf_token | safe }}';
+const csrfToken = {{ csrf_token | tojson }};
 const illust = {{ illust | tojson }};
 const isDownloaded = {{ 'true' if is_downloaded else 'false' }};
 const pageCount = {{ page_count }};
@@ -369,47 +369,8 @@ $('#dlBtn').addEventListener('click', async function() {
 $('#downloadBtn')?.addEventListener('click', async function() {
   if (this.tagName === 'A') return; // direct link for already-downloaded
   if (this.disabled) return;
-  this.disabled = true;
-  this.textContent = '...';
-  this.className = 'btn btn-soft';
-  try {
-    const r = await fetch(`/download/${illust.pixiv_id}`, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-    });
-    const d = await r.json();
-    if (!r.ok) { showToast(d.error || '失败', true); resetDlBtn(); return; }
-    if (d.status === 'done') { updateDlDone(); return; }
-    pollDl();
-  } catch { showToast('网络错误', true); resetDlBtn(); }
+  triggerDownload(illust.pixiv_id, this);
 });
-
-function pollDl() {
-  const iv = setInterval(async () => {
-    try {
-      const d = await fetch(`/download_status/${illust.pixiv_id}`).then(r => r.json());
-      if (d.status === 'done') { clearInterval(iv); updateDlDone(); }
-      else if (d.status === 'failed') { clearInterval(iv); showToast(`下载失败`, true); resetDlBtn(); }
-    } catch {}
-  }, 2000);
-  setTimeout(() => clearInterval(iv), 300000);
-}
-
-function updateDlDone() {
-  const btn = $('#downloadBtn');
-  btn.textContent = '⬇ 下载原图';
-  btn.className = 'btn btn-dl-done';
-  btn.disabled = false;
-  btn.onclick = () => window.open(`/download_file/${illust.pixiv_id}`, '_blank');
-  location.reload();
-}
-
-function resetDlBtn() {
-  const btn = $('#downloadBtn');
-  btn.textContent = '⬇ 下载原图';
-  btn.className = 'btn btn-soft';
-  btn.disabled = false;
-}
 
 // ── Tag click → gallery ──
 $('#tagList')?.addEventListener('click', e => {
