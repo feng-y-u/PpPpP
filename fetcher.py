@@ -228,6 +228,7 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
                 'upload_date': body.get('uploadDate', body.get('createDate', '')),
                 'original_urls': _extract_original_urls(body),
                 'tags': _parse_tags(body.get('tags')),
+                'description': body.get('description', ''),
             }
         except requests.RequestException as e:
             logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
@@ -334,6 +335,7 @@ def _illust_from_item(item, detail):
         bookmark_count=detail['bookmark_count'],
         thumb_url=item.get('url', ''),
         upload_date=_parse_date(item.get('updateDate')),
+        description=detail.get('description', ''),
     )
     illust.tags_list = _parse_tags(item.get('tags', []))
     illust.original_urls_list = detail['original_urls']
@@ -351,6 +353,7 @@ def _illust_from_detail(item, detail):
         bookmark_count=detail['bookmark_count'],
         thumb_url=detail['thumb_url'],
         upload_date=_parse_date(detail['upload_date']),
+        description=detail.get('description', ''),
     )
     illust.tags_list = detail['tags']
     illust.original_urls_list = detail['original_urls']

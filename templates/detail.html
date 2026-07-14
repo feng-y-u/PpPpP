@@ -259,7 +259,7 @@
     {% endif %}
 
     <div class="section-label">描述</div>
-    <div class="desc-text" id="descText">{{ illust.get('description', '') or '暂无描述' }}</div>
+    <div class="desc-text" id="descText">{{ illust.description or '暂无描述' }}</div>
 
     {% if related %}
     <div class="section-label-row">

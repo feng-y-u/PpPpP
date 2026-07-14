@@ -28,7 +28,8 @@ E:\pixiv/
 │   ├── gallery.html        # 图库页（已下载作品的本地浏览）
 │   ├── bulk.html           # 批量下载页（自动翻页 + 下载）
 │   ├── downloads.html      # 下载管理页（实时进度、队列、日志）
-│   └── logs.html           # 下载日志页（分页浏览）
+│   ├── settings.html       # 设置页
+│   └── settings_unlock.html# 设置页密码解锁
 ├── downloads/              # 已下载原图存放目录
 │   └── {pixiv_id}/         # 每个作品一个子目录
 └── instance/
@@ -40,7 +41,9 @@ E:\pixiv/
 
 ## 3. 认证机制（Cookie）
 
-Pixiv 无公开 OAuth API，项目通过浏览器 Cookie（PHPSESSID）进行身份验证：
+项目支持两种认证方式：Cookie 注入（PHPSESSID）或 OAuth Bearer token（通过 Pixiv 用户名密码自动获取）：
+
+### Cookie 方式
 
 1. 用户手动从浏览器 F12 → Application → Cookies → pixiv.net 复制 `PHPSESSID`
 2. 存入 `cookies.txt`（本地开发）或 `/etc/pixiv-viewer/cookies.txt`（生产）
@@ -135,9 +138,13 @@ GET /download_file/{pixiv_id}
 | `bookmark_count` | Integer | 真实收藏数 |
 | `upload_date` | DateTime | 上传日期 |
 | `thumb_url` | String | 缩略图 URL |
+| `description` | Text | 作品描述 |
 | `original_urls` | Text (JSON) | 原图 URL 列表 |
 | `local_paths` | Text (JSON, nullable) | 本地文件路径列表 |
 | `download_status` | String (nullable) | `null` / `downloading` / `done` / `failed` |
+| `file_size` | Integer | 已下载文件总字节数 |
+| `is_favorite` | Boolean | 是否被收藏 |
+| `favorited_at` | DateTime (nullable) | 收藏时间 |
 | `created_at` | DateTime | 入库时间 |
 
 #### blocked_tags（屏蔽标签表）
@@ -193,12 +200,22 @@ GET /download_file/{pixiv_id}
 | `/api/bulk/running` | GET | 查询正在运行的批量任务 |
 | `/api/bulk/stop/{task_id}` | POST | 停止批量任务 |
 | `/downloads` | GET | 下载管理页面 |
-| `/logs` | GET | 日志页面 |
-| `/api/logs` | GET | 日志数据 API（分页） |
 | `/api/blocked-tags` | GET/POST | 屏蔽标签列表/添加 |
 | `/api/blocked-tags/{tag}` | DELETE | 删除屏蔽标签 |
 | `/api/auto-follow/status` | GET | 自动关注状态 |
 | `/api/auto-follow/config` | POST | 配置自动关注参数 |
+| `/settings` | GET | 设置页面 |
+| `/api/settings` | GET/POST | 读取/保存设置 |
+| `/api/settings/unlock` | POST | 设置页密码解锁 |
+| `/api/collections` | GET/POST | 收藏夹列表/创建 |
+| `/api/collections/{id}` | PUT/DELETE | 更新/删除收藏夹 |
+| `/api/collections/{id}/items` | GET/POST | 收藏夹内作品列表/添加 |
+| `/api/collections/{id}/items/{pid}` | DELETE | 从收藏夹移除作品 |
+| `/api/illust/{pid}/collections` | GET | 作品所属收藏夹列表 |
+| `/api/favorite/{pid}` | GET/POST | 查询/切换收藏状态 |
+| `/detail/{pixiv_id}` | GET | 作品详情页 |
+| `/api/detail/{pixiv_id}` | GET | 作品数据 API |
+| `/api/download/status/batch` | GET | 批量查询下载状态 |
 | `/csrf-token` | GET | 获取 CSRF token |
 
 ---
@@ -247,9 +264,10 @@ GET /download_file/{pixiv_id}
 ### 9.2 图库页（gallery.html）
 
 - 显示所有已下载作品
-- 标签过滤栏（点击切换过滤）
-- 全屏沉浸式灯箱（Lightbox），键盘 ← → 翻页
+- 标签过滤栏（datalist 自动补全）
+- 收藏夹筛选
 - 多选批量删除
+- 点击进入详情页
 
 ### 9.3 批量下载页（bulk.html）
 
@@ -258,13 +276,27 @@ GET /download_file/{pixiv_id}
 - 实时日志流
 - 页面导航后自动恢复正在运行的任务
 
-### 9.4 下载管理页（downloads.html）
+### 9.4 详情页（detail.html）
+
+- 左右分栏布局：左侧图片展示（支持多页切换），右侧作品信息
+- 键盘 ← → 翻页
+- 标签点击跳转到已下载图库（标签过滤）
+- 收藏夹管理（多选模态框）
+- 画师名点击跳转搜索
+
+### 9.5 设置页（settings.html）
+
+- 网络/下载/搜索/自动关注配置
+- 收藏夹管理（创建、重命名、删除）
+- 可选密码保护（环境变量 `SETTINGS_PASSWORD`）
+
+### 9.6 下载管理页（downloads.html）
 
 - 三列布局：活跃下载、队列、最近完成
 - 每 3 秒自动轮询，实时进度条
 - 取消和清除操作
 
-### 9.5 缩略图代理
+### 9.7 缩略图代理
 
 前端不直接加载 Pixiv CDN 的缩略图，而是通过 `/thumb/{base64_url}` 代理：
 
@@ -276,7 +308,7 @@ img.src = /thumb/{base64_encode(thumb_url)}
 
 这解决了 Pixiv CDN 的 Referer 检查导致的 403 问题。
 
-### 9.6 CSRF 保护
+### 9.8 CSRF 保护
 
 所有 POST 接口需在请求头中携带 `X-CSRF-Token`。Token 通过 session 存储，页面渲染时嵌入模板。
 
@@ -304,7 +336,8 @@ img.src = /thumb/{base64_encode(thumb_url)}
 ## 11. 注意事项
 
 1. **搜索排序降级**：`popular_d`（综合排序）需要 Pixiv Premium 账号，无 Premium 时自动静默降级为 `date_d`（最新排序）
-2. **Cookie 过期**：Pixiv PHPSESSID 有有效期，过期后搜索返回空结果，需重新获取
+2. **OAuth 优先**：推荐配置 `PIXIV_USERNAME`/`PIXIV_PASSWORD` 环境变量使用 OAuth Bearer token，避免手动维护 Cookie
+3. **Cookie 过期**：Pixiv PHPSESSID 有有效期，过期后 API 返回 401，需重新获取
 3. **磁盘清理**：`scripts/pixiv-cleanup.sh` 清理 30 天前且收藏 < 100 的已下载文件，建议通过 cron 每周执行
 4. **限流**：生产环境 Nginx 应配置 `limit_req_zone`（搜索 10r/m，下载 3r/m）
 5. **图片 Referer**：请求 Pixiv 图片时必须携带 `Referer: https://www.pixiv.net/`，否则返回 403

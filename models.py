@@ -59,6 +59,7 @@ class Illust(Base):
     bookmark_count: Mapped[int] = mapped_column(Integer, default=0)
     upload_date: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     thumb_url: Mapped[str] = mapped_column(String, default='')
+    description: Mapped[str] = mapped_column(Text, default='')
     original_urls: Mapped[str] = mapped_column(Text, default='[]')
     local_paths: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
@@ -117,6 +118,7 @@ class Illust(Base):
             'bookmark_count': self.bookmark_count,
             'upload_date': self.upload_date.isoformat() if self.upload_date else None,
             'thumb_url': self.thumb_url,
+            'description': self.description,
             'original_urls': self.original_urls_list,
             'local_paths': self.local_paths_list,
             'download_status': self.download_status,
@@ -206,6 +208,10 @@ def init_db():
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
             conn.commit()
+    if 'description' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN description TEXT DEFAULT ""'))
+            conn.commit()
     if 'is_favorite' not in columns:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN is_favorite BOOLEAN DEFAULT 0'))
@@ -215,29 +221,26 @@ def init_db():
     # Collection tables migration: create default "我的收藏" and migrate existing favorites
     # Base.metadata.create_all above created the tables, so they always exist now
     from sqlalchemy import select
+    sel = select(Collection).where(Collection.name == '我的收藏')
     with Session(engine) as sess:
-        from sqlalchemy import select
-        # Avoid circular import — Collection model is defined above
-        sel = select(Collection).where(Collection.name == '我的收藏')
-        with Session(engine) as sess:
-            default = sess.execute(sel).scalar_one_or_none()
-            if not default:
-                default = Collection(name='我的收藏', description='默认收藏夹')
-                sess.add(default)
-                sess.commit()
-            # Migrate is_favorite=True records not already in default collection
-            sel2 = select(CollectionItem.pixiv_id).where(CollectionItem.collection_id == default.id)
-            existing_ids = {row[0] for row in sess.execute(sel2).fetchall()}
-            to_migrate = sess.execute(
-                select(Illust).where(Illust.is_favorite == True)
-            ).scalars().all()
-            new_items = []
-            for i in to_migrate:
-                if i.pixiv_id not in existing_ids:
-                    new_items.append(CollectionItem(collection_id=default.id, pixiv_id=i.pixiv_id))
-            if new_items:
-                sess.add_all(new_items)
-                sess.commit()
+        default = sess.execute(sel).scalar_one_or_none()
+        if not default:
+            default = Collection(name='我的收藏', description='默认收藏夹')
+            sess.add(default)
+            sess.commit()
+        # Migrate is_favorite=True records not already in default collection
+        sel2 = select(CollectionItem.pixiv_id).where(CollectionItem.collection_id == default.id)
+        existing_ids = {row[0] for row in sess.execute(sel2).fetchall()}
+        to_migrate = sess.execute(
+            select(Illust).where(Illust.is_favorite == True)
+        ).scalars().all()
+        new_items = []
+        for i in to_migrate:
+            if i.pixiv_id not in existing_ids:
+                new_items.append(CollectionItem(collection_id=default.id, pixiv_id=i.pixiv_id))
+        if new_items:
+            sess.add_all(new_items)
+            sess.commit()
 
 
 def get_session() -> Session:

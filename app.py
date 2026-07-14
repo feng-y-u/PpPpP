@@ -111,14 +111,12 @@ _auto_follow_state = {
     'auto_download': AUTO_FOLLOW_DOWNLOAD,
 }
 _auto_follow_stop = threading.Event()
-_auto_follow_stop.set()  # Active by default
 
 def _auto_follow_worker():
-    while _auto_follow_stop.is_set():
+    while not _auto_follow_stop.is_set():
         interval = _auto_follow_state['interval']
         if interval <= 0:
-            if _auto_follow_stop.wait(30):
-                return
+            _auto_follow_stop.wait(30)
             continue
         try:
             results, _ = fetch_following(page=1)
@@ -138,6 +136,7 @@ def _auto_follow_worker():
                     user_id=r['user_id'], user_name=r['user_name'],
                     page_count=r['page_count'], bookmark_count=r['bookmark_count'],
                     thumb_url=r['thumb_url'], upload_date=r['upload_date'],
+                    description=r.get('description', ''),
                 )
                 illust.tags_list = r.get('tags', [])
                 illust.original_urls_list = r.get('original_urls', [])
@@ -157,8 +156,7 @@ def _auto_follow_worker():
                 logger.info(f'Auto-follow: found {new_count} new works')
         except Exception as e:
             logger.error(f'Auto-follow error: {e}')
-        if _auto_follow_stop.wait(interval):
-            return
+        _auto_follow_stop.wait(interval)
 
 _auto_follow_thread = threading.Thread(target=_auto_follow_worker, daemon=True)
 _auto_follow_thread.start()
@@ -884,6 +882,7 @@ def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, ma
                     user_name=r['user_name'], page_count=r['page_count'],
                     bookmark_count=r['bookmark_count'], thumb_url=r['thumb_url'],
                     upload_date=r['upload_date'],
+                    description=r.get('description', ''),
                 )
                 illust.tags_list = r.get('tags', [])
                 illust.original_urls_list = r.get('original_urls', [])
