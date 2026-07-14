@@ -136,16 +136,22 @@ a { color: inherit; text-decoration: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Form Controls ── */
-.form-control {
+.form-control, .form-select {
   background: var(--bg-input); border: 1px solid var(--border-input);
   border-radius: var(--radius); color: var(--text-primary); font-size: 0.82rem;
   padding: 0.5rem 0.75rem;
 }
-.form-control:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px var(--accent-subtle); }
+.form-control:focus, .form-select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px var(--accent-subtle); }
 .form-control::placeholder { color: var(--text-muted); }
+.form-select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%238a8a82' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.6rem center; padding-right: 1.8rem; -webkit-appearance: none; appearance: none; }
+select, .form-select { cursor: pointer; }
+select option, .form-select option { background: #fff; color: #2b2b2b; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; }
 
 /* ── Modal ── */
-.modal-content { background: var(--bg-elevated); border: 1px solid var(--border-card); border-radius: var(--radius); box-shadow: var(--shadow-card-hover); }
+.modal-content { background: var(--bg-elevated); border: 1px solid var(--border-card); border-radius: var(--radius); box-shadow: var(--shadow-card-hover); color: var(--text-primary); }
 .modal-header { border-bottom: 1px solid var(--border-subtle); }
 .modal-footer { border-top: 1px solid var(--border-subtle); }
 .btn-close { filter: none; opacity: .4; }
