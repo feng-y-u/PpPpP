@@ -231,10 +231,10 @@
     <div class="info-actions">
       {% set is_fav = illust.get('is_favorite', False) %}
       {% if has_images %}
-        <button class="btn {% if is_fav %}btn-dl-done{% else %}btn-primary-accent{% endif %}" id="dlBtn">{% if is_fav %}❤ 已收藏{% else %}♥ 收藏{% endif %}</button>
+        <button class="btn {% if is_fav %}btn-dl-done{% else %}btn-primary-accent{% endif %}" id="favBtn">{% if is_fav %}❤ 已收藏{% else %}♥ 收藏{% endif %}</button>
         <a href="/download_file/{{ illust.pixiv_id }}" class="btn btn-dl-done" id="downloadBtn">⬇ 下载原图</a>
       {% else %}
-        <button class="btn {% if is_fav %}btn-dl-done{% else %}btn-primary-accent{% endif %}" id="dlBtn">{% if is_fav %}❤ 已收藏{% else %}♥ 收藏{% endif %}</button>
+        <button class="btn {% if is_fav %}btn-dl-done{% else %}btn-primary-accent{% endif %}" id="favBtn">{% if is_fav %}❤ 已收藏{% else %}♥ 收藏{% endif %}</button>
         <button class="btn btn-soft" id="downloadBtn" data-pid="{{ illust.pixiv_id }}">⬇ 下载原图</button>
       {% endif %}
     </div>
@@ -280,6 +280,23 @@
   </div>
 </div>
 
+<!-- Collection Picker Modal -->
+<div class="modal fade" id="collectionPickerModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">收藏到...</h6>
+        <button class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body small" id="collectionPickerBody"></div>
+      <div class="modal-footer py-1">
+        <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+        <button class="btn btn-primary-accent btn-sm" id="saveCollectionBtn">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast-container position-fixed bottom-0 end-0 p-3">
   <div id="liveToast" class="toast align-items-center border-0" role="alert">
     <div class="d-flex">
@@ -296,7 +313,6 @@ const csrfToken = {{ csrf_token | tojson }};
 const illust = {{ illust | tojson }};
 const isDownloaded = {{ 'true' if is_downloaded else 'false' }};
 const pageCount = {{ page_count }};
-let isFavorite = {{ 'true' if illust.get('is_favorite', False) else 'false' }};
 
 // ── Image URLs ──
 const localUrls = {{ local_urls | tojson if local_urls else '[]' }};
@@ -339,29 +355,78 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight' || e.code === 'ArrowRight') { e.preventDefault(); showPage(currentPage + 1); }
 });
 
-// ── Favorite Toggle ──
-$('#dlBtn').addEventListener('click', async function() {
+// ── Collection Picker ──
+let savedCollectionIds = new Set();
+
+$('#favBtn').addEventListener('click', async function() {
+  if (this.disabled) return;
+  // Fetch collections and current membership
+  try {
+    const [collectionsResp, membershipResp] = await Promise.all([
+      fetch('/api/collections'),
+      fetch(`/api/illust/${illust.pixiv_id}/collections`),
+    ]);
+    if (!collectionsResp.ok || !membershipResp.ok) { showToast('加载收藏夹失败', true); return; }
+    const collections = await collectionsResp.json();
+    const membership = await membershipResp.json();
+    savedCollectionIds = new Set(membership);
+
+    const body = $('#collectionPickerBody');
+    if (collections.length === 0) {
+      body.innerHTML = '<div style="color:var(--text-muted);padding:0.5rem 0;">暂无收藏夹，请先在设置页创建</div>';
+    } else {
+      body.innerHTML = collections.map(c => `
+        <label class="collection-check-item">
+          <input type="checkbox" value="${c.id}" ${savedCollectionIds.has(c.id) ? 'checked' : ''}>
+          <span>${escHtml(c.name)}</span>
+          <span class="collection-check-count">${c.item_count} 件</span>
+        </label>
+      `).join('');
+    }
+    new bootstrap.Modal($('#collectionPickerModal')).show();
+  } catch { showToast('网络错误', true); }
+});
+
+$('#saveCollectionBtn').addEventListener('click', async function() {
   if (this.disabled) return;
   this.disabled = true;
+  const checkboxes = $$('#collectionPickerBody input[type="checkbox"]');
+  const newIds = new Set();
+  checkboxes.forEach(cb => { if (cb.checked) newIds.add(parseInt(cb.value)); });
+
   try {
-    const r = await fetch(`/api/favorite/${illust.pixiv_id}`, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-    });
-    const d = await r.json();
-    if (r.ok) {
-      isFavorite = d.is_favorite;
-      if (isFavorite) {
-        this.className = 'btn btn-dl-done';
-        this.textContent = '❤ 已收藏';
-      } else {
-        this.className = 'btn btn-primary-accent';
-        this.textContent = '♥ 收藏';
-      }
-    } else {
-      showToast(d.error || '操作失败', true);
+    // Remove uncheck, add newly checked
+    const toRemove = [...savedCollectionIds].filter(id => !newIds.has(id));
+    const toAdd = [...newIds].filter(id => !savedCollectionIds.has(id));
+    const promises = [];
+    for (const cid of toRemove) {
+      promises.push(fetch(`/api/collections/${cid}/items/${illust.pixiv_id}`, {
+        method: 'DELETE', headers: { 'X-CSRF-Token': csrfToken },
+      }));
     }
-  } catch { showToast('网络错误', true); }
+    for (const cid of toAdd) {
+      promises.push(fetch(`/api/collections/${cid}/items`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pixiv_id: illust.pixiv_id }),
+      }));
+    }
+    await Promise.all(promises);
+    savedCollectionIds = newIds;
+
+    // Update fav button state
+    const isFav = newIds.size > 0;
+    const btn = $('#favBtn');
+    if (isFav) {
+      btn.className = 'btn btn-dl-done';
+      btn.textContent = '❤ 已收藏';
+    } else {
+      btn.className = 'btn btn-primary-accent';
+      btn.textContent = '♥ 收藏';
+    }
+    bootstrap.Modal.getInstance($('#collectionPickerModal')).hide();
+    if (toRemove.length || toAdd.length) showToast('收藏已更新');
+  } catch { showToast('保存失败', true); }
   finally { this.disabled = false; }
 });
 

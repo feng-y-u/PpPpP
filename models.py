@@ -3,7 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, event, Boolean, Integer, String, Text, DateTime, Index, text
+from sqlalchemy import create_engine, event, Boolean, Integer, String, Text, DateTime, Index, ForeignKey, UniqueConstraint, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -154,6 +154,45 @@ class DownloadLog(Base):
         }
 
 
+class Collection(Base):
+    __tablename__ = 'collections'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    description: Mapped[str] = mapped_column(String, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CollectionItem(Base):
+    __tablename__ = 'collection_items'
+    __table_args__ = (
+        UniqueConstraint('collection_id', 'pixiv_id', name='uq_collection_item'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    collection_id: Mapped[int] = mapped_column(Integer, ForeignKey('collections.id'), nullable=False)
+    pixiv_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'collection_id': self.collection_id,
+            'pixiv_id': self.pixiv_id,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 def init_db():
     Base.metadata.create_all(engine)
 
@@ -172,6 +211,33 @@ def init_db():
             conn.execute(text('ALTER TABLE illusts ADD COLUMN is_favorite BOOLEAN DEFAULT 0'))
             conn.execute(text('ALTER TABLE illusts ADD COLUMN favorited_at DATETIME'))
             conn.commit()
+
+    # Collection tables migration: create default "我的收藏" and migrate existing favorites
+    # Base.metadata.create_all above created the tables, so they always exist now
+    from sqlalchemy import select
+    with Session(engine) as sess:
+        from sqlalchemy import select
+        # Avoid circular import — Collection model is defined above
+        sel = select(Collection).where(Collection.name == '我的收藏')
+        with Session(engine) as sess:
+            default = sess.execute(sel).scalar_one_or_none()
+            if not default:
+                default = Collection(name='我的收藏', description='默认收藏夹')
+                sess.add(default)
+                sess.commit()
+            # Migrate is_favorite=True records not already in default collection
+            sel2 = select(CollectionItem.pixiv_id).where(CollectionItem.collection_id == default.id)
+            existing_ids = {row[0] for row in sess.execute(sel2).fetchall()}
+            to_migrate = sess.execute(
+                select(Illust).where(Illust.is_favorite == True)
+            ).scalars().all()
+            new_items = []
+            for i in to_migrate:
+                if i.pixiv_id not in existing_ids:
+                    new_items.append(CollectionItem(collection_id=default.id, pixiv_id=i.pixiv_id))
+            if new_items:
+                sess.add_all(new_items)
+                sess.commit()
 
 
 def get_session() -> Session:

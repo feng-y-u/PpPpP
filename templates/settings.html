@@ -86,7 +86,21 @@
 }
 .btn-save:hover { background: var(--accent-hover); box-shadow: 0 4px 14px rgba(212,67,107,.25); color: #fff; }
 .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
-</style>
+
+.collection-mgmt-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 0; border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+}
+.collection-mgmt-item:last-child { border-bottom: none; }
+.collection-mgmt-name { flex: 1; font-weight: 500; color: var(--text-primary); }
+.collection-mgmt-count { color: var(--text-muted); font-size: 0.78rem; min-width: 50px; text-align: right; }
+.collection-mgmt-actions { display: flex; gap: 6px; }
+.collection-mgmt-rename-input {
+  background: var(--bg-elevated); border: 1px solid var(--accent);
+  color: var(--text-primary); font-size: 0.82rem; border-radius: 6px;
+  padding: 4px 8px; width: 160px; outline: none;
+}</style>
 </head>
 <body>
 
@@ -170,6 +184,34 @@
     </div>
   </div>
 
+  <div class="settings-card">
+    <div class="card-header">收藏夹管理</div>
+    <div class="card-body">
+      <div class="form-group" style="display:flex;gap:8px;align-items:center;">
+        <input class="form-input" id="newCollectionName" placeholder="新建收藏夹名称..." style="max-width:250px;">
+        <button class="btn btn-primary-accent btn-sm" id="createCollectionBtn">创建</button>
+      </div>
+      <div id="collectionList" class="mt-2"></div>
+    </div>
+  </div>
+
+  <!-- Collection Delete Confirm Modal -->
+  <div class="modal fade" id="deleteCollectionModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header py-2">
+          <h6 class="modal-title">确认删除</h6>
+          <button class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body small" id="deleteCollectionModalBody"></div>
+        <div class="modal-footer py-1">
+          <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+          <button class="btn btn-danger btn-sm" id="confirmDeleteCollectionBtn">删除</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="d-flex gap-2 mb-4">
     <button class="btn-save" id="saveBtn">保存设置</button>
     <span id="saveStatus" class="small" style="color:var(--text-muted);align-self:center;display:none;"></span>
@@ -249,6 +291,130 @@ $('#saveBtn').addEventListener('click', async () => {
 });
 
 loadSettings();
+
+// ── Collection Management ──
+let deleteCollectionId = null;
+const deleteCollectionModal = new bootstrap.Modal($('#deleteCollectionModal'));
+
+function loadCollections() {
+  fetch('/api/collections')
+    .then(r => r.json())
+    .then(collections => {
+      const list = $('#collectionList');
+      if (collections.length === 0) {
+        list.innerHTML = '<div style="color:var(--text-muted);padding:0.5rem 0;">暂无收藏夹</div>';
+        return;
+      }
+      list.innerHTML = collections.map(c => `
+        <div class="collection-mgmt-item" data-id="${c.id}">
+          <span class="collection-mgmt-name">${escHtml(c.name)}</span>
+          <span class="collection-mgmt-count">${c.item_count} 件</span>
+          <div class="collection-mgmt-actions">
+            <button class="btn btn-soft btn-sm rename-btn">重命名</button>
+            <button class="btn btn-outline-danger btn-sm delete-btn">删除</button>
+          </div>
+        </div>
+      `).join('');
+    });
+}
+
+$('#createCollectionBtn').addEventListener('click', async function() {
+  const name = $('#newCollectionName').value.trim();
+  if (!name) return;
+  this.disabled = true;
+  try {
+    const r = await fetch('/api/collections', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (r.ok) {
+      $('#newCollectionName').value = '';
+      loadCollections();
+      showToast('收藏夹已创建');
+    } else {
+      const data = await r.json();
+      showToast(data.error || '创建失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+  finally { this.disabled = false; }
+});
+
+// Allow Enter key on new collection input
+$('#newCollectionName').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') $('#createCollectionBtn').click();
+});
+
+// Delegate events for collection list actions
+$('#collectionList').addEventListener('click', function(e) {
+  const item = e.target.closest('.collection-mgmt-item');
+  if (!item) return;
+  const cid = parseInt(item.dataset.id);
+
+  // Delete button
+  if (e.target.classList.contains('delete-btn')) {
+    const name = item.querySelector('.collection-mgmt-name').textContent;
+    deleteCollectionId = cid;
+    $('#deleteCollectionModalBody').textContent = `确定删除收藏夹「${name}」？作品本身不会被删除。`;
+    deleteCollectionModal.show();
+    return;
+  }
+
+  // Rename button
+  if (e.target.classList.contains('rename-btn')) {
+    const nameEl = item.querySelector('.collection-mgmt-name');
+    const currentName = nameEl.textContent;
+    nameEl.innerHTML = `<input class="collection-mgmt-rename-input" type="text" value="${escAttr(currentName)}">`;
+    const input = nameEl.querySelector('input');
+    input.focus();
+    input.select();
+
+    const done = async () => {
+      const newName = input.value.trim();
+      if (!newName || newName === currentName) { nameEl.textContent = currentName; return; }
+      try {
+        const r = await fetch(`/api/collections/${cid}`, {
+          method: 'PUT',
+          headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName }),
+        });
+        if (r.ok) { nameEl.textContent = newName; showToast('已重命名'); }
+        else { const d = await r.json(); showToast(d.error || '重命名失败', true); nameEl.textContent = currentName; }
+      } catch { showToast('网络错误', true); nameEl.textContent = currentName; }
+    };
+    input.addEventListener('blur', done);
+    input.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+      if (ev.key === 'Escape') { nameEl.textContent = currentName; input.blur(); }
+    });
+    return;
+  }
+});
+
+$('#confirmDeleteCollectionBtn').addEventListener('click', async function() {
+  if (!deleteCollectionId) return;
+  this.disabled = true;
+  deleteCollectionModal.hide();
+  try {
+    const r = await fetch(`/api/collections/${deleteCollectionId}`, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': csrfToken },
+    });
+    if (r.ok) {
+      loadCollections();
+      showToast('收藏夹已删除');
+    } else {
+      const d = await r.json();
+      showToast(d.error || '删除失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+  finally {
+    this.disabled = false;
+    deleteCollectionId = null;
+  }
+});
+
+loadCollections();
 </script>
 </body>
 </html>

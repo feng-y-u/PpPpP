@@ -462,12 +462,12 @@ function renderBlockedTags() {
   $('#blockedCount').textContent = c ? `${c} 个已屏蔽` : '';
 }
 async function addBlockedTag(tag) {
-  const r = await fetch('/api/blocked-tags', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tag}) });
+  const r = await fetch('/api/blocked-tags', { method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}, body:JSON.stringify({tag}) });
   if (r.ok) { blockedTags.push(tag); renderBlockedTags(); refreshCurrentSearch(); }
   else if (r.status !== 409) showToast(((await r.json().catch(()=>({}))).error) || '添加失败');
 }
 async function removeBlockedTag(tag) {
-  const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, { method:'DELETE' });
+  const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, { method:'DELETE', headers:{'X-CSRF-Token':csrfToken} });
   if (r.ok) { blockedTags = blockedTags.filter(t => t !== tag); renderBlockedTags(); refreshCurrentSearch(); }
 }
 function refreshCurrentSearch() { if (lastSearchParams) doSearch(); }

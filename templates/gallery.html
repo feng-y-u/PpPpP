@@ -64,12 +64,6 @@
   padding: 1px 6px;
 }
 
-/* ── Favorites Toggle ── */
-#btnFavorites.active {
-  background: rgba(212,67,107,.08);
-  border-color: rgba(212,67,107,.2);
-  color: var(--accent);
-}
 
 /* ── Card Checkbox ── */
 .card-checkbox {
@@ -157,7 +151,10 @@
   <div class="d-flex align-items-center gap-2 mb-2">
     <h5 class="mb-0" id="pageTitle">已下载作品</h5>
     <div class="d-flex gap-1 ms-auto">
-      <button id="btnFavorites" class="btn btn-outline-secondary btn-sm">我的收藏</button>
+      <select id="collectionSelect" class="form-select form-select-sm" style="width:auto;">
+        <option value="">全部作品</option>
+      </select>
+      <a href="/settings" class="btn btn-outline-secondary btn-sm" id="btnManageCollections">管理收藏夹</a>
       <button id="btnBatchMode" class="btn btn-outline-secondary btn-sm">多选</button>
     </div>
     <div id="batchToolbar" class="d-flex align-items-center gap-2" style="display:none;">
@@ -218,31 +215,26 @@ let deleteTarget = null, deleteMode = 'single', activeTag = '';
 let selectedPids = new Set(), batchMode = false;
 let galleryOffset = 0, galleryTotal = 0, galleryHasMore = false, galleryFavTotal = 0;
 let allTags = [];
-let favoritesMode = false;
+let activeCollectionId = '';
 const PAGE_SIZE = 50;
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
-// Read ?tag= and ?favorites from URL on load
+// Read ?tag= and ?collection_id from URL on load
 const urlParams = new URLSearchParams(location.search);
 if (urlParams.has('tag')) {
   activeTag = urlParams.get('tag');
 }
-favoritesMode = urlParams.get('favorites') === 'true';
+activeCollectionId = urlParams.get('collection_id') || '';
 
 loadGallery(0);
 loadTags();
+loadCollections();
 
 if (activeTag) {
   const el = $('#tagFilterActive');
   el.style.display = 'inline-block';
   el.innerHTML = `${escHtml(activeTag)} <span class="tag-filter-clear">✕</span>`;
   $('#tagFilter').value = activeTag;
-}
-
-// Init favorites button state
-if (favoritesMode) {
-  $('#btnFavorites').classList.add('active');
-  $('#pageTitle').textContent = '我的收藏';
 }
 
 function setActiveTag(tag) {
@@ -281,7 +273,7 @@ $('#tagFilterActive')?.addEventListener('click', function(e) {
 function loadGallery(offset) {
   const params = new URLSearchParams();
   if (activeTag) params.set('tag', activeTag);
-  if (favoritesMode) params.set('favorites', 'true');
+  if (activeCollectionId) params.set('collection_id', activeCollectionId);
   params.set('limit', PAGE_SIZE);
   params.set('offset', offset);
   fetch('/api/gallery?' + params.toString())
@@ -296,7 +288,7 @@ function loadGallery(offset) {
         if (offset === 0) {
           $('#emptyState').style.display = 'block';
           $('#stats').style.display = 'none';
-          if (favoritesMode) {
+          if (activeCollectionId) {
             $('#emptyTitle').textContent = '暂无收藏作品';
             $('#emptyDesc').textContent = '在作品详情页点击 ♥ 收藏添加到此处';
           } else {
@@ -322,7 +314,7 @@ function loadGallery(offset) {
       const shown = Math.min(galleryTotal, galleryOffset);
       let statsText = `${shown} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
       if (activeTag) statsText += ` · 标签: ${escHtml(activeTag)}`;
-      if (!favoritesMode && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
+      if (!activeCollectionId && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
       $('#stats').textContent = statsText;
       $('#loadMoreWrap').style.display = data.has_more ? 'block' : 'none';
     })
@@ -450,19 +442,25 @@ function toggleBatchMode() {
 
 $('#btnBatchMode').addEventListener('click', toggleBatchMode);
 
-// ── Favorites Toggle ──
+// ── Collection Filter ──
 
-$('#btnFavorites').addEventListener('click', () => {
-  favoritesMode = !favoritesMode;
-  if (favoritesMode) {
-    $('#btnFavorites').classList.add('active');
-    $('#pageTitle').textContent = '我的收藏';
-  } else {
-    $('#btnFavorites').classList.remove('active');
-    $('#pageTitle').textContent = '已下载作品';
-  }
+function loadCollections() {
+  fetch('/api/collections')
+    .then(r => r.json())
+    .then(collections => {
+      const sel = $('#collectionSelect');
+      sel.innerHTML = '<option value="">全部作品</option>' +
+        collections.map(c => `<option value="${c.id}">${escHtml(c.name)} (${c.item_count})</option>`).join('');
+      if (activeCollectionId) sel.value = activeCollectionId;
+    });
+}
+
+$('#collectionSelect').addEventListener('change', function() {
+  activeCollectionId = this.value;
   activeTag = '';
   setActiveTag('');
+  const name = this.options[this.selectedIndex]?.text || '';
+  $('#pageTitle').textContent = activeCollectionId ? `${name} - 收藏夹` : '已下载作品';
   loadGallery(0);
 });
 

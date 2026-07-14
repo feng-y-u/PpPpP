@@ -27,7 +27,7 @@ from config import (
     SETTINGS_PASSWORD,
     SSL_VERIFY,
 )
-from models import init_db, get_session, Illust, DownloadLog, BlockedTag, safe_commit
+from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
 from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery
 
 logging.basicConfig(
@@ -687,6 +687,7 @@ def api_gallery():
     limit = request.args.get('limit', 50, type=int)
     offset = request.args.get('offset', 0, type=int)
     favorites_only = request.args.get('favorites', '').lower() == 'true'
+    collection_id = request.args.get('collection_id', type=int)
     limit = max(1, min(200, limit))
     offset = max(0, offset)
 
@@ -695,7 +696,10 @@ def api_gallery():
 
         wheres = ["illusts.download_status = 'done'"]
         params = {}
-        if favorites_only:
+        if collection_id is not None:
+            wheres.append('EXISTS (SELECT 1 FROM collection_items WHERE collection_items.pixiv_id = illusts.pixiv_id AND collection_items.collection_id = :cid)')
+            params['cid'] = collection_id
+        elif favorites_only:
             wheres.append('illusts.is_favorite = 1')
         if blocked:
             blk_list = list(blocked)
@@ -1149,6 +1153,154 @@ def api_settings_post():
         return jsonify({'error': f'保存失败: {e}'}), 500
 
 
+# ── Collections ──
+
+
+def _sync_is_favorite(pixiv_id: int):
+    """Recalculate is_favorite based on collection membership."""
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust:
+            return
+        count = db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).count()
+        illust.is_favorite = count > 0
+        illust.favorited_at = datetime.now(timezone.utc) if count > 0 else None
+        safe_commit(db)
+
+
+@app.route('/api/collections', methods=['GET'])
+def list_collections():
+    with get_session() as db:
+        collections = db.query(Collection).order_by(Collection.created_at).all()
+        result = []
+        for c in collections:
+            d = c.to_dict()
+            d['item_count'] = db.query(CollectionItem).filter(CollectionItem.collection_id == c.id).count()
+            result.append(d)
+        return jsonify(result)
+
+
+@app.route('/api/collections', methods=['POST'])
+@_csrf_required
+def create_collection():
+    body = request.get_json(silent=True) or {}
+    name = body.get('name', '').strip()
+    if not name or len(name) > 50:
+        return jsonify({'error': '收藏夹名称不能为空且不超过50字'}), 400
+    with get_session() as db:
+        if db.query(Collection).filter(Collection.name == name).first():
+            return jsonify({'error': '收藏夹名称已存在'}), 409
+        c = Collection(name=name, description=body.get('description', ''))
+        db.add(c)
+        safe_commit(db)
+        return jsonify(c.to_dict()), 201
+
+
+@app.route('/api/collections/<int:collection_id>', methods=['PUT'])
+@_csrf_required
+def update_collection(collection_id):
+    body = request.get_json(silent=True) or {}
+    name = body.get('name', '').strip()
+    if not name or len(name) > 50:
+        return jsonify({'error': '收藏夹名称不能为空且不超过50字'}), 400
+    with get_session() as db:
+        c = db.query(Collection).filter(Collection.id == collection_id).first()
+        if not c:
+            return jsonify({'error': '收藏夹不存在'}), 404
+        if c.name != name and db.query(Collection).filter(Collection.name == name).first():
+            return jsonify({'error': '收藏夹名称已存在'}), 409
+        c.name = name
+        if 'description' in body:
+            c.description = body.get('description', '')
+        safe_commit(db)
+        return jsonify(c.to_dict())
+
+
+@app.route('/api/collections/<int:collection_id>', methods=['DELETE'])
+@_csrf_required
+def delete_collection(collection_id):
+    with get_session() as db:
+        c = db.query(Collection).filter(Collection.id == collection_id).first()
+        if not c:
+            return jsonify({'error': '收藏夹不存在'}), 404
+        affected = [item.pixiv_id for item in db.query(CollectionItem).filter(CollectionItem.collection_id == collection_id).all()]
+        db.query(CollectionItem).filter(CollectionItem.collection_id == collection_id).delete()
+        db.delete(c)
+        safe_commit(db)
+        for pid in affected:
+            _sync_is_favorite(pid)
+        return jsonify({'status': 'deleted'})
+
+
+@app.route('/api/collections/<int:collection_id>/items', methods=['GET'])
+def list_collection_items(collection_id):
+    limit = request.args.get('limit', 50, type=int)
+    offset = request.args.get('offset', 0, type=int)
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+    with get_session() as db:
+        if not db.query(Collection).filter(Collection.id == collection_id).first():
+            return jsonify({'error': '收藏夹不存在'}), 404
+        total = db.query(CollectionItem).filter(CollectionItem.collection_id == collection_id).count()
+        items = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id
+        ).order_by(CollectionItem.created_at.desc()).offset(offset).limit(limit).all()
+        return jsonify({
+            'data': [item.to_dict() for item in items],
+            'total': total,
+            'has_more': offset + limit < total,
+        })
+
+
+@app.route('/api/collections/<int:collection_id>/items', methods=['POST'])
+@_csrf_required
+def add_collection_item(collection_id):
+    body = request.get_json(silent=True) or {}
+    pixiv_id = body.get('pixiv_id')
+    if not pixiv_id:
+        return jsonify({'error': '请提供作品ID'}), 400
+    with get_session() as db:
+        if not db.query(Collection).filter(Collection.id == collection_id).first():
+            return jsonify({'error': '收藏夹不存在'}), 404
+        existing = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id,
+            CollectionItem.pixiv_id == pixiv_id,
+        ).first()
+        if existing:
+            return jsonify({'error': '作品已在收藏夹中'}), 409
+        item = CollectionItem(collection_id=collection_id, pixiv_id=pixiv_id)
+        db.add(item)
+        safe_commit(db)
+        data = item.to_dict()
+    _sync_is_favorite(pixiv_id)
+    return jsonify(data), 201
+
+
+@app.route('/api/collections/<int:collection_id>/items/<int:pixiv_id>', methods=['DELETE'])
+@_csrf_required
+def remove_collection_item(collection_id, pixiv_id):
+    with get_session() as db:
+        if not db.query(Collection).filter(Collection.id == collection_id).first():
+            return jsonify({'error': '收藏夹不存在'}), 404
+        item = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id,
+            CollectionItem.pixiv_id == pixiv_id,
+        ).first()
+        if not item:
+            return jsonify({'error': '作品不在收藏夹中'}), 404
+        db.delete(item)
+        safe_commit(db)
+    _sync_is_favorite(pixiv_id)
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/api/illust/<int:pixiv_id>/collections')
+def illust_collections(pixiv_id):
+    with get_session() as db:
+        items = db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).all()
+        return jsonify([item.collection_id for item in items])
+
+
 # ── Favorites ──
 
 
@@ -1162,15 +1314,30 @@ def api_favorite_get(pixiv_id):
 @app.route('/api/favorite/<int:pixiv_id>', methods=['POST'])
 @_csrf_required
 def api_favorite_post(pixiv_id):
+    """Toggle membership in the default '我的收藏' collection (backward compat)."""
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
             return jsonify({'error': '作品不存在'}), 404
-        illust.is_favorite = not illust.is_favorite
-        illust.favorited_at = datetime.now(timezone.utc) if illust.is_favorite else None
-        safe_commit(db)
+        default = db.query(Collection).filter(Collection.name == '我的收藏').first()
+        if not default:
+            return jsonify({'error': '默认收藏夹不存在'}), 500
+        existing = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == default.id,
+            CollectionItem.pixiv_id == pixiv_id,
+        ).first()
+        if existing:
+            db.delete(existing)
+            safe_commit(db)
+            _sync_is_favorite(pixiv_id)
+        else:
+            db.add(CollectionItem(collection_id=default.id, pixiv_id=pixiv_id))
+            safe_commit(db)
+            _sync_is_favorite(pixiv_id)
+        # Re-read to get updated state
+        db.refresh(illust)
         return jsonify({'is_favorite': illust.is_favorite})
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='127.0.0.1', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000)
