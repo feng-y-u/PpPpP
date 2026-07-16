@@ -317,45 +317,24 @@ const pageCount = {{ page_count }};
 // ── Image URLs ──
 const localUrls = {{ local_urls | tojson if local_urls else '[]' }};
 const mediumUrls = {{ medium_urls | tojson if medium_urls else '[]' }};
-const thumbUrl = '{{ proxy_thumb(illust.thumb_url) if illust.thumb_url else "" }}';
-const useMed = !isDownloaded || !localUrls.length;
-const imgSources = isDownloaded && localUrls.length ? localUrls : (mediumUrls.length ? mediumUrls : (thumbUrl ? [thumbUrl] : []));
-
-// 渐进加载：先显缩略图，再切中图
-const highResLoaded = new Set();
-function loadPage(index) {
-  if (index < 0 || index >= imgSources.length) return;
-  if (highResLoaded.has(index)) return;
-  highResLoaded.add(index);
-  const src = imgSources[index];
-  if (!src) return;
-  const img = new Image();
-  img.onload = () => {
-    const main = $('#mainImage');
-    if (currentPage === index) main.src = src;
-  };
-  img.src = src;
-}
+const originalProxied = {{ original_proxied | tojson if original_proxied else '[]' }};
+// 已下载→本地图，否则中图，否则原图代理，最后缩略图
+const imgSources = !isDownloaded || !localUrls.length
+  ? (mediumUrls.length ? mediumUrls : (originalProxied.length ? originalProxied : ['{{ proxy_thumb(illust.thumb_url) if illust.thumb_url else "" }}']))
+  : localUrls;
 
 let currentPage = 0;
 
 function showPage(index) {
-  if (!imgSources.length) {
+  if (!imgSources.length || !imgSources[0]) {
     $('#fallback').textContent = '[ 无可用图片 ]';
     return;
   }
   currentPage = Math.max(0, Math.min(index, imgSources.length - 1));
   const img = $('#mainImage');
+  img.src = imgSources[currentPage];
   img.style.display = 'block';
   $('#fallback').style.display = 'none';
-
-  if (useMed && thumbUrl) {
-    // 先显缩略图，后台加载中图
-    img.src = thumbUrl;
-    loadPage(currentPage);
-  } else {
-    img.src = imgSources[currentPage];
-  }
 
   $('#prevBtn').disabled = currentPage === 0;
   $('#nextBtn').disabled = currentPage >= imgSources.length - 1;
@@ -369,33 +348,15 @@ function showPage(index) {
   }
 }
 
-$('#prevBtn').addEventListener('click', () => {
-  const next = currentPage - 1;
-  showPage(next);
-  if (useMed) loadPage(next - 1);
-});
-$('#nextBtn').addEventListener('click', () => {
-  const next = currentPage + 1;
-  showPage(next);
-  if (useMed) loadPage(next + 1);
-});
+$('#prevBtn').addEventListener('click', () => showPage(currentPage - 1));
+$('#nextBtn').addEventListener('click', () => showPage(currentPage + 1));
 
 // ── Back button ──
 $('#backBtn').addEventListener('click', () => history.back());
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'ArrowLeft') {
-    e.preventDefault();
-    const next = currentPage - 1;
-    showPage(next);
-    if (useMed) loadPage(next - 1);
-  }
-  if (e.key === 'ArrowRight') {
-    e.preventDefault();
-    const next = currentPage + 1;
-    showPage(next);
-    if (useMed) loadPage(next + 1);
-  }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); showPage(currentPage - 1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); showPage(currentPage + 1); }
 });
 
 // ── Collection Picker ──

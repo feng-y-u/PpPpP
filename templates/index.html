@@ -242,17 +242,15 @@
 }
 
 /* ── Loading ── */
-.loading-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(245,245,240,.6);
-  backdrop-filter: blur(3px);
-  z-index: 1050;
-  justify-content: center;
-  align-items: center;
+.search-loading {
+  text-align: center;
+  padding: 2rem 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
 }
-.loading-overlay.show { display: flex; }
+.search-loading .spinner {
+  margin: 0 auto 0.5rem;
+}
 
 /* ── Blocked Tags Panel ── */
 .blocked-panel {
@@ -369,8 +367,11 @@
 
 </div>
 
-<!-- Loading Overlay -->
-<div id="loadingOverlay" class="loading-overlay"><div class="spinner"></div></div>
+<!-- Loading Indicator -->
+<div id="loadingIndicator" class="search-loading" style="display:none;">
+  <div class="spinner"></div>
+  <div>搜索中...</div>
+</div>
 
 <!-- Toast -->
 <div class="toast-container position-fixed bottom-0 end-0 p-3">
@@ -403,7 +404,6 @@ function restoreSearchState() {
     const raw = sessionStorage.getItem(SEARCH_STATE_KEY);
     if (!raw) return false;
     const s = JSON.parse(raw);
-    if (!s.results?.length) return false;
     $('#searchType').value = s.type || 'tag';
     $('#searchQuery').value = s.query || '';
     $('#minBookmarks').value = s.minBookmarks || 0;
@@ -415,6 +415,12 @@ function restoreSearchState() {
 
     lastSearchParams = { type:s.type, query:s.query, minBookmarks:s.minBookmarks,
       sort:s.sort||'date_d', startPage:s.startPage||1, tagMode:s.tagMode||'or', r18Mode:s.r18Mode||'all' };
+
+    if (!s.results?.length) {
+      doSearch();
+      return true;
+    }
+
     allResults = s.results || [];
     currentPage = s.currentPage || (s.startPage || 1);
     hasMorePages = s.hasMorePages || false;
@@ -510,7 +516,7 @@ async function doSearch() {
   currentPage = startPage;
   allResults = [];
   hasMorePages = false;
-  sessionStorage.removeItem(SEARCH_STATE_KEY);
+  saveSearchState([]);
   $('#masonryGrid').innerHTML = '';
   $('#emptyState').style.display = 'none';
   $('#loadMoreWrap').style.display = 'none';
@@ -707,7 +713,7 @@ function lazyLoad() {
   }, { rootMargin: '200px' });
   $$('img[data-src]').forEach(img => observer.observe(img));
 }
-function showLoading(on) { $('#loadingOverlay').classList.toggle('show',on); $('#searchBtn').disabled=on; }
+function showLoading(on) { $('#loadingIndicator').style.display = on ? 'block' : 'none'; $('#searchBtn').disabled = on; }
 
 function loadR18Mode() {
   try {

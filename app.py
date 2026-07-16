@@ -319,15 +319,12 @@ def _csrf_required(f: Callable) -> Callable:
     return decorated
 
 
-def _original_to_master1200(url: str) -> str:
-    """Pixiv 原图 URL → master1200 中等尺寸 URL（约 1200px）。"""
-    m = re.search(
-        r'^(https://i\.pximg\.net/)img-original/img/(.+?)(_p\d+)(\.\w+)$',
-        url
-    )
+def _original_to_resized(url: str) -> str:
+    """Pixiv 原图 URL → 标准中等尺寸（master1200，最长边 1200px）。"""
+    m = re.match(r'(https://i\.pximg\.net/)img-original/img/(.+)\.(\w+)(\?.*)?$', url)
     if not m:
         return url
-    return f'{m.group(1)}c/1200x1200/img-master/img/{m.group(2)}{m.group(3)}_master1200{m.group(4)}'
+    return f'{m.group(1)}c/1200x1200/img-master/img/{m.group(2)}_master1200.{m.group(3)}'
 
 
 def _proxy_thumb(url: str) -> str:
@@ -683,14 +680,17 @@ def detail_page(pixiv_id: int) -> str:
         related = [r.to_dict() for r in related]
 
         medium_urls = []
+        original_proxied = []
         for url in illust.original_urls_list or []:
-            medium_urls.append(_proxy_thumb(_original_to_master1200(url)))
+            medium_urls.append(_proxy_thumb(_original_to_resized(url)))
+            original_proxied.append(_proxy_thumb(url))
 
         return render_template(
             'detail.html',
             illust=data,
             local_urls=local_urls,
             medium_urls=medium_urls,
+            original_proxied=original_proxied,
             file_size=file_size,
             related=related,
             proxy_thumb=_proxy_thumb,
