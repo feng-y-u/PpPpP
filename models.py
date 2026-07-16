@@ -66,6 +66,7 @@ class Illust(Base):
     original_urls: Mapped[str] = mapped_column(Text, default='[]')
     local_paths: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     favorited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
@@ -125,6 +126,7 @@ class Illust(Base):
             'original_urls': self.original_urls_list,
             'local_paths': self.local_paths_list,
             'download_status': self.download_status,
+            'downloaded_at': self.downloaded_at.isoformat() if self.downloaded_at else None,
             'file_size': self.file_size,
             'is_favorite': self.is_favorite,
             'favorited_at': self.favorited_at.isoformat() if self.favorited_at else None,
@@ -219,6 +221,10 @@ def init_db() -> None:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN is_favorite BOOLEAN DEFAULT 0'))
             conn.execute(text('ALTER TABLE illusts ADD COLUMN favorited_at DATETIME'))
+            conn.commit()
+    if 'downloaded_at' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN downloaded_at DATETIME'))
             conn.commit()
 
     # 收藏夹表迁移：创建默认"我的收藏"并迁移现有收藏

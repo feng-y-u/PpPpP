@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import threading
@@ -253,6 +254,7 @@ def _download_illust(pixiv_id: int) -> None:
             else:
                 illust.local_paths_list = local_paths
                 illust.download_status = 'done'
+                illust.downloaded_at = datetime.now(timezone.utc)
                 total_size = sum(os.path.getsize(p) for p in local_paths if os.path.isfile(p))
                 illust.file_size = total_size
                 db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
@@ -724,6 +726,9 @@ def api_gallery() -> Response:
     offset = request.args.get('offset', 0, type=int)
     favorites_only = request.args.get('favorites', '').lower() == 'true'
     collection_id = request.args.get('collection_id', type=int)
+    sort = request.args.get('sort', 'created')
+    if sort not in ('created', 'downloaded'):
+        sort = 'created'
     limit = max(1, min(200, limit))
     offset = max(0, offset)
 
@@ -758,9 +763,10 @@ def api_gallery() -> Response:
         fav_total = row[1] or 0
 
         # 分页查询 ID
+        order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
         page_params = {**params, 'lim': limit, 'off': offset}
         pk_ids = db.execute(
-            text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY created_at DESC LIMIT :lim OFFSET :off'),
+            text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
             page_params
         ).scalars().all()
 
@@ -779,6 +785,8 @@ def api_gallery() -> Response:
             d = i.to_dict()
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
+            # 本地目录路径
+            d['local_dir'] = os.path.abspath(_get_download_dir(i.pixiv_id)) if paths else None
             results.append(d)
         safe_commit(db)
 
@@ -1051,7 +1059,7 @@ def api_downloads() -> Response:
         active = db.query(Illust).filter(Illust.download_status == 'downloading').order_by(Illust.created_at.desc()).all()
         queued_ids = list(_queued_downloads)
         queued = db.query(Illust).filter(Illust.pixiv_id.in_(queued_ids)).order_by(Illust.created_at.desc()).all() if queued_ids else []
-        completed = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.created_at.desc()).limit(30).all()
+        completed = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.downloaded_at.desc().nullslast()).limit(30).all()
         logs = (
             db.query(DownloadLog)
             .order_by(DownloadLog.created_at.desc())
@@ -1064,10 +1072,16 @@ def api_downloads() -> Response:
                 d['progress'] = {'current': p['current'], 'total': p['total']}
             return d
 
+        def _with_dir(i):
+            d = i.to_dict()
+            paths = i.local_paths_list or []
+            d['local_dir'] = os.path.abspath(_get_download_dir(i.pixiv_id)) if paths else None
+            return d
+
         return jsonify({
             'active': [_with_progress(i) for i in active],
             'queued': [i.to_dict() for i in queued],
-            'completed': [i.to_dict() for i in completed],
+            'completed': [_with_dir(i) for i in completed],
             'logs': [l.to_dict() for l in logs],
         })
 
@@ -1339,6 +1353,25 @@ def illust_collections(pixiv_id: int) -> Response:
 
 
 # ── 收藏 ──
+
+
+@app.route('/api/open-dir', methods=['POST'])
+@_csrf_required
+def api_open_dir() -> Response:
+    """打开本地文件夹（仅限本机浏览器访问时有效）。"""
+    body = request.get_json(silent=True) or {}
+    path = body.get('path', '')
+    if not path or not os.path.isdir(path):
+        return jsonify({'error': '目录不存在'}), 404
+    try:
+        if platform.system() == 'Windows':
+            os.startfile(path)
+        else:
+            import subprocess
+            subprocess.Popen(['xdg-open', path])
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/favorite/<int:pixiv_id>', methods=['GET'])

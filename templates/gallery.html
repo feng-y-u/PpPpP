@@ -143,6 +143,10 @@
   <div class="d-flex align-items-center gap-2 mb-2">
     <h5 class="mb-0" id="pageTitle">已下载作品</h5>
     <div class="d-flex gap-1 ms-auto">
+      <select id="sortSelect" class="form-select form-select-sm" style="width:auto;">
+        <option value="created">按收录时间</option>
+        <option value="downloaded">按下载时间</option>
+      </select>
       <select id="collectionSelect" class="form-select form-select-sm" style="width:auto;">
         <option value="">全部作品</option>
       </select>
@@ -208,6 +212,7 @@ let selectedPids = new Set(), batchMode = false;
 let galleryOffset = 0, galleryTotal = 0, galleryHasMore = false, galleryFavTotal = 0;
 let allTags = [];
 let activeCollectionId = '';
+let sortOrder = 'created';
 const PAGE_SIZE = 50;
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
@@ -266,6 +271,7 @@ function loadGallery(offset) {
   const params = new URLSearchParams();
   if (activeTag) params.set('tag', activeTag);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
+  params.set('sort', sortOrder);
   params.set('limit', PAGE_SIZE);
   params.set('offset', offset);
   fetch('/api/gallery?' + params.toString())
@@ -344,7 +350,10 @@ function renderCard(r) {
         <div class="card-title" title="${escAttr(r.title)}">${r.is_favorite ? '❤ ' : ''}${escHtml(r.title)}</div>
         <div class="card-info">#${r.pixiv_id} · ${escHtml(r.user_name)} · ${r.file_count || 1} 文件</div>
         <div class="tags-wrap">${tags}</div>
-        <button class="btn btn-outline-danger btn-sm w-100 delete-btn" data-pid="${r.pixiv_id}">删除</button>
+        <div class="d-flex gap-1 mt-1">
+          <button class="btn btn-outline-danger btn-sm flex-fill delete-btn" data-pid="${r.pixiv_id}">删除</button>
+          ${r.local_dir ? `<button class="btn btn-outline-secondary btn-sm open-dir-btn" data-dir="${escAttr(r.local_dir)}" title="打开文件夹">📂</button>` : ''}
+        </div>
       </div>
     </div>`;
   $('#cardGrid').appendChild(col);
@@ -359,6 +368,15 @@ function renderCard(r) {
     deleteMode = 'single';
     $('#deleteModalBody').textContent = `确定删除 #${r.pixiv_id} 的所有已下载文件？`;
     deleteModal.show();
+  });
+
+  col.querySelector('.open-dir-btn')?.addEventListener('click', function(e) {
+    e.stopPropagation();
+    fetch('/api/open-dir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ path: this.dataset.dir }),
+    }).catch(() => {});
   });
 
   col.querySelector('.card-checkbox').addEventListener('change', function() {
@@ -465,6 +483,11 @@ $('#collectionSelect').addEventListener('change', function() {
   setActiveTag('');
   const name = this.options[this.selectedIndex]?.text || '';
   $('#pageTitle').textContent = activeCollectionId ? `${name} - 收藏夹` : '已下载作品';
+  loadGallery(0);
+});
+
+$('#sortSelect').addEventListener('change', function() {
+  sortOrder = this.value;
   loadGallery(0);
 });
 
