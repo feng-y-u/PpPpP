@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import json
 import os
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import create_engine, event, Boolean, Integer, String, Text, DateTime, Index, ForeignKey, UniqueConstraint, text
 from sqlalchemy.exc import OperationalError
@@ -18,7 +21,7 @@ engine = create_engine(
 
 
 @event.listens_for(engine, 'connect')
-def set_sqlite_pragma(dbapi_connection, connection_record):
+def set_sqlite_pragma(dbapi_connection: Any, connection_record: Any) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute('PRAGMA journal_mode=WAL;')
     cursor.execute('PRAGMA busy_timeout=10000;')
@@ -26,7 +29,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.close()
 
 
-def safe_commit(db_session, max_retries=3):
+def safe_commit(db_session: Session, max_retries: int = 3) -> None:
     """带重试的 commit，处理 database is locked 错误."""
     for attempt in range(max_retries):
         try:
@@ -76,7 +79,7 @@ class Illust(Base):
             return []
 
     @tags_list.setter
-    def tags_list(self, value: list[str]):
+    def tags_list(self, value: list[str]) -> None:
         self.tags = json.dumps(value, ensure_ascii=False)
 
     @property
@@ -87,7 +90,7 @@ class Illust(Base):
             return []
 
     @original_urls_list.setter
-    def original_urls_list(self, value: list[str]):
+    def original_urls_list(self, value: list[str]) -> None:
         self.original_urls = json.dumps(value, ensure_ascii=False)
 
     @property
@@ -100,7 +103,7 @@ class Illust(Base):
             return None
 
     @local_paths_list.setter
-    def local_paths_list(self, value: list[str] | None):
+    def local_paths_list(self, value: list[str] | None) -> None:
         if value is None:
             self.local_paths = None
         else:
@@ -195,10 +198,10 @@ class CollectionItem(Base):
         }
 
 
-def init_db():
+def init_db() -> None:
     Base.metadata.create_all(engine)
 
-    # Schema migrations for existing DBs
+    # 针对现有数据库的 Schema 迁移
     from sqlalchemy import inspect as sa_inspect
     inspector = sa_inspect(engine)
     columns = [c['name'] for c in inspector.get_columns('illusts')]
@@ -218,7 +221,7 @@ def init_db():
             conn.execute(text('ALTER TABLE illusts ADD COLUMN favorited_at DATETIME'))
             conn.commit()
 
-    # Collection tables migration: create default "我的收藏" and migrate existing favorites
+    # 收藏夹表迁移：创建默认"我的收藏"并迁移现有收藏
     # Base.metadata.create_all above created the tables, so they always exist now
     from sqlalchemy import select
     sel = select(Collection).where(Collection.name == '我的收藏')
@@ -228,7 +231,7 @@ def init_db():
             default = Collection(name='我的收藏', description='默认收藏夹')
             sess.add(default)
             sess.commit()
-        # Migrate is_favorite=True records not already in default collection
+        # 迁移尚未在默认收藏夹中的 is_favorite=True 记录
         sel2 = select(CollectionItem.pixiv_id).where(CollectionItem.collection_id == default.id)
         existing_ids = {row[0] for row in sess.execute(sel2).fetchall()}
         to_migrate = sess.execute(

@@ -1,4 +1,4 @@
-// ── Pixiv Viewer — Shared Utils ──
+// ── Pixiv Viewer — 共享工具函数 ──
 
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
@@ -39,7 +39,7 @@ function showToast(msg, isError) {
   bootstrap.Toast.getOrCreateInstance(toast).show();
 }
 
-// ── Download Functions (shared across index and detail pages) ──
+// ── 下载功能（首页和详情页共享）──
 
 async function triggerDownload(pixivId, btn) {
   btn.disabled = true;
@@ -73,7 +73,7 @@ function pollDl(pixivId) {
 }
 
 function updateDlDone(pixivId) {
-  // Card-based UI (index.html search results)
+  // 卡片式 UI（index.html 搜索结果页）
   const card = document.querySelector(`.photo-card[data-pixiv-id="${pixivId}"]`);
   if (card) {
     const actions = card.querySelector('.photo-card-actions');
@@ -86,7 +86,7 @@ function updateDlDone(pixivId) {
     }
     return;
   }
-  // Button-based UI (detail.html)
+  // 按钮式 UI（detail.html 详情页）
   const btn = document.getElementById('downloadBtn');
   if (btn) {
     btn.textContent = '⬇ 下载原图';
@@ -97,7 +97,7 @@ function updateDlDone(pixivId) {
 }
 
 function resetDlBtn(pixivId) {
-  // Card-based UI (index.html search results)
+  // 卡片式 UI（index.html 搜索结果页）
   const card = document.querySelector(`.photo-card[data-pixiv-id="${pixivId}"]`);
   if (card) {
     const actions = card.querySelector('.photo-card-actions');
@@ -110,7 +110,7 @@ function resetDlBtn(pixivId) {
     }
     return;
   }
-  // Button-based UI (detail.html)
+  // 按钮式 UI（detail.html 详情页）
   const btn = document.getElementById('downloadBtn');
   if (btn) {
     btn.textContent = '⬇ 下载原图';

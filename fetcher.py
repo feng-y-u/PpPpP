@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 import random
@@ -6,6 +8,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import requests
@@ -29,7 +32,7 @@ _cookie_value = ''
 _pixiv_hostname = urlparse(PIXIV_BASE_URL).hostname or 'www.pixiv.net'
 
 
-def _load_cookie():
+def _load_cookie() -> None:
     global _cookie_mtime, _cookie_value
     if not os.path.exists(COOKIE_PATH):
         raise FileNotFoundError(f'Cookie file not found: {COOKIE_PATH}')
@@ -53,8 +56,8 @@ _token_data = {}  # { 'access_token': str, 'refresh_token': str, 'expires_at': f
 _device_token = str(uuid.uuid4())
 
 
-def _oauth_login():
-    """First-time login: username/password → access_token + refresh_token."""
+def _oauth_login() -> None:
+    """首次登录：用户名/密码 → access_token + refresh_token。"""
     global _token_data
     try:
         resp = requests.post('https://oauth.secure.pixiv.net/auth/token', data={
@@ -78,8 +81,8 @@ def _oauth_login():
         raise
 
 
-def _oauth_refresh():
-    """Refresh token using refresh_token."""
+def _oauth_refresh() -> None:
+    """使用 refresh_token 刷新 Token。"""
     global _token_data
     try:
         resp = requests.post('https://oauth.secure.pixiv.net/auth/token', data={
@@ -103,8 +106,8 @@ def _oauth_refresh():
         raise
 
 
-def _ensure_token():
-    """Ensure a valid token exists (login or refresh if needed)."""
+def _ensure_token() -> None:
+    """确保存在有效的 Token（必要时登录或刷新）。"""
     if not _token_data:
         _oauth_login()
     elif _token_data['expires_at'] - time.time() < 300:  # 5 min buffer
@@ -145,7 +148,7 @@ def _split_tags(keyword: str) -> list[str]:
     return parts if parts else [raw]
 
 
-def _get_blocked_tags(db) -> set[str]:
+def _get_blocked_tags(db: Any) -> set[str]:
     return {t.tag for t in db.query(BlockedTag).all()}
 
 
@@ -162,7 +165,7 @@ def _is_r18(tags: list[str]) -> bool:
     return bool(set(tags) & R18_TAGS)
 
 
-def _parse_tags(tags_data) -> list[str]:
+def _parse_tags(tags_data: Any) -> list[str]:
     if not tags_data:
         return []
     if isinstance(tags_data, list):
@@ -242,7 +245,7 @@ def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
         return {}
     results = {}
 
-    def _worker(pid):
+    def _worker(pid: int) -> tuple[int, dict | None]:
         session = _build_session()
         return pid, _get_illust_detail(session, pid)
 
@@ -259,22 +262,22 @@ def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
     return results
 
 
-# ── Common Pipeline ──
+# ── 公共流水线 ──
 
-def _process_items(db, items, id_extractor, illust_factory, blocked, *,
-                   min_bookmarks=0, hide_r18=False):
-    """Deduplicate → filter → parallel fetch detail → store.
+def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
+                   min_bookmarks: int = 0, hide_r18: bool = False) -> list[dict]:
+    """去重 → 过滤 → 并行拉取详情 → 存储。
 
     Args:
-        db: SQLAlchemy session
-        items: list of raw item dicts (or pixiv_id ints for user search)
-        id_extractor: callable(item) -> int pixiv_id
-        illust_factory: callable(item, detail) -> Illust instance
-        blocked: set of blocked tag strings
-        min_bookmarks: minimum bookmark count (0 = no filter)
-        hide_r18: if True, exclude R-18 tagged works
+        db: SQLAlchemy 会话
+        items: 原始作品字典列表（用户搜索时为 pixiv_id 整数列表）
+        id_extractor: 可调用对象，接收 item 返回 int pixiv_id
+        illust_factory: 可调用对象，接收 (item, detail) 返回 Illust 实例
+        blocked: 被屏蔽标签的字符串集合
+        min_bookmarks: 最低收藏数（0 表示不过滤）
+        hide_r18: 若为 True，排除 R-18 标签作品
 
-    Returns: list of illust dicts ready for API response
+    Returns: 可直接用于 API 响应的 illust 字典列表
     """
     results = []
     to_fetch = []
@@ -320,11 +323,11 @@ def _process_items(db, items, id_extractor, illust_factory, blocked, *,
     return results
 
 
-def _illust_from_item(item, detail):
-    """Create Illust from search/discovery/follow API item.
+def _illust_from_item(item: dict, detail: dict) -> Illust:
+    """从搜索/发现/关注 API 条目创建 Illust。
 
-    Most fields come from the search result item (list context).
-    bookmark_count and original_urls come from the detail response.
+    大多数字段来自搜索结果条目（列表上下文）。
+    bookmark_count 和 original_urls 来自详情响应。
     """
     illust = Illust(
         pixiv_id=int(item['id']),
@@ -342,8 +345,8 @@ def _illust_from_item(item, detail):
     return illust
 
 
-def _illust_from_detail(item, detail):
-    """Create Illust from user-profile search (all fields from detail)."""
+def _illust_from_detail(item: int, detail: dict) -> Illust:
+    """从用户个人资料搜索创建 Illust（所有字段来自详情）。"""
     illust = Illust(
         pixiv_id=item,  # item IS the pixiv_id for user searches
         title=detail['title'],
@@ -360,12 +363,12 @@ def _illust_from_detail(item, detail):
     return illust
 
 
-# ── Search Functions ──
+# ── 搜索函数 ──
 
 def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
                   sort_order: str = 'popular_d', max_pages: int = 10,
                   tag_mode: str = 'or', r18_mode: str = 'all') -> tuple[list[dict], bool]:
-    """Search Pixiv by tag(s). tag_mode: 'or' = any tag, 'and' = all tags."""
+    """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。"""
     if page > max_pages:
         return [], False
 
@@ -425,7 +428,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
 def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
                      min_bookmarks: int = 0, r18_mode: str = 'all') -> tuple[list[dict], bool]:
-    """Browse Pixiv discovery (all works) without a specific tag."""
+    """浏览 Pixiv 发现页（全部作品），无需指定标签。"""
     session = _build_session()
     url = (
         f'{PIXIV_BASE_URL}/ajax/discovery/artworks'
@@ -470,7 +473,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
 
 def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
                    hide_r18: bool = False) -> tuple[list[dict], bool]:
-    """Search by user ID. page is 1-based. Returns (results, has_more)."""
+    """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。"""
     session = _build_session()
     profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
     try:
@@ -516,7 +519,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
 
 
 def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], bool]:
-    """Fetch latest works from followed artists."""
+    """获取关注画师的最新作品。"""
     session = _build_session()
     url = f'{PIXIV_BASE_URL}/ajax/follow_latest/illust?mode={r18_mode}&p={page}'
     try:

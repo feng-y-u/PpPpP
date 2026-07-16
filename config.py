@@ -74,4 +74,4 @@ if os.path.exists(_settings_path):
             if _json_key in _overrides and _overrides[_json_key] != '':
                 globals()[_const_name] = _overrides[_json_key]
     except Exception:
-        pass  # settings.json invalid → silently use defaults
+        print(f'[config] settings.json 读取失败，使用默认配置')
