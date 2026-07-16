@@ -33,10 +33,10 @@ No test/lint/typecheck/format commands exist.
 | File | Role |
 |------|------|
 | `app.py` | Flask entrypoint: all routes, download engine, background tasks, CSRF, rate limiting |
-| `fetcher.py` | Pixiv API wrapper: cookie auth, search by tag/user/follow, illust detail |
+| `fetcher.py` | Pixiv API wrapper: cookie/OAuth auth, search by tag/user/follow, illust detail |
 | `models.py` | SQLAlchemy ORM: Illust, BlockedTag, DownloadLog, Collection, CollectionItem |
 | `config.py` | Constants, env overrides, `instance/settings.json` override at import time |
-| `templates/*.html` | 7 Jinja2 templates (index, gallery, bulk, downloads, logs, detail, settings, settings_unlock) |
+| `templates/*.html` | 7 Jinja2 templates (index, gallery, bulk, downloads, detail, settings, settings_unlock) |
 | `static/` | `app.js` (124 lines), `style.css` (171 lines) |
 
 No `__init__.py` — modules import directly. No `setup.py`/`pyproject.toml`.
@@ -48,10 +48,13 @@ No `__init__.py` — modules import directly. No `setup.py`/`pyproject.toml`.
 - **Gunicorn MUST use `-w 1`**: download state (`_download_progress`, `_bulk_tasks`, etc.) lives in process memory. Multiple workers don't share it.
 - **settings.json restart required**: `config.py` reads `instance/settings.json` at import time. Changes via web UI only take effect after server restart.
 - **Cookie hot-reload**: `fetcher.py` checks `cookies.txt` mtime on every API call — no restart needed on cookie refresh. Cookie expiry = silent empty search results.
+- **OAuth auth also available**: Set `PIXIV_USERNAME`/`PIXIV_PASSWORD` env vars to use Pixiv OAuth Bearer tokens instead of cookie (auto-refreshes, no manual cookie maintenance).
 - **`popular_d` sort needs Pixiv Premium**: non-Premium accounts get empty results with no error.
 - **All Pixiv image requests need `Referer: https://www.pixiv.net/`** or 403. Thumbnail proxy at `/thumb/<base64_url>` handles this.
-- **No DB migrations**: SQLAlchemy `create_all()` on startup. Schema changes need manual `ALTER TABLE` or DB rebuild.
+- **No DB migrations**: SQLAlchemy `create_all()` on startup. Schema changes need manual `ALTER TABLE` or DB rebuild (though `init_db()` has ad-hoc migration logic for specific columns).
 - **5-min bulk download cleanup**: completed bulk tasks removed from `_bulk_tasks` after 300s (`threading.Timer`).
+- **Startup resets stuck downloads**: `_reset_stuck_downloads()` at import time clears any `downloading` status left from a crash and removes partial files.
+- **Empty query → discovery**: When no search query is provided, `/search` falls back to `browse_discovery()` instead of `search_by_tag()`.
 
 ---
 
