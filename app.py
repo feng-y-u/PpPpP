@@ -58,6 +58,8 @@ else:
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 最大上传 1MB
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'image_cache')
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 init_db()
 
@@ -317,6 +319,17 @@ def _csrf_required(f: Callable) -> Callable:
     return decorated
 
 
+def _original_to_master1200(url: str) -> str:
+    """Pixiv 原图 URL → master1200 中等尺寸 URL（约 1200px）。"""
+    m = re.search(
+        r'^(https://i\.pximg\.net/)img-original/img/(.+?)(_p\d+)(\.\w+)$',
+        url
+    )
+    if not m:
+        return url
+    return f'{m.group(1)}c/1200x1200/img-master/img/{m.group(2)}{m.group(3)}_master1200{m.group(4)}'
+
+
 def _proxy_thumb(url: str) -> str:
     if not url:
         return ''
@@ -328,6 +341,11 @@ def _fmt_num(n: int | str) -> str:
         return '0'
     n = int(n)
     return f'{n/10000:.1f}w' if n >= 10000 else str(n)
+
+
+@app.route('/favicon.ico')
+def favicon() -> Response:
+    return Response(status=204)
 
 
 @app.route('/')
@@ -580,7 +598,7 @@ def csrf_token() -> Response:
 
 @app.route('/thumb/<path:url_b64>')
 def thumb_proxy(url_b64: str) -> Response:
-    """代理 Pixiv 缩略图，绕过 Referer 检查。url_b64 为 base64(urlencode) 编码的原始 URL。"""
+    """代理 Pixiv 图片，绕过 Referer 检查。带磁盘缓存。"""
     try:
         padding = 4 - len(url_b64) % 4
         if padding != 4:
@@ -589,9 +607,19 @@ def thumb_proxy(url_b64: str) -> Response:
     except Exception:
         return abort(400)
 
-    # 仅允许 Pixiv CDN
     if not url.startswith('https://i.pximg.net/'):
         return abort(403)
+
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    ext = _extract_ext(url)
+    cache_path = os.path.join(CACHE_DIR, f'{cache_key}.{ext}')
+    meta_path = cache_path + '.meta'
+    if os.path.isfile(cache_path):
+        mimetype = 'image/jpeg'
+        if os.path.isfile(meta_path):
+            with open(meta_path) as f:
+                mimetype = f.read().strip()
+        return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
 
     try:
         s = requests.Session()
@@ -600,20 +628,22 @@ def thumb_proxy(url_b64: str) -> Response:
             'Referer': 'https://www.pixiv.net/',
         })
         s.verify = SSL_VERIFY
-        resp = s.get(url, timeout=(5, 15))
+        resp = s.get(url, timeout=(10, 30))
         resp.raise_for_status()
     except requests.RequestException:
         return abort(502)
 
-    cache_timeout = timedelta(hours=6)
-    return Response(
-        resp.iter_content(chunk_size=8192),
-        mimetype=resp.headers.get('Content-Type', 'image/jpeg'),
-        headers={
-            'Cache-Control': f'public, max-age={int(cache_timeout.total_seconds())}',
-            'ETag': hashlib.md5(url.encode()).hexdigest(),
-        },
-    )
+    mimetype = resp.headers.get('Content-Type', 'image/jpeg')
+    try:
+        with open(cache_path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        with open(meta_path, 'w') as f:
+            f.write(mimetype)
+    except OSError:
+        return Response(resp.iter_content(chunk_size=8192), mimetype=mimetype)
+
+    return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
 
 
 @app.route('/api/image/<int:pixiv_id>/<int:index>')
@@ -652,10 +682,15 @@ def detail_page(pixiv_id: int) -> str:
         ).order_by(Illust.created_at.desc()).limit(6).all()
         related = [r.to_dict() for r in related]
 
+        medium_urls = []
+        for url in illust.original_urls_list or []:
+            medium_urls.append(_proxy_thumb(_original_to_master1200(url)))
+
         return render_template(
             'detail.html',
             illust=data,
             local_urls=local_urls,
+            medium_urls=medium_urls,
             file_size=file_size,
             related=related,
             proxy_thumb=_proxy_thumb,

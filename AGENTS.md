@@ -4,7 +4,7 @@
 
 Flask Web 应用，通过 Pixiv 内部 Ajax API（非官方）搜索/浏览/下载 Pixiv 插画。单人自部署服务，面向低配服务器（4C/4GB/40GB/3Mbps）。
 
-**技术栈**：Python 3.9+ / Flask 3.1+ / SQLAlchemy 2.0 / SQLite (WAL) / Bootstrap 5.3 / 原生 JS。无构建流程、无测试、无 linter、无类型检查。
+**技术栈**：Python 3.9+ / Flask 3.1+ / SQLAlchemy 2.0 / SQLite (WAL) / Bootstrap 5.3 / 原生 JS。无构建流程、无 linter、无类型检查。
 
 ---
 
@@ -17,6 +17,9 @@ python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
 # 开发
 flask run --debug
 
+# 测试（pytest，需要有效的 cookies.txt 或 Pixiv 凭据才能通过集成测试）
+pytest -v
+
 # 生产部署（必须 -w 1 — 见注意事项）
 gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 
@@ -24,7 +27,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 cd pixiv-api-http-main && npm install && npm start  # → :1145
 ```
 
-没有测试/lint/类型检查/格式化命令。
+没有 linter/类型检查/格式化命令。
 
 ---
 
@@ -37,7 +40,7 @@ cd pixiv-api-http-main && npm install && npm start  # → :1145
 | `models.py` | SQLAlchemy ORM：Illust、BlockedTag、DownloadLog、Collection、CollectionItem |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
 | `templates/*.html` | 7 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁） |
-| `static/` | `app.js`（124 行）、`style.css`（171 行）、`vendor/bootstrap-5.3.3/` |
+| `static/` | `app.js`（124 行）、`style.css`（177 行）、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（cron 磁盘清理，30 天 / 收藏 < 100） |
 
 无 `__init__.py` — 模块直接导入。无 `setup.py`/`pyproject.toml`。
