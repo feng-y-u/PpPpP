@@ -35,7 +35,7 @@ DOWNLOAD_DIR = os.path.join(BASE_DIR, 'downloads')
 PIXIV_BASE_URL = 'https://www.pixiv.net'  # 可改为代理/镜像地址
 SEARCH_PAGES = 10          # 每次搜索最多抓取页数
 PER_PAGE = 60              # Pixiv 每页作品数
-DETAIL_TIMEOUT = (5, 15)   # 详情 API 超时（连接, 读取）
+DETAIL_TIMEOUT = (10, 30)   # 详情 API 超时（连接, 读取）
 DETAIL_MAX_RETRIES = 2     # 详情 API 最大重试次数
 FETCH_DETAIL_WORKERS = 5   # 详情 API 并行获取线程数
 

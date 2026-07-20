@@ -220,6 +220,19 @@
         <div class="info-stat-value">{{ page_count }}</div>
         <div class="info-stat-label">页数</div>
       </div>
+      <div class="info-stat">
+        {% set ds = illust.get('download_status') %}
+        {% if ds == 'done' %}
+          <div class="info-stat-value" style="color:var(--success);font-size:0.85rem">已下载</div>
+        {% elif ds == 'downloading' %}
+          <div class="info-stat-value" style="color:var(--accent);font-size:0.85rem">下载中</div>
+        {% elif ds == 'failed' %}
+          <div class="info-stat-value" style="color:#c0392b;font-size:0.85rem">失败</div>
+        {% else %}
+          <div class="info-stat-value" style="color:var(--text-muted);font-size:0.85rem">未下载</div>
+        {% endif %}
+        <div class="info-stat-label">下载</div>
+      </div>
       {% if is_downloaded %}
       <div class="info-stat">
         <div class="info-stat-value">{% if file_size %}{{ (file_size / 1024)|round(1) if file_size < 1048576 else (file_size / 1048576)|round(1) }}{% if file_size < 1048576 %} KB{% else %} MB{% endif %}{% else %}-{% endif %}</div>

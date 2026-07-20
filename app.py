@@ -32,7 +32,7 @@ from config import (
     SSL_VERIFY,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,6 +67,63 @@ init_db()
 
 def _get_download_dir(pixiv_id: int) -> str:
     return os.path.join(DOWNLOAD_DIR, str(pixiv_id))
+
+
+def _scan_local_downloads() -> dict[int, list[str]]:
+    """扫描 downloads/ 目录，返回 {pixiv_id: [file_paths]}。"""
+    result: dict[int, list[str]] = {}
+    if not os.path.isdir(DOWNLOAD_DIR):
+        return result
+    for entry in os.listdir(DOWNLOAD_DIR):
+        subdir = os.path.join(DOWNLOAD_DIR, entry)
+        if not os.path.isdir(subdir):
+            continue
+        try:
+            pid = int(entry)
+        except ValueError:
+            continue
+        files = sorted(
+            os.path.join(subdir, f) for f in os.listdir(subdir)
+            if os.path.isfile(os.path.join(subdir, f))
+        )
+        if files:
+            result[pid] = files
+    return result
+
+
+def _build_orphan_dicts(pixiv_ids: list[int], local_items: dict[int, list[str]]) -> list[dict]:
+    """为不在 DB 的本地文件构建虚拟 illust 字典。"""
+    results = []
+    for pid in pixiv_ids:
+        paths = local_items.get(pid, [])
+        if not paths:
+            continue
+        total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
+        results.append({
+            'id': 0,
+            'pixiv_id': pid,
+            'title': str(pid),
+            'user_id': 0,
+            'user_name': '',
+            'tags': [],
+            'page_count': len(paths),
+            'bookmark_count': 0,
+            'upload_date': None,
+            'thumb_url': '',
+            'description': '',
+            'original_urls': [],
+            'local_paths': paths,
+            'file_count': len(paths),
+            'local_urls': [f'/api/image/{pid}/{n}' for n in range(len(paths))],
+            'local_dir': os.path.abspath(_get_download_dir(pid)),
+            'download_status': 'done',
+            'downloaded_at': None,
+            'file_size': total_size,
+            'is_favorite': False,
+            'favorited_at': None,
+            'created_at': None,
+        })
+    return results
 
 
 def _reset_stuck_downloads() -> None:
@@ -335,6 +392,13 @@ def _proxy_thumb(url: str) -> str:
     return '/thumb/' + urlsafe_b64encode(url.encode()).decode().rstrip('=').replace('+', '-').replace('/', '_')
 
 
+def _fetch_original_urls(pixiv_id: int) -> list[str]:
+    """按需拉取 Pixiv 详情，返回 original_urls。用于惰性详情场景。"""
+    session = _build_session()
+    detail = _get_illust_detail(session, pixiv_id)
+    return detail.get('original_urls', []) if detail else []
+
+
 def _fmt_num(n: int | str) -> str:
     if not n:
         return '0'
@@ -440,7 +504,11 @@ def trigger_download(pixiv_id: int) -> Response:
             return jsonify({'status': 'downloading', 'message': '下载中'})
 
         if not illust.original_urls_list:
-            return jsonify({'error': '无原图链接'}), 400
+            urls = _fetch_original_urls(pixiv_id)
+            if not urls:
+                return jsonify({'error': '无法获取原图链接'}), 400
+            illust.original_urls_list = urls
+            safe_commit(db)
 
     _queued_downloads.add(pixiv_id)
     download_executor.submit(_download_illust, pixiv_id)
@@ -649,15 +717,22 @@ def thumb_proxy(url_b64: str) -> Response:
 def serve_image(pixiv_id: int, index: int) -> Response:
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-        if not illust or illust.download_status != 'done' or not illust.local_paths_list:
-            abort(404)
-        paths = illust.local_paths_list
-        if index < 0 or index >= len(paths):
-            abort(404)
-        filepath = paths[index]
-        if not os.path.isfile(filepath):
-            abort(404)
-        return send_file(filepath)
+        if illust and illust.download_status == 'done' and illust.local_paths_list:
+            paths = illust.local_paths_list
+            if 0 <= index < len(paths) and os.path.isfile(paths[index]):
+                return send_file(paths[index])
+
+    # 不在 DB（或状态不对）→ 直接从 downloads 目录读
+    ddir = _get_download_dir(pixiv_id)
+    if not os.path.isdir(ddir):
+        abort(404)
+    files = sorted(
+        os.path.join(ddir, f) for f in os.listdir(ddir)
+        if os.path.isfile(os.path.join(ddir, f))
+    )
+    if 0 <= index < len(files) and os.path.isfile(files[index]):
+        return send_file(files[index])
+    abort(404)
 
 
 @app.route('/detail/<int:pixiv_id>')
@@ -680,6 +755,12 @@ def detail_page(pixiv_id: int) -> str:
             Illust.download_status == 'done',
         ).order_by(Illust.created_at.desc()).limit(6).all()
         related = [r.to_dict() for r in related]
+
+        if not illust.original_urls_list:
+            urls = _fetch_original_urls(pixiv_id)
+            if urls:
+                illust.original_urls_list = urls
+                safe_commit(db)
 
         medium_urls = []
         original_proxied = []
@@ -732,16 +813,20 @@ def api_gallery() -> Response:
     limit = max(1, min(200, limit))
     offset = max(0, offset)
 
+    # 扫描本地 downloads 目录
+    local_items = _scan_local_downloads()
+    local_pids = sorted(local_items.keys(), reverse=True)
+
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
 
-        wheres = ["illusts.download_status = 'done'"]
-        params = {}
-        if collection_id is not None:
-            wheres.append('EXISTS (SELECT 1 FROM collection_items WHERE collection_items.pixiv_id = illusts.pixiv_id AND collection_items.collection_id = :cid)')
-            params['cid'] = collection_id
-        elif favorites_only:
-            wheres.append('illusts.is_favorite = 1')
+        if local_pids:
+            pid_phs = ','.join(f':local_pid_{i}' for i in range(len(local_pids)))
+            wheres = [f"(illusts.download_status = 'done' OR illusts.pixiv_id IN ({pid_phs}))"]
+            params = {f'local_pid_{i}': pid for i, pid in enumerate(local_pids)}
+        else:
+            wheres = ["illusts.download_status = 'done'"]
+            params = {}
         if blocked:
             blk_list = list(blocked)
             phs = ','.join(f':blk_{i}' for i in range(len(blk_list)))
@@ -776,18 +861,28 @@ def api_gallery() -> Response:
         illusts.sort(key=lambda x: id_order.get(x.id, 0))
 
         results = []
+        seen_pids = set()
         for i in illusts:
-            paths = i.local_paths_list or []
+            paths = local_items.get(i.pixiv_id) or i.local_paths_list or []
             if not i.file_size and paths:
                 total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
                 if total_size:
                     i.file_size = total_size
             d = i.to_dict()
+            d['local_paths'] = paths
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
-            # 本地目录路径
             d['local_dir'] = os.path.abspath(_get_download_dir(i.pixiv_id)) if paths else None
             results.append(d)
+            seen_pids.add(i.pixiv_id)
+
+        # 补充不在 DB 的本地文件
+        local_pid_set = set(local_pids)
+        orphan_pids = sorted(local_pid_set - seen_pids, reverse=True)
+        orphan_results = _build_orphan_dicts(orphan_pids, local_items)
+        total += len(orphan_results)
+        results.extend(orphan_results[:max(0, limit - len(results))])
+
         safe_commit(db)
 
         return jsonify({
