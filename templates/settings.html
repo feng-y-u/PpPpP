@@ -142,6 +142,27 @@
         <input class="form-input small" id="download_max_workers" type="number" min="1" max="8">
         <div class="form-description">同时下载的最大作品数 (1-8)，修改后需重启生效</div>
       </div>
+      <div class="form-group">
+        <label class="form-label" for="fetch_detail_workers">详情抓取并发</label>
+        <input class="form-input small" id="fetch_detail_workers" type="number" min="1" max="10">
+        <div class="form-description">搜索后拉取作品详情的并发线程数，892M 小机建议 1-2，修改后需重启生效</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-card">
+    <div class="card-header">显示</div>
+    <div class="card-body">
+      <div class="form-group">
+        <label class="form-label" for="medium_image_size">详情页图片尺寸</label>
+        <input class="form-input small" id="medium_image_size" type="number" min="250" max="1200" step="50">
+        <div class="form-description">中图长边像素 (250-1200)，数值越小加载越快。3Mbps 小站点建议 400-600</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-card">
+    <div class="card-header">搜索</div>
     </div>
   </div>
 
@@ -233,7 +254,8 @@
 const csrfToken = {{ csrf_token | tojson }};
 
 const FIELD_MAP = [
-  'proxy', 'download_max_workers', 'per_page', 'search_pages',
+  'proxy', 'download_max_workers', 'fetch_detail_workers', 'medium_image_size',
+  'per_page', 'search_pages',
   'max_bookmarks_default', 'auto_follow_interval', 'auto_follow_download',
 ];
 

@@ -28,6 +28,7 @@ from sqlalchemy import text
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
+    MEDIUM_IMAGE_SIZE,
     SETTINGS_PASSWORD,
     SSL_VERIFY,
 )
@@ -379,11 +380,12 @@ def _csrf_required(f: Callable) -> Callable:
 
 
 def _original_to_resized(url: str) -> str:
-    """Pixiv 原图 URL → 标准中等尺寸（master1200，最长边 1200px）。"""
+    """Pixiv 原图 URL → 中图（尺寸可配）。"""
     m = re.match(r'(https://i\.pximg\.net/)img-original/img/(.+)\.(\w+)(\?.*)?$', url)
     if not m:
         return url
-    return f'{m.group(1)}c/1200x1200/img-master/img/{m.group(2)}_master1200.{m.group(3)}'
+    size = MEDIUM_IMAGE_SIZE
+    return f'{m.group(1)}c/{size}x{size}/img-master/img/{m.group(2)}_master1200.{m.group(3)}'
 
 
 def _proxy_thumb(url: str) -> str:
@@ -1228,6 +1230,8 @@ _SETTINGS_DEFAULTS = {
     'max_bookmarks_default': 0,
     'auto_follow_interval': 600,
     'auto_follow_download': False,
+    'fetch_detail_workers': 2,
+    'medium_image_size': 600,
 }
 
 
@@ -1284,7 +1288,8 @@ def api_settings_post() -> Response:
             if key in ('auto_follow_download',):
                 val = bool(val)
             elif key in ('download_max_workers', 'per_page', 'search_pages',
-                         'max_bookmarks_default', 'auto_follow_interval'):
+                         'max_bookmarks_default', 'auto_follow_interval',
+                         'fetch_detail_workers', 'medium_image_size'):
                 try:
                     val = max(0, int(val))
                 except (ValueError, TypeError):

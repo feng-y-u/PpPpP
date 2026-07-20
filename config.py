@@ -39,6 +39,9 @@ DETAIL_TIMEOUT = (10, 30)   # 详情 API 超时（连接, 读取）
 DETAIL_MAX_RETRIES = 2     # 详情 API 最大重试次数
 FETCH_DETAIL_WORKERS = 5   # 详情 API 并行获取线程数
 
+# 显示设置
+MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下
+
 # 下载设置
 DOWNLOAD_MAX_WORKERS = 2   # 全局下载线程池并发数
 PAGE_DOWNLOAD_INTERVAL = 3 # 多页作品页面间下载间隔（秒）
@@ -87,6 +90,8 @@ if os.path.exists(_settings_path):
             'max_bookmarks_default': 'MAX_BOOKMARKS_DEFAULT',
             'auto_follow_interval': 'AUTO_FOLLOW_INTERVAL',
             'auto_follow_download': 'AUTO_FOLLOW_DOWNLOAD',
+            'fetch_detail_workers': 'FETCH_DETAIL_WORKERS',
+            'medium_image_size': 'MEDIUM_IMAGE_SIZE',
         }
         for _json_key, _const_name in _key_map.items():
             if _json_key in _overrides and _overrides[_json_key] != '':

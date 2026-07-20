@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenDesign · Pixiv Viewer</title>
+<link href="design-systems/pixiv-viewer-light/tokens/colors_and_type.css" rel="stylesheet">
+<style>
+body { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 2rem; text-align: center; background: var(--bg-page); color: var(--text-primary); font-family: var(--font-sans); }
+h1 { font-size: 1.4rem; font-weight: 500; margin-bottom: 0.2rem; color: var(--text-primary); letter-spacing: -0.3px; }
+p { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+.card { background: var(--bg-elevated); border: 1px solid var(--border-card); border-radius: var(--radius); padding: 1.5rem 2rem; max-width: 480px; box-shadow: var(--shadow-card); }
+.section-label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 0.5rem; }
+.mockup-link { display: block; padding: 0.5rem 1rem; margin: 0.4rem 0; border-radius: 6px; background: var(--accent-subtle); color: var(--accent); text-decoration: none; font-weight: 500; font-size: 0.82rem; transition: all 0.15s; }
+.mockup-link:hover { background: rgba(212,67,107,.14); }
+.divider { border: none; height: 1px; background: var(--border-subtle); margin: 1rem 0; }
+.system-info { font-size: 0.72rem; color: var(--text-muted); }
+</style>
+</head>
+<body>
+  <h1>OpenDesign</h1>
+  <p>Pixiv Viewer · 设计系统 &amp; 原型</p>
+  <div class="card">
+    <div class="section-label">Mockups</div>
+    <a class="mockup-link" href="mockups/image-detail/index.html">图片详情页 · 3种布局变体</a>
+    <a class="mockup-link" href="mockups/ui-polish/index.html">导航栏 + 卡片 · 浅色主题</a>
+    <hr class="divider">
+    <div class="section-label">Design Systems</div>
+    <p class="system-info" style="margin-top:0.4rem;">pixiv-viewer-light / 温暖米白 · 珊瑚红 · 日系简约</p>
+  </div>
+  <p class="system-info" style="margin-top:1.5rem;">opendesign · pixiv-viewer</p>
+</body>
+</html>

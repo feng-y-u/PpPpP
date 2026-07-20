@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UI Polish · Pixiv Viewer 浅色主题提案</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="../../design-systems/pixiv-viewer-light/tokens/colors_and_type.css" rel="stylesheet">
+<style>
+/* ── Variant Switcher ── */
+.variant-bar {
+  display: flex; align-items: center; justify-content: center; gap: 16px;
+  padding: 10px 24px;
+  background: #eceae5;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.variant-bar-label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
+.variant-tabs { display: flex; gap: 2px; background: rgba(0,0,0,.04); border-radius: 6px; padding: 3px; }
+.variant-tab {
+  padding: 5px 16px; font-size: 0.72rem; font-weight: 500; border-radius: 4px; cursor: pointer;
+  color: var(--text-muted); border: none; background: transparent;
+  transition: all 0.2s; white-space: nowrap;
+}
+.variant-tab:hover { color: var(--text-secondary); }
+.variant-tab.active { color: #fff; background: var(--accent); }
+.variant-panel { display: none; }
+.variant-panel.active { display: block; }
+
+/* ════════════════════════════════════════
+   NAVBAR
+   ════════════════════════════════════════ */
+.navbar {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  height: var(--navbar-height);
+  background: var(--bg-navbar);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.navbar-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; max-width: var(--container-max); padding: 0 20px;
+}
+.navbar-brand {
+  display: flex; align-items: center; gap: 8px;
+  font-size: var(--fs-brand); font-weight: 500; color: var(--text-primary);
+  text-decoration: none; letter-spacing: -0.2px;
+}
+.navbar-brand-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+}
+.navbar-links { display: flex; gap: 2px; }
+.navbar-link {
+  position: relative;
+  font-size: var(--fs-small); font-weight: 400; color: var(--text-secondary);
+  padding: 6px 14px; border-radius: var(--radius-nav);
+  transition: all 0.2s ease; text-decoration: none;
+  letter-spacing: 0.3px;
+}
+.navbar-link:hover {
+  color: var(--text-primary);
+  background: var(--accent-subtle);
+}
+.navbar-link.active {
+  color: var(--accent);
+  font-weight: 500;
+}
+.navbar-link.active::after {
+  content: '';
+  position: absolute; bottom: 1px; left: 50%; transform: translateX(-50%);
+  width: 14px; height: 2px; border-radius: 1px;
+  background: var(--accent);
+}
+
+/* ════════════════════════════════════════
+   SEARCH HERO
+   ════════════════════════════════════════ */
+.search-hero {
+  padding: 2.5rem 20px 2rem;
+  text-align: center;
+  max-width: 720px;
+  margin: 0 auto;
+}
+.search-hero-title {
+  font-size: var(--fs-hero); font-weight: 500;
+  color: var(--text-primary); margin-bottom: 6px;
+  letter-spacing: -0.3px;
+}
+.search-hero-sub {
+  font-size: var(--fs-small); color: var(--text-muted); margin-bottom: 1.5rem;
+  letter-spacing: 0.2px;
+}
+.search-bar-wrap { max-width: 520px; margin: 0 auto; }
+.search-bar {
+  display: flex; height: 44px;
+  background: var(--bg-elevated); border: 1px solid var(--border-input);
+  border-radius: var(--radius); overflow: hidden;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.search-bar:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.search-bar select, .search-bar input, .search-bar button { border: none; outline: none; background: transparent; }
+.search-bar select {
+  width: 72px; padding: 0 6px; color: var(--text-secondary); font-size: var(--fs-small);
+  border-right: 1px solid var(--border-subtle); cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+}
+.search-bar input {
+  flex: 1; padding: 0 14px; color: var(--text-primary); font-size: var(--fs-body);
+  min-width: 0;
+}
+.search-bar input::placeholder { color: var(--text-muted); }
+.btn-search {
+  padding: 0 20px; font-size: var(--fs-small); font-weight: 500; color: #fff;
+  background: var(--accent); cursor: pointer; letter-spacing: 0.3px;
+  transition: background 0.2s;
+}
+.btn-search:hover { background: var(--accent-hover); }
+
+/* Filters row */
+.filters-row {
+  display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 14px;
+}
+.filters-row label {
+  font-size: 0.6rem; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.filters-row select, .filters-row input[type="number"] {
+  background: var(--bg-input); border: 1px solid var(--border-subtle);
+  border-radius: 4px; padding: 4px 8px;
+  color: var(--text-secondary); font-size: var(--fs-small);
+  max-width: 90px; height: 30px;
+}
+.filters-row input[type="number"] { max-width: 60px; }
+.btn-filter {
+  padding: 4px 10px; font-size: var(--fs-tiny); font-weight: 500;
+  border-radius: 4px; cursor: pointer;
+  background: var(--bg-input); border: 1px solid var(--border-subtle);
+  color: var(--text-secondary); transition: var(--transition-hover);
+  height: 30px;
+}
+.btn-filter:hover { border-color: var(--text-muted); color: var(--text-primary); }
+
+/* ════════════════════════════════════════
+   TOOLBAR
+   ════════════════════════════════════════ */
+.toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  max-width: var(--container-max); margin: 0 auto; padding: 6px 20px;
+}
+.toolbar-left { display: flex; align-items: center; gap: 10px; }
+.toolbar-count { font-size: var(--fs-small); color: var(--text-muted); }
+
+/* ════════════════════════════════════════
+   CARDS — Masonry (content-first, no card bg)
+   ════════════════════════════════════════ */
+.masonry {
+  column-count: 4; column-gap: 12px;
+  max-width: var(--container-max); margin: 0 auto; padding: 0 20px 2rem;
+}
+@media (max-width: 1100px) { .masonry { column-count: 3; } }
+@media (max-width: 760px) { .masonry { column-count: 2; } }
+.masonry-item {
+  break-inside: avoid; margin-bottom: 12px;
+}
+
+/* ── Card: minimal, no border, just image + inline text ── */
+.photo-card {
+  position: relative; overflow: hidden; cursor: pointer;
+  border-radius: var(--radius-card);
+  transition: all 0.2s ease;
+}
+.photo-card:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+.photo-card img {
+  display: block; width: 100%; height: auto;
+  background: var(--bg-thumb);
+  user-select: none; -webkit-user-drag: none;
+  transition: transform 0.3s ease;
+}
+.photo-card:hover img {
+  transform: scale(1.02);
+}
+
+/* ── Meta row (always visible, below image) ── */
+.photo-meta {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 2px;
+}
+.photo-meta-text { flex: 1; min-width: 0; }
+.photo-title {
+  font-size: var(--fs-title); font-weight: 500; color: var(--text-primary);
+  line-height: 1.3; margin-bottom: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.photo-artist {
+  font-size: var(--fs-small); color: var(--text-secondary);
+}
+.photo-meta-stats {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-small); color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ── Badges (on image) ── */
+.photo-badges {
+  position: absolute; top: 6px; left: 6px;
+  display: flex; flex-wrap: wrap; gap: 3px;
+  pointer-events: none; z-index: 2;
+}
+.photo-badge {
+  font-size: 10px; font-weight: 500; padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(255,255,255,.85);
+  color: var(--text-secondary);
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.photo-badge.dl { color: var(--success); }
+.photo-badge.accent { color: var(--accent); }
+
+/* ── Tags row ── */
+.photo-tags {
+  display: flex; gap: 3px; overflow: hidden; flex-wrap: wrap;
+  padding: 0 2px 2px;
+}
+.photo-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 3px;
+  background: var(--accent-subtle); color: var(--accent);
+  white-space: nowrap; cursor: pointer; transition: var(--transition-hover);
+  line-height: 1.6;
+}
+.photo-tag:hover { background: rgba(212,67,107,.16); }
+
+/* ── Minimal download button ── */
+.btn-dl {
+  padding: 3px 10px; font-size: 10px; font-weight: 500;
+  border-radius: var(--radius-btn); border: none; cursor: pointer;
+  transition: var(--transition-hover);
+}
+.btn-dl.primary {
+  background: var(--accent-subtle); color: var(--accent);
+}
+.btn-dl.primary:hover { background: rgba(212,67,107,.16); }
+.btn-dl.done {
+  background: rgba(59,138,94,.1); color: var(--success);
+}
+.btn-dl.done:hover { background: rgba(59,138,94,.16); }
+.btn-dl.ghost {
+  background: rgba(0,0,0,.04); color: var(--text-secondary);
+}
+.btn-dl.ghost:hover { background: rgba(0,0,0,.08); }
+
+/* ════════════════════════════════════════
+   GALLERY PAGE
+   ════════════════════════════════════════ */
+.gallery-header {
+  display: flex; align-items: center; gap: 12px;
+  max-width: var(--container-max); margin: 0 auto; padding: 20px 20px 0;
+}
+.gallery-title {
+  font-size: var(--fs-hero); font-weight: 500; color: var(--text-primary);
+  letter-spacing: -0.3px; margin: 0;
+}
+.gallery-actions { display: flex; gap: 6px; margin-left: auto; }
+.gallery-filters { max-width: var(--container-max); margin: 0 auto; padding: 10px 20px 0; }
+
+.btn-gallery {
+  padding: 5px 14px; font-size: var(--fs-small); font-weight: 400;
+  border-radius: var(--radius-btn); border: 1px solid var(--border-subtle);
+  background: transparent; color: var(--text-secondary);
+  cursor: pointer; transition: var(--transition-hover);
+}
+.btn-gallery:hover { border-color: var(--text-muted); color: var(--text-primary); }
+.btn-gallery.active { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+.btn-gallery.danger { color: var(--danger); border-color: var(--danger-border); }
+.btn-gallery.danger:hover { background: rgba(196,74,74,.06); color: var(--danger); }
+
+.tag-filter-input {
+  width: 100%; max-width: 280px;
+  background: var(--bg-input); border: 1px solid var(--border-subtle);
+  border-radius: 4px; padding: 6px 10px;
+  color: var(--text-primary); font-size: var(--fs-small);
+  transition: border-color 0.2s;
+}
+.tag-filter-input:focus { border-color: var(--accent); outline: none; }
+.tag-filter-active {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: var(--fs-small); color: var(--accent);
+  background: var(--accent-subtle); padding: 3px 8px;
+  border-radius: 4px; margin-left: 6px;
+}
+
+.gallery-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  max-width: var(--container-max); margin: 0 auto; padding: 10px 20px 2rem;
+}
+
+.gallery-card {
+  position: relative; overflow: hidden; cursor: pointer;
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  transition: all 0.2s ease;
+}
+.gallery-card:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+.gallery-card img {
+  display: block; width: 100%; aspect-ratio: 1;
+  object-fit: cover; background: var(--bg-thumb);
+}
+.gallery-card-body {
+  padding: 8px 2px;
+}
+.gallery-card-title {
+  font-size: var(--fs-title); font-weight: 500; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-bottom: 1px;
+}
+.gallery-card-artist {
+  font-size: var(--fs-small); color: var(--text-secondary);
+}
+.gallery-card-check {
+  position: absolute; top: 8px; right: 8px; z-index: 3;
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,.6);
+  background: rgba(0,0,0,.25); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: var(--transition-hover);
+  font-size: 11px; color: #fff;
+}
+.gallery-card-check.checked { background: var(--accent); border-color: var(--accent); }
+
+.gallery-stats {
+  font-size: var(--fs-small); color: var(--text-muted);
+  max-width: var(--container-max); margin: 0 auto; padding: 4px 20px 0;
+}
+
+/* ── Section divider ── */
+.section-divider {
+  border: none; height: 1px;
+  background: var(--border-subtle);
+  margin: 0;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ Variant Switcher ═══ -->
+<div class="variant-bar">
+  <span class="variant-bar-label">视图</span>
+  <div class="variant-tabs">
+    <button class="variant-tab active" data-panel="search">搜索页</button>
+    <button class="variant-tab" data-panel="gallery">图库页</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════
+     SEARCH PAGE
+     ════════════════════════════════════════ -->
+<div class="variant-panel active" id="panel-search">
+
+  <!-- Navbar -->
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a class="navbar-brand" href="#">
+        <span class="navbar-brand-dot"></span>
+        Pixiv Viewer
+      </a>
+      <div class="navbar-links">
+        <a class="navbar-link active" href="#">搜索</a>
+        <a class="navbar-link" href="#">图库</a>
+        <a class="navbar-link" href="#">批量</a>
+        <a class="navbar-link" href="#">下载</a>
+        <a class="navbar-link" href="#">设置</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <div class="search-hero">
+    <div class="search-hero-title">探索作品</div>
+    <div class="search-hero-sub">标签搜索 · 画师检索 · 关注动态</div>
+    <div class="search-bar-wrap">
+      <div class="search-bar">
+        <select>
+          <option>标签</option>
+          <option>画师</option>
+          <option>关注</option>
+        </select>
+        <input type="text" placeholder="多个标签用逗号分隔">
+        <button class="btn-search">搜索</button>
+      </div>
+    </div>
+    <div class="filters-row">
+      <label>排序</label>
+      <select><option>最新</option><option>综合</option></select>
+      <label>起始</label>
+      <input type="number" value="1" min="1">
+      <label>收藏 ≥</label>
+      <input type="number" value="0" min="0">
+      <label>R18</label>
+      <select><option>全部</option><option>隐藏</option></select>
+      <button class="btn-filter">屏蔽</button>
+    </div>
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <button class="btn-dl primary">全部下载</button>
+      <span class="toolbar-count">已加载 48 件</span>
+    </div>
+    <span class="toolbar-count">共 2,431 件</span>
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- Masonry Grid -->
+  <div class="masonry" id="searchMasonry"></div>
+
+</div>
+
+<!-- ════════════════════════════════════════
+     GALLERY PAGE
+     ════════════════════════════════════════ -->
+<div class="variant-panel" id="panel-gallery">
+
+  <!-- Navbar -->
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a class="navbar-brand" href="#">
+        <span class="navbar-brand-dot"></span>
+        Pixiv Viewer
+      </a>
+      <div class="navbar-links">
+        <a class="navbar-link" href="#">搜索</a>
+        <a class="navbar-link active" href="#">图库</a>
+        <a class="navbar-link" href="#">批量</a>
+        <a class="navbar-link" href="#">下载</a>
+        <a class="navbar-link" href="#">设置</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Header -->
+  <div class="gallery-header">
+    <h1 class="gallery-title">已下载作品</h1>
+    <div class="gallery-actions">
+      <button class="btn-gallery active">收藏</button>
+      <button class="btn-gallery">多选</button>
+      <button class="btn-gallery danger">删除选中</button>
+    </div>
+  </div>
+
+  <!-- Tag Filter -->
+  <div class="gallery-filters">
+    <input class="tag-filter-input" type="text" placeholder="搜索标签..." list="galleryTags">
+    <datalist id="galleryTags">
+      <option value="original">
+      <option value="风景">
+      <option value="Fate">
+      <option value="少女">
+      <option value="オリジナル">
+    </datalist>
+    <span class="tag-filter-active">风景 <span style="cursor:pointer;opacity:.7;">x</span></span>
+  </div>
+
+  <hr class="section-divider">
+
+  <!-- Stats -->
+  <div class="gallery-stats">共 128 件 · 收藏 12 件</div>
+
+  <!-- Grid -->
+  <div class="gallery-grid" id="galleryGrid"></div>
+
+</div>
+
+<script>
+// ── Sample data ──
+const ILLUSTS = [
+  { id: 1, title: '夏の夕暮れ', artist: 'あまあま', bkmk: 18423, pages: 1, tags: ['风景', '夕阳', 'original'], dl: true },
+  { id: 2, title: '星空の少女', artist: 'ほしのこ', bkmk: 8921, pages: 4, tags: ['少女', '星空', 'original'], dl: true },
+  { id: 3, title: 'Fate/stay night — セイバー', artist: '桐葉', bkmk: 45120, pages: 2, tags: ['Fate', 'セイバー', 'fanart'], dl: false },
+  { id: 4, title: '雨の街を歩く', artist: '水彩画伯', bkmk: 3204, pages: 1, tags: ['风景', '雨', '街'], dl: true },
+  { id: 5, title: 'キャラクター設定集', artist: 'ねこまんま', bkmk: 28500, pages: 8, tags: ['original', 'character'], dl: false },
+  { id: 6, title: '深海の夢', artist: '藍色', bkmk: 16200, pages: 3, tags: ['风景', '海', 'fantasy'], dl: true },
+  { id: 7, title: '機械仕掛けの庭', artist: '機械技師', bkmk: 7890, pages: 2, tags: ['mecha', '庭園'], dl: false },
+  { id: 8, title: '桜と猫と', artist: 'にゃんころ', bkmk: 32100, pages: 1, tags: ['猫', '桜', 'original'], dl: true },
+  { id: 9, title: '都市の夜明け', artist: '黎明画房', bkmk: 5600, pages: 1, tags: ['风景', '都市', '朝'], dl: false },
+  { id: 10, title: '魔法少女の休日', artist: 'まほう', bkmk: 8900, pages: 6, tags: ['魔法少女', 'original'], dl: true },
+  { id: 11, title: '雪の降る駅', artist: '冬野', bkmk: 4200, pages: 1, tags: ['风景', '雪', '駅'], dl: false },
+  { id: 12, title: '花畑と少女', artist: '花野', bkmk: 12400, pages: 2, tags: ['少女', '花', 'original'], dl: true },
+];
+
+const ASPECTS = [1.4, 1.0, 1.6, 0.8, 1.2, 1.5, 1.1, 0.9, 1.3, 1.0, 1.7, 1.2];
+
+function fmtNum(n) {
+  if (!n) return '0';
+  return n >= 10000 ? (n/10000).toFixed(1) + 'w' : String(n);
+}
+function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Render masonry cards ──
+function renderMasonry() {
+  const grid = document.getElementById('searchMasonry');
+  grid.innerHTML = ILLUSTS.map((r, i) => {
+    const ar = ASPECTS[i % ASPECTS.length];
+    const badges = [];
+    if (r.dl) badges.push(`<span class="photo-badge dl">downloaded</span>`);
+    if (r.pages > 1) badges.push(`<span class="photo-badge accent">${r.pages}P</span>`);
+    const tags = r.tags.slice(0, 4).map(t => `<span class="photo-tag">${esc(t)}</span>`).join('');
+    const btnCls = r.dl ? 'done' : 'primary';
+    const btnTxt = r.dl ? 'download' : 'get';
+    return `<div class="masonry-item">
+      <div class="photo-card">
+        <div class="photo-badges">${badges.join('')}</div>
+        <div style="aspect-ratio:1/${ar};background:var(--bg-thumb);display:flex;align-items:center;justify-content:center;color:rgba(0,0,0,.06);font-size:0.6rem;letter-spacing:0.3px;">
+          ${ar.toFixed(1)} · ${r.pages}P</div>
+        <div class="photo-meta">
+          <div class="photo-meta-text">
+            <div class="photo-title">${esc(r.title)}</div>
+            <div class="photo-artist">${esc(r.artist)}</div>
+          </div>
+          <div class="photo-meta-stats">
+            <span>${fmtNum(r.bkmk)}</span>
+            <button class="btn-dl ${btnCls}">${btnTxt}</button>
+          </div>
+        </div>
+        <div class="photo-tags">${tags}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Render gallery cards ──
+function renderGallery() {
+  const grid = document.getElementById('galleryGrid');
+  const downloaded = ILLUSTS.filter(r => r.dl);
+  grid.innerHTML = downloaded.map(r => {
+    const checked = r.id === 2 || r.id === 6;
+    const tags = r.tags.slice(0, 3).map(t => `<span class="photo-tag">${esc(t)}</span>`).join('');
+    return `<div class="gallery-card">
+      <div class="gallery-card-check${checked ? ' checked' : ''}">${checked ? 'V' : ''}</div>
+      <div style="aspect-ratio:1;background:var(--bg-thumb);display:flex;align-items:center;justify-content:center;color:rgba(0,0,0,.06);font-size:0.6rem;letter-spacing:0.3px;">
+        thumbnail</div>
+      <div class="gallery-card-body">
+        <div class="gallery-card-title">${esc(r.title)}</div>
+        <div class="gallery-card-artist">${esc(r.artist)}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:5px;">
+          <div style="display:flex;gap:3px;overflow:hidden;">${tags}</div>
+          <span style="font-size:10px;color:var(--text-muted);white-space:nowrap;">${fmtNum(r.bkmk)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Variant switching ──
+document.querySelectorAll('.variant-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.variant-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.variant-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+  });
+});
+
+renderMasonry();
+renderGallery();
+</script>
+</body>
+</html>
