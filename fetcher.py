@@ -435,11 +435,16 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
     to_fetch: list[int] = []           # 同步拉详情（非 defer 路径）
     to_fill: list[int] = []            # 后台补全（defer 路径新写入 + 已有但缺原图）
+    to_refetch: list[int] = []         # 已有记录但 bookmark_count=0，需同步补全后重新判断过滤
 
     for item in items:
         pixiv_id = id_extractor(item)
         existing = existing_map.get(pixiv_id)
         if existing:
+            # 已有记录但 bookmark_count 未补全 + 用户设了最低收藏 → 同步重新拉取
+            if existing.bookmark_count == 0 and min_bookmarks > 0 and not existing.original_urls_list:
+                to_refetch.append(pixiv_id)
+                continue
             if not _is_blocked(existing.tags_list, blocked) \
                and existing.bookmark_count >= min_bookmarks \
                and not (hide_r18 and _is_r18(existing.tags_list)):
@@ -459,6 +464,26 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             to_fill.append(pixiv_id)
         else:
             to_fetch.append(pixiv_id)
+
+    # 处理需要重新拉取详情的已有记录
+    if to_refetch:
+        details = _fetch_details_parallel(to_refetch)
+        for pixiv_id in to_refetch:
+            detail = details.get(pixiv_id)
+            if detail is None:
+                continue
+            if _is_blocked(detail.get('tags', []), blocked) \
+               or detail.get('bookmark_count', 0) < min_bookmarks \
+               or (hide_r18 and _is_r18(detail.get('tags', []))):
+                continue
+            existing = existing_map[pixiv_id]
+            if detail.get('bookmark_count'):
+                existing.bookmark_count = detail['bookmark_count']
+            if detail.get('original_urls'):
+                existing.original_urls_list = detail['original_urls']
+            if detail.get('description') and not existing.description:
+                existing.description = detail['description']
+            results.append(existing.to_dict())
 
     if defer_details:
         if to_fill:
