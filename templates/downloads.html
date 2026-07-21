@@ -271,20 +271,10 @@ function renderCompleted(items) {
       </div>
       <div class="dl-status d-flex gap-1">
         <a href="/download_file/${i.pixiv_id}" class="btn btn-success btn-sm">下载</a>
-        ${i.local_dir ? `<button class="btn btn-outline-secondary btn-sm open-dir-btn" data-dir="${escAttr(i.local_dir)}" title="打开文件夹">📂</button>` : ''}
       </div>
     </div>`).join('');
     
-  container.querySelectorAll('.open-dir-btn').forEach(btn => {
-    btn.addEventListener('click', function() {
-      fetch('/api/open-dir', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-        body: JSON.stringify({ path: this.dataset.dir }),
-      }).catch(() => {});
-    });
-  });
-}
+  }
 
 function renderLogs(logs) {
   const container = $('#logList');

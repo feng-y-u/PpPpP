@@ -353,14 +353,14 @@ function renderCard(r) {
         <div class="tags-wrap">${tags}</div>
         <div class="d-flex gap-1 mt-1">
           <button class="btn btn-outline-danger btn-sm flex-fill delete-btn" data-pid="${r.pixiv_id}">删除</button>
-          ${r.local_dir ? `<button class="btn btn-outline-secondary btn-sm open-dir-btn" data-dir="${escAttr(r.local_dir)}" title="打开文件夹">📂</button>` : ''}
+          <button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>
         </div>
       </div>
     </div>`;
   $('#cardGrid').appendChild(col);
 
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
-    if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox')) return;
+    if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-btn')) return;
     window.location.href = `/detail/${r.pixiv_id}`;
   });
 
@@ -371,13 +371,9 @@ function renderCard(r) {
     deleteModal.show();
   });
 
-  col.querySelector('.open-dir-btn')?.addEventListener('click', function(e) {
+  col.querySelector('.dl-btn').addEventListener('click', function(e) {
     e.stopPropagation();
-    fetch('/api/open-dir', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({ path: this.dataset.dir }),
-    }).catch(() => {});
+    triggerDownload(r.pixiv_id, this);
   });
 
   col.querySelector('.card-checkbox').addEventListener('change', function() {
