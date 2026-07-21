@@ -402,7 +402,14 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
       const data = await resp.json();
       if (resp.ok) {
         showToast(data.message);
-        setTimeout(() => location.reload(), 800);
+        ids.forEach(pid => {
+          const card = document.querySelector(`.gallery-card [data-pid="${pid}"].delete-btn`);
+          card?.closest('.gallery-card').remove();
+        });
+        selectedPids.clear();
+        updateBatchUI();
+        btn.disabled = false;
+        btn.textContent = '删除';
       } else {
         showToast(data.error || '批量删除失败', true);
         btn.disabled = false;
@@ -426,7 +433,10 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
     const data = await resp.json();
     if (resp.ok) {
       showToast(data.message);
-      setTimeout(() => location.reload(), 800);
+      const card = document.querySelector(`.gallery-card [data-pid="${deleteTarget}"].delete-btn`);
+      card?.closest('.gallery-card').remove();
+      btn.disabled = false;
+      btn.textContent = '删除';
     } else {
       showToast(data.error || '删除失败', true);
       btn.disabled = false;
