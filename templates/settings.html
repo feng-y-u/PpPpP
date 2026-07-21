@@ -6,101 +6,6 @@
 <title>设置 - Pixiv Viewer</title>
 <link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
 <link href="/static/style.css" rel="stylesheet">
-<style>
-.settings-card {
-  border: none;
-  border-radius: var(--radius);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-card);
-  margin-bottom: 1.25rem;
-  overflow: hidden;
-}
-.settings-card .card-header {
-  font-weight: 600;
-  font-size: 0.82rem;
-  border-bottom: 1px solid var(--border-subtle);
-  padding: 0.7rem 1.25rem;
-}
-.settings-card .card-body { padding: 1.25rem; }
-
-.form-group {
-  margin-bottom: 1rem;
-}
-.form-group:last-child { margin-bottom: 0; }
-.form-label {
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--text-secondary);
-  margin-bottom: 0.3rem;
-  display: block;
-}
-.form-description {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  margin-top: 0.2rem;
-}
-.form-input {
-  background: var(--bg-elevated) !important;
-  border: 1px solid var(--border-input) !important;
-  color: var(--text-primary) !important;
-  font-size: 0.85rem;
-  border-radius: 8px;
-  padding: 8px 12px;
-  width: 100%;
-  max-width: 400px;
-  transition: border-color 0.15s;
-}
-.form-input:focus {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px var(--accent-subtle) !important;
-  outline: none;
-}
-.form-input::placeholder { color: var(--text-muted); }
-.form-input.small { max-width: 140px; }
-
-.form-check-group {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.form-check-group input[type="checkbox"] {
-  width: 18px; height: 18px;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-.form-check-group label {
-  font-size: 0.82rem;
-  color: var(--text-primary);
-  cursor: pointer;
-}
-
-.btn-save {
-  background: var(--accent);
-  border: none;
-  color: #fff;
-  font-weight: 600;
-  font-size: 0.85rem;
-  padding: 0.5rem 2rem;
-  border-radius: 8px;
-  transition: all 0.15s;
-}
-.btn-save:hover { background: var(--accent-hover); box-shadow: 0 4px 14px rgba(212,67,107,.25); color: #fff; }
-.btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.collection-mgmt-item {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 0; border-bottom: 1px solid var(--border-subtle);
-  font-size: 0.85rem;
-}
-.collection-mgmt-item:last-child { border-bottom: none; }
-.collection-mgmt-name { flex: 1; font-weight: 500; color: var(--text-primary); }
-.collection-mgmt-count { color: var(--text-muted); font-size: 0.78rem; min-width: 50px; text-align: right; }
-.collection-mgmt-actions { display: flex; gap: 6px; }
-.collection-mgmt-rename-input {
-  background: var(--bg-elevated); border: 1px solid var(--accent);
-  color: var(--text-primary); font-size: 0.82rem; border-radius: 6px;
-  padding: 4px 8px; width: 160px; outline: none;
-}</style>
 </head>
 <body>
 
@@ -124,96 +29,91 @@
 <div class="container mt-3" style="max-width:700px;">
   <h5 class="mb-3">设置</h5>
 
-  <div class="settings-card">
-    <div class="card-header">网络</div>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">网络</div>
     <div class="card-body">
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="proxy">代理地址</label>
-        <input class="form-input" id="proxy" type="text" placeholder="如 http://127.0.0.1:7890，留空禁用">
-        <div class="form-description">HTTP/SOCKS5 代理，修改后需重启生效</div>
+        <input class="form-control form-control-sm" id="proxy" type="text" placeholder="如 http://127.0.0.1:7890，留空禁用">
+        <div class="form-text">HTTP/SOCKS5 代理，修改后需重启生效</div>
       </div>
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="card-header">下载</div>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">下载</div>
     <div class="card-body">
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="download_max_workers">并发下载数</label>
-        <input class="form-input small" id="download_max_workers" type="number" min="1" max="8">
-        <div class="form-description">同时下载的最大作品数 (1-8)，修改后需重启生效</div>
+        <input class="form-control form-control-sm" id="download_max_workers" type="number" min="1" max="8" style="max-width:140px;">
+        <div class="form-text">同时下载的最大作品数 (1-8)，修改后需重启生效</div>
       </div>
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="fetch_detail_workers">详情抓取并发</label>
-        <input class="form-input small" id="fetch_detail_workers" type="number" min="1" max="10">
-        <div class="form-description">搜索后拉取作品详情的并发线程数，892M 小机建议 1-2，修改后需重启生效</div>
+        <input class="form-control form-control-sm" id="fetch_detail_workers" type="number" min="1" max="10" style="max-width:140px;">
+        <div class="form-text">搜索后拉取作品详情的并发线程数，892M 小机建议 1-2，修改后需重启生效</div>
       </div>
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="card-header">显示</div>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">显示</div>
     <div class="card-body">
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="medium_image_size">详情页图片尺寸</label>
-        <input class="form-input small" id="medium_image_size" type="number" min="250" max="1200" step="50">
-        <div class="form-description">中图长边像素 (250-1200)，数值越小加载越快。3Mbps 小站点建议 400-600</div>
+        <input class="form-control form-control-sm" id="medium_image_size" type="number" min="250" max="1200" step="50" style="max-width:140px;">
+        <div class="form-text">中图长边像素 (250-1200)，数值越小加载越快。3Mbps 小站点建议 400-600</div>
       </div>
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="card-header">搜索</div>
-    </div>
-  </div>
-
-  <div class="settings-card">
-    <div class="card-header">搜索</div>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">搜索</div>
     <div class="card-body">
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="per_page">每页结果数</label>
-        <input class="form-input small" id="per_page" type="number" min="10" max="120">
-        <div class="form-description">Pixiv 每页返回的作品数</div>
+        <input class="form-control form-control-sm" id="per_page" type="number" min="10" max="120" style="max-width:140px;">
+        <div class="form-text">Pixiv 每页返回的作品数</div>
       </div>
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="search_pages">搜索最大页数</label>
-        <input class="form-input small" id="search_pages" type="number" min="1" max="100">
-        <div class="form-description">每次搜索最多抓取的页数</div>
+        <input class="form-control form-control-sm" id="search_pages" type="number" min="1" max="100" style="max-width:140px;">
+        <div class="form-text">每次搜索最多抓取的页数</div>
       </div>
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="max_bookmarks_default">最低收藏数</label>
-        <input class="form-input small" id="max_bookmarks_default" type="number" min="0">
-        <div class="form-description">搜索时默认的最低收藏数过滤 (0 表示不限制)</div>
+        <input class="form-control form-control-sm" id="max_bookmarks_default" type="number" min="0" style="max-width:140px;">
+        <div class="form-text">搜索时默认的最低收藏数过滤 (0 表示不限制)</div>
       </div>
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="card-header">自动关注</div>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">自动关注</div>
     <div class="card-body">
-      <div class="form-group">
+      <div class="mb-3">
         <label class="form-label" for="auto_follow_interval">检查间隔（秒）</label>
-        <input class="form-input small" id="auto_follow_interval" type="number" min="0">
-        <div class="form-description">关注画师新作品的检查间隔，0 表示禁用</div>
+        <input class="form-control form-control-sm" id="auto_follow_interval" type="number" min="0" style="max-width:140px;">
+        <div class="form-text">关注画师新作品的检查间隔，0 表示禁用</div>
       </div>
-      <div class="form-group">
-        <div class="form-check-group">
-          <input type="checkbox" id="auto_follow_download">
-          <label for="auto_follow_download">自动下载新作品</label>
+      <div class="mb-3">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="auto_follow_download">
+          <label class="form-check-label" for="auto_follow_download">自动下载新作品</label>
         </div>
-        <div class="form-description">启用后自动下载关注画师的新作品</div>
+        <div class="form-text">启用后自动下载关注画师的新作品</div>
       </div>
     </div>
   </div>
 
-  <div class="settings-card">
-    <div class="card-header">收藏夹管理</div>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">收藏夹管理</div>
     <div class="card-body">
-      <div class="form-group" style="display:flex;gap:8px;align-items:center;">
-        <input class="form-input" id="newCollectionName" placeholder="新建收藏夹名称..." style="max-width:250px;">
+      <div class="d-flex gap-2 mb-3">
+        <input class="form-control form-control-sm" id="newCollectionName" placeholder="新建收藏夹名称..." style="max-width:250px;">
         <button class="btn btn-primary-accent btn-sm" id="createCollectionBtn">创建</button>
       </div>
-      <div id="collectionList" class="mt-2"></div>
+      <div id="collectionList"></div>
     </div>
   </div>
 
@@ -235,7 +135,7 @@
   </div>
 
   <div class="d-flex gap-2 mb-4">
-    <button class="btn-save" id="saveBtn">保存设置</button>
+    <button class="btn btn-primary" id="saveBtn">保存设置</button>
     <span id="saveStatus" class="small" style="color:var(--text-muted);align-self:center;display:none;"></span>
   </div>
 </div>
@@ -325,17 +225,15 @@ function loadCollections() {
     .then(collections => {
       const list = $('#collectionList');
       if (collections.length === 0) {
-        list.innerHTML = '<div style="color:var(--text-muted);padding:0.5rem 0;">暂无收藏夹</div>';
+        list.innerHTML = '<div class="text-muted py-2">暂无收藏夹</div>';
         return;
       }
       list.innerHTML = collections.map(c => `
-        <div class="collection-mgmt-item" data-id="${c.id}">
-          <span class="collection-mgmt-name">${escHtml(c.name)}</span>
-          <span class="collection-mgmt-count">${c.item_count} 件</span>
-          <div class="collection-mgmt-actions">
-            <button class="btn btn-soft btn-sm rename-btn">重命名</button>
-            <button class="btn btn-outline-danger btn-sm delete-btn">删除</button>
-          </div>
+        <div class="d-flex align-items-center gap-2 py-2 border-bottom border-subtle collection-item" data-id="${c.id}">
+          <span class="fw-medium flex-fill small">${escHtml(c.name)}</span>
+          <span class="text-muted" style="font-size:0.75rem;min-width:45px;text-align:right;">${c.item_count} 件</span>
+          <button class="btn btn-soft btn-sm rename-btn">重命名</button>
+          <button class="btn btn-outline-danger btn-sm delete-btn">删除</button>
         </div>
       `).join('');
     })
@@ -364,31 +262,27 @@ $('#createCollectionBtn').addEventListener('click', async function() {
   finally { this.disabled = false; }
 });
 
-// Allow Enter key on new collection input
 $('#newCollectionName').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') $('#createCollectionBtn').click();
 });
 
-// Delegate events for collection list actions
 $('#collectionList').addEventListener('click', function(e) {
-  const item = e.target.closest('.collection-mgmt-item');
+  const item = e.target.closest('.collection-item');
   if (!item) return;
   const cid = parseInt(item.dataset.id);
 
-  // Delete button
   if (e.target.classList.contains('delete-btn')) {
-    const name = item.querySelector('.collection-mgmt-name').textContent;
+    const name = item.querySelector('.fw-medium').textContent;
     deleteCollectionId = cid;
     $('#deleteCollectionModalBody').textContent = `确定删除收藏夹「${name}」？作品本身不会被删除。`;
     deleteCollectionModal.show();
     return;
   }
 
-  // Rename button
   if (e.target.classList.contains('rename-btn')) {
-    const nameEl = item.querySelector('.collection-mgmt-name');
+    const nameEl = item.querySelector('.fw-medium');
     const currentName = nameEl.textContent;
-    nameEl.innerHTML = `<input class="collection-mgmt-rename-input" type="text" value="${escAttr(currentName)}">`;
+    nameEl.innerHTML = `<input class="form-control form-control-sm" type="text" value="${escAttr(currentName)}" style="max-width:160px;">`;
     const input = nameEl.querySelector('input');
     input.focus();
     input.select();
