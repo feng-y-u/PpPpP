@@ -114,15 +114,6 @@
 .artist-name a:hover { color: var(--accent-hover); text-decoration: underline; }
 .artist-sub { font-size: 0.72rem; color: var(--text-muted); }
 
-.follow-btn {
-  font-size: 0.72rem; padding: 2px 12px; border-radius: 14px;
-  border: 1px solid var(--accent); color: var(--accent); background: transparent;
-  cursor: pointer; transition: all 0.15s; vertical-align: middle;
-}
-.follow-btn:hover { background: var(--accent-subtle); }
-.follow-btn.following { background: var(--accent); color: #fff; border-color: var(--accent); }
-.follow-btn.following:hover { background: var(--accent-hover); }
-
 .section-label {
   font-size: 0.72rem; font-weight: 600; color: var(--text-muted);
   text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px;
@@ -270,7 +261,6 @@
       <div class="artist-info">
         <div class="artist-name">
           <a href="/?type=user&query={{ illust.user_id }}">{{ illust.user_name or '未知画师' }}</a>
-          <button class="btn btn-sm follow-btn" id="followBtn" data-uid="{{ illust.user_id }}" style="display:none;margin-left:8px;">关注</button>
         </div>
         <div class="artist-sub">UID: {{ illust.user_id }}</div>
       </div>
@@ -487,45 +477,6 @@ $('#tagList')?.addEventListener('click', e => {
   const tag = e.target.closest('.tag-item');
   if (tag) window.location.href = `/gallery?tag=${encodeURIComponent(tag.dataset.tag)}`;
 });
-
-// ── Follow / Unfollow ──
-(function() {
-  const followBtn = $('#followBtn');
-  const uid = {{ illust.user_id }};
-  if (!uid) return;
-  fetch(`/api/user/${uid}/follow-status`)
-    .then(r => r.json())
-    .then(d => {
-      followBtn.style.display = '';
-      updateFollowBtn(d.followed);
-    })
-    .catch(() => { followBtn.style.display = ''; });
-
-  followBtn.addEventListener('click', async function() {
-    const wasFollowing = this.classList.contains('following');
-    updateFollowBtn(!wasFollowing);
-    this.disabled = true;
-    try {
-      const r = await fetch(`/api/user/${uid}/${wasFollowing ? 'unfollow' : 'follow'}`, {
-        method: 'POST', headers: { 'X-CSRF-Token': csrfToken },
-      });
-      if (!r.ok) {
-        updateFollowBtn(wasFollowing);
-        const d = await r.json().catch(() => ({}));
-        showToast(d.error || '操作失败', true);
-      }
-    } catch {
-      updateFollowBtn(wasFollowing);
-      showToast('网络错误', true);
-    }
-    this.disabled = false;
-  });
-
-  function updateFollowBtn(followed) {
-    followBtn.textContent = followed ? '✓ 已关注' : '+ 关注';
-    followBtn.classList.toggle('following', followed);
-  }
-})();
 
 // ── Init ──
 showPage(0);

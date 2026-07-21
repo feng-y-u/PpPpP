@@ -29,7 +29,6 @@ from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     MEDIUM_IMAGE_SIZE,
-    PIXIV_BASE_URL, DETAIL_TIMEOUT,
     SETTINGS_PASSWORD,
     SSL_VERIFY,
 )
@@ -796,52 +795,6 @@ def detail_api(pixiv_id: int) -> Response:
         d['local_urls'] = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
         d['file_count'] = len(paths)
         return jsonify(d)
-
-
-@app.route('/api/user/<int:user_id>/follow-status')
-def api_user_follow_status(user_id: int) -> Response:
-    """检查是否已关注该用户。"""
-    session = _build_session()
-    try:
-        resp = session.get(f'{PIXIV_BASE_URL}/ajax/user/{user_id}',
-                          timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        body = resp.json()
-        followed = body.get('body', {}).get('isFollowed', False)
-        return jsonify({'followed': bool(followed)})
-    except Exception as e:
-        logger.error(f'检查关注状态失败 user={user_id}: {e}')
-        return jsonify({'followed': False, 'error': str(e)}), 500
-
-
-@app.route('/api/user/<int:user_id>/follow', methods=['POST'])
-@_csrf_required
-def api_user_follow(user_id: int) -> Response:
-    session = _build_session()
-    try:
-        resp = session.post(f'{PIXIV_BASE_URL}/ajax/follow/add',
-                           json={'user_id': user_id, 'restrict': 0},
-                           timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        return jsonify({'followed': True})
-    except Exception as e:
-        logger.error(f'关注失败 user={user_id}: {e}')
-        return jsonify({'error': '关注失败'}), 500
-
-
-@app.route('/api/user/<int:user_id>/unfollow', methods=['POST'])
-@_csrf_required
-def api_user_unfollow(user_id: int) -> Response:
-    session = _build_session()
-    try:
-        resp = session.post(f'{PIXIV_BASE_URL}/ajax/follow/delete',
-                           json={'user_id': user_id},
-                           timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        return jsonify({'followed': False})
-    except Exception as e:
-        logger.error(f'取关失败 user={user_id}: {e}')
-        return jsonify({'error': '取关失败'}), 500
 
 
 @app.route('/gallery')
