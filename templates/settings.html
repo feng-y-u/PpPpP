@@ -137,6 +137,7 @@
   <div class="d-flex gap-2 mb-4">
     <button class="btn btn-primary" id="saveBtn">保存设置</button>
     <span id="saveStatus" class="small" style="color:var(--text-muted);align-self:center;display:none;"></span>
+    <span class="small" style="color:var(--text-muted);align-self:center;">设置保存后需重启服务生效</span>
   </div>
 </div>
 
@@ -203,6 +204,7 @@ $('#saveBtn').addEventListener('click', async () => {
     const data = await r.json();
     if (r.ok) {
       showToast('设置已保存（部分设置需重启后生效）');
+      loadSettings();
     } else {
       showToast(data.error || '保存失败');
     }
