@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ illust.title or '#' ~ illust.pixiv_id }} - Pixiv Viewer</title>
+<title>{{ illust.title or '#' ~ illust.pixiv_id }} - PpPpP</title>
 <link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
 <link href="/static/style.css" rel="stylesheet">
 <style>
@@ -178,7 +178,7 @@
   <div class="navbar-inner">
     <a class="navbar-brand" href="/">
       <span class="navbar-brand-dot"></span>
-      Pixiv Viewer
+      PpPpP
     </a>
     <button class="nav-toggle" aria-label="菜单" onclick="this.nextElementSibling.classList.toggle('open')">☰</button>
     <div class="navbar-links">
@@ -191,6 +191,7 @@
   </div>
 </nav>
 
+<div class="full-page">
 <div class="detail-wrap">
   <!-- Image -->
   <div class="image-area" id="imageArea">
@@ -486,5 +487,9 @@ $('#mainImage').addEventListener('error', function() {
   $('#fallback').textContent = '[ 图片加载失败 ]';
 });
 </script>
+</div>
+<footer class="site-footer">
+  <a href="https://github.com/feng-y-u/PpPpP" target="_blank" style="color:inherit;text-decoration:none;">github.com/feng-y-u/PpPpP</a>
+</footer>
 </body>
 </html>
