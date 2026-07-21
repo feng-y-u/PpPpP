@@ -175,3 +175,14 @@ input[type="number"] { -moz-appearance: textfield; }
 }
 .collection-check-item span { flex: 1; font-size: 0.85rem; color: var(--text-primary); }
 .collection-check-count { font-size: 0.72rem; color: var(--text-muted); text-align: right; min-width: 40px; }
+
+/* R18 不可用提示 */
+.r18-notice {
+  font-size: 0.72rem;
+  color: #b8860b;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: help;
+}
