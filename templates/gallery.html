@@ -129,6 +129,7 @@
       <span class="navbar-brand-dot"></span>
       Pixiv Viewer
     </a>
+    <button class="nav-toggle" aria-label="菜单" onclick="this.nextElementSibling.classList.toggle('open')">☰</button>
     <div class="navbar-links">
       <a class="navbar-link" href="/">搜索</a>
       <a class="navbar-link active" href="/gallery">图库</a>
@@ -140,7 +141,7 @@
 </nav>
 
 <div class="container mt-3">
-  <div class="d-flex align-items-center gap-2 mb-2">
+  <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
     <h5 class="mb-0" id="pageTitle">已下载作品</h5>
     <div class="d-flex gap-1 ms-auto">
       <select id="sortSelect" class="form-select form-select-sm" style="width:auto;">

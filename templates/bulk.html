@@ -26,7 +26,7 @@ label {
 .stat-row {
   display: flex; gap: 1.5rem; margin-bottom: 0.75rem; flex-wrap: wrap;
 }
-.stat-item { text-align: center; min-width: 80px; }
+.stat-item { text-align: center; min-width: 60px; }
 .stat-value { font-size: 1.5rem; font-weight: 700; }
 .stat-label { font-size: 0.7rem; color: var(--text-muted); }
 .progress { height: 6px; background: var(--border-subtle); border-radius: 3px; }
@@ -57,6 +57,7 @@ label {
       <span class="navbar-brand-dot"></span>
       Pixiv Viewer
     </a>
+    <button class="nav-toggle" aria-label="菜单" onclick="this.nextElementSibling.classList.toggle('open')">☰</button>
     <div class="navbar-links">
       <a class="navbar-link" href="/">搜索</a>
       <a class="navbar-link" href="/gallery">图库</a>
@@ -78,25 +79,25 @@ label {
     </div>
 
     <div class="row g-2 mb-3">
-      <div class="col-4">
+      <div class="col-sm-4 col-12">
         <label>收藏 ≥</label>
         <input id="minBookmarks" class="form-control" type="number" value="0" min="0" step="100">
       </div>
-      <div class="col-4">
+      <div class="col-sm-4 col-12">
         <label>排序</label>
         <select id="sortOrder" class="form-select">
           <option value="date_d">最新</option>
           <option value="popular_d">综合</option>
         </select>
       </div>
-      <div class="col-4">
+      <div class="col-sm-4 col-12">
         <label>最多页数</label>
         <input id="maxPages" class="form-control" type="number" value="10" min="1" max="100">
       </div>
     </div>
 
     <div class="row g-2 mb-3">
-      <div class="col-4">
+      <div class="col-sm-4 col-12">
         <label>R18</label>
         <select id="r18Mode" class="form-select">
           <option value="all">显示全部</option>

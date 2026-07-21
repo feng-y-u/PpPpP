@@ -157,12 +157,14 @@
 .related-overlay-artist { font-size: 0.6rem; color: rgba(255,255,255,.7); }
 
 /* ── Responsive ── */
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .detail-wrap { flex-direction: column; }
   .image-area { flex: none; min-height: 50vh; }
   .image-area img { max-height: 70vh; }
-  .info-area { flex: none; border-left: none; max-height: none; }
-  .image-nav { display: none; }
+  .info-area { flex: none; border-left: none; max-height: none; padding: 20px 16px; }
+  .image-nav.prev { left: 8px; }
+  .image-nav.next { right: 8px; }
+  .image-nav { width: 40px; height: 40px; font-size: 1.3rem; }
 }
 
 /* ── Scrollbar ── */
@@ -178,6 +180,7 @@
       <span class="navbar-brand-dot"></span>
       Pixiv Viewer
     </a>
+    <button class="nav-toggle" aria-label="菜单" onclick="this.nextElementSibling.classList.toggle('open')">☰</button>
     <div class="navbar-links">
       <a class="navbar-link" href="/">搜索</a>
       <a class="navbar-link" href="/gallery">图库</a>
@@ -371,6 +374,20 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); showPage(currentPage - 1); }
   if (e.key === 'ArrowRight') { e.preventDefault(); showPage(currentPage + 1); }
 });
+
+// Touch swipe
+(function() {
+  let touchStartX = 0;
+  const el = $('#imageArea');
+  el.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; }, {passive: true});
+  el.addEventListener('touchend', e => {
+    const diff = touchStartX - e.changedTouches[0].clientX;
+    if (Math.abs(diff) > 50) {
+      if (diff > 0) showPage(currentPage + 1);
+      else showPage(currentPage - 1);
+    }
+  }, {passive: true});
+})();
 
 // ── Collection Picker ──
 let savedCollectionIds = new Set();
