@@ -87,8 +87,8 @@ function updateDlDone(pixivId) {
     return;
   }
   // 图库页卡片
-  const gCard = document.querySelector(`.gallery-card [data-pid="${pixivId}"].dl-btn`);
-  if (gCard) {
+  const gCard = document.querySelector(`[data-pid="${pixivId}"]`);
+  if (gCard && gCard.closest('.gallery-card')) {
     gCard.textContent = '已下载';
     gCard.className = 'btn btn-dl-done btn-sm dl-file-btn';
     gCard.addEventListener('click', (e) => {
@@ -122,8 +122,8 @@ function resetDlBtn(pixivId) {
     return;
   }
   // 图库页卡片
-  const gCard = document.querySelector(`.gallery-card [data-pid="${pixivId}"].dl-btn, .gallery-card [data-pid="${pixivId}"].dl-file-btn`);
-  if (gCard) {
+  const gCard = document.querySelector(`[data-pid="${pixivId}"]`);
+  if (gCard && gCard.closest('.gallery-card')) {
     gCard.textContent = '下载';
     gCard.className = 'btn btn-soft btn-sm dl-btn';
     gCard.addEventListener('click', function(e) {
