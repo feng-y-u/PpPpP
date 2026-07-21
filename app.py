@@ -819,7 +819,8 @@ def api_user_follow_status(user_id: int) -> Response:
 def api_user_follow(user_id: int) -> Response:
     session = _build_session()
     try:
-        resp = session.post(f'{PIXIV_BASE_URL}/ajax/follow/user/{user_id}',
+        resp = session.post(f'{PIXIV_BASE_URL}/bookmark_add.php',
+                           data={'id': str(user_id), 'type': 'user', 'restrict': '0'},
                            timeout=DETAIL_TIMEOUT)
         resp.raise_for_status()
         return jsonify({'followed': True})
@@ -833,7 +834,8 @@ def api_user_follow(user_id: int) -> Response:
 def api_user_unfollow(user_id: int) -> Response:
     session = _build_session()
     try:
-        resp = session.post(f'{PIXIV_BASE_URL}/ajax/unfollow/user/{user_id}',
+        resp = session.post(f'{PIXIV_BASE_URL}/rpc_user_unfollow.php',
+                           data={'id': str(user_id)},
                            timeout=DETAIL_TIMEOUT)
         resp.raise_for_status()
         return jsonify({'followed': False})
