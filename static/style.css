@@ -178,12 +178,13 @@ input[type="number"] { -moz-appearance: textfield; }
 
 /* R18 不可用提示 */
 .r18-notice {
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   color: #b8860b;
   background: #fff3cd;
   border: 1px solid #ffc107;
   border-radius: 4px;
-  padding: 1px 6px;
+  padding: 4px 8px;
   cursor: help;
-  line-height: 1;
+  line-height: 1.4;
+  vertical-align: middle;
 }
