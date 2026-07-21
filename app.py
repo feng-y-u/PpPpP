@@ -415,7 +415,7 @@ def favicon() -> Response:
 
 @app.route('/')
 def index() -> str:
-    return render_template('index.html', csrf_token=_get_csrf_token())
+    return render_template('index.html', csrf_token=_get_csrf_token(), max_bookmarks_default=MAX_BOOKMARKS_DEFAULT)
 
 
 @app.route('/search')
