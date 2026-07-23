@@ -1267,6 +1267,7 @@ _SETTINGS_DEFAULTS = {
     'auto_follow_download': False,
     'fetch_detail_workers': 2,
     'medium_image_size': 600,
+    'items_per_page': 24,
 }
 
 
@@ -1335,7 +1336,8 @@ def api_settings_post() -> Response:
                 val = bool(val)
             elif key in ('download_max_workers', 'per_page', 'search_pages',
                          'max_bookmarks_default', 'auto_follow_interval',
-                         'fetch_detail_workers', 'medium_image_size'):
+                         'fetch_detail_workers', 'medium_image_size',
+                         'items_per_page'):
                 try:
                     val = max(0, int(val))
                 except (ValueError, TypeError):
