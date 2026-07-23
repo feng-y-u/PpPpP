@@ -138,7 +138,10 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
 
     batch = collected[:items_per_page]
 
-    logger.info(f'paginated_search: collected={len(collected)} batch={len(batch)} pages_scanned={pages_scanned} pixiv_has_more={pixiv_has_more}')
+    logger.info(f'paginated_search: collected={len(collected)} batch={len(batch)} pages_scanned={pages_scanned} pixiv_has_more={pixiv_has_more} cursor_in={cursor_data}')
+    if batch:
+        first_ids = [item.get('pixiv_id', '?') for item in batch[:3]]
+        logger.info(f'paginated_search: first 3 pixiv_ids={first_ids}')
 
     # 计算下一页 cursor：遍历 page_sizes 找到 batch 结束位置
     cursor_pixiv_page = cursor_data.get('pixiv_page', 1) if cursor_data else 1
