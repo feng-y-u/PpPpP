@@ -322,8 +322,7 @@
         <option value="date_d">最新</option>
         <option value="popular_d">综合</option>
       </select>
-      <label>起始页</label>
-      <input id="startPage" type="number" value="1" min="1">
+
       <label>收藏≥</label>
       <input id="minBookmarks" type="number" value="{{ max_bookmarks_default }}" min="0" step="100">
       <label>R18</label>
@@ -357,9 +356,14 @@
   <!-- Masonry Grid -->
   <div id="masonryGrid" class="masonry"></div>
 
-  <!-- Load More -->
-  <div id="loadMoreWrap" style="text-align:center;padding:1.5rem 0;display:none;">
-    <button id="loadMoreBtn" class="btn btn-outline-primary">加载更多</button>
+  <!-- Pagination -->
+  <div id="paginationBar" style="display:none; text-align:center; padding: 1rem 0;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:6px;">
+      <button id="prevPageBtn" class="btn btn-sm btn-outline-secondary" disabled>上一页</button>
+      <div id="pageNumbers" style="display:flex; gap:4px;"></div>
+      <button id="nextPageBtn" class="btn btn-sm btn-outline-primary">下一页</button>
+    </div>
+    <div id="paginationStatus" style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;"></div>
   </div>
 
   <!-- Empty State -->
@@ -400,48 +404,158 @@
 <script>
 const csrfToken = {{ csrf_token | tojson }};
 
-let lastSearchParams = null, allResults = [], currentPage = 1, hasMorePages = false;
-const SEARCH_STATE_KEY = 'pixiv_search_state';
+// ── 翻页状态 ──
+let loadedPages = [];
+let nextCursor = null;
+let currentPage = 1;
+let hasMore = false;
+
 const R18_STATE_KEY = 'pixiv_r18_mode';
 
-// ── State ──
-function saveSearchState(results) {
-  try { sessionStorage.setItem(SEARCH_STATE_KEY, JSON.stringify({
-    ...lastSearchParams, r18Mode: $('#r18Mode').value, results, currentPage, hasMorePages
-  })); } catch {}
+function resetPagination() {
+  loadedPages = [];
+  nextCursor = null;
+  currentPage = 1;
+  hasMore = false;
+  $('#prevPageBtn').disabled = true;
+  $('#nextPageBtn').disabled = true;
+  $('#pageNumbers').innerHTML = '';
+  $('#paginationBar').style.display = 'none';
 }
 
-function restoreSearchState() {
-  try {
-    const raw = sessionStorage.getItem(SEARCH_STATE_KEY);
-    if (!raw) return false;
-    const s = JSON.parse(raw);
-    $('#searchType').value = s.type || 'tag';
-    $('#searchQuery').value = s.query || '';
-    $('#minBookmarks').value = s.minBookmarks || 0;
-    $('#sortOrder').value = s.sort || 'date_d';
-    $('#startPage').value = s.startPage || 1;
-    $('#tagMode').value = s.tagMode || 'or';
-    if (s.r18Mode) $('#r18Mode').value = s.r18Mode;
-    updateSearchUI();
+function renderPaginationBar() {
+  const bar = $('#paginationBar');
+  const container = $('#pageNumbers');
+  bar.style.display = loadedPages.length > 0 ? 'block' : 'none';
+  if (!loadedPages.length) return;
 
-    lastSearchParams = { type:s.type, query:s.query, minBookmarks:s.minBookmarks,
-      sort:s.sort||'date_d', startPage:s.startPage||1, tagMode:s.tagMode||'or', r18Mode:s.r18Mode||'all' };
-
-    if (!s.results?.length) {
-      doSearch();
-      return true;
+  let html = '';
+  for (let i = 0; i < loadedPages.length && i < 20; i++) {
+    const num = i + 1;
+    if (num === currentPage) {
+      html += `<span style="padding:2px 10px;border-radius:4px;background:var(--accent);color:#fff;font-size:0.8rem;font-weight:600;">${num}</span>`;
+    } else {
+      html += `<button class="btn btn-sm btn-soft page-jump-btn" data-page="${num}" style="min-width:32px;font-size:0.75rem;padding:2px 8px;">${num}</button>`;
     }
+  }
+  container.innerHTML = html;
 
-    allResults = s.results || [];
-    currentPage = s.currentPage || (s.startPage || 1);
-    hasMorePages = s.hasMorePages || false;
-    s.results.forEach(r => renderCard(r));
-    showToolbar(true);
-    updateLoadMore();
+  container.querySelectorAll('.page-jump-btn').forEach(btn => {
+    btn.addEventListener('click', () => jumpToPage(parseInt(btn.dataset.page)));
+  });
+
+  $('#prevPageBtn').disabled = currentPage <= 1;
+  $('#nextPageBtn').disabled = !hasMore && currentPage >= loadedPages.length;
+  $('#paginationStatus').textContent = `第 ${currentPage} 页 · 已缓 ${loadedPages.length} 页`;
+}
+
+function renderPage(pageNum) {
+  const page = loadedPages[pageNum - 1];
+  if (!page) return;
+  $('#masonryGrid').innerHTML = '';
+  page.forEach(r => renderCard(r));
+  lazyLoad();
+}
+
+function jumpToPage(pageNum) {
+  if (pageNum < 1 || pageNum > loadedPages.length) return;
+  currentPage = pageNum;
+  renderPage(currentPage);
+  renderPaginationBar();
+}
+
+$('#prevPageBtn').addEventListener('click', () => jumpToPage(currentPage - 1));
+$('#nextPageBtn').addEventListener('click', () => loadNextPage());
+
+async function loadNextPage() {
+  if (!nextCursor) return;
+  $('#nextPageBtn').disabled = true;
+  $('#nextPageBtn').textContent = '加载中...';
+
+  try {
+    const params = new URLSearchParams();
+    params.set('cursor', nextCursor);
+    const resp = await fetch('/search?' + params.toString());
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      if (err.error_code === 'CURSOR_EXPIRED') {
+        showToast('搜索已过期，自动重新搜索');
+        doSearch();
+        return;
+      }
+      showToast(err.error || '加载失败', true);
+      renderPaginationBar();
+      return;
+    }
+    const data = await resp.json();
+    if (!data.results.length) {
+      hasMore = false;
+      renderPaginationBar();
+      return;
+    }
+    loadedPages.push(data.results);
+    nextCursor = data.cursor || null;
+    hasMore = data.has_more || false;
+    currentPage = loadedPages.length;
+    renderPage(currentPage);
+    renderPaginationBar();
+  } catch { showToast('网络错误', true); }
+  finally {
+    $('#nextPageBtn').disabled = !hasMore;
+    $('#nextPageBtn').textContent = '下一页';
+  }
+}
+
+async function doSearch() {
+  const type = $('#searchType').value;
+  const query = $('#searchQuery').value.trim();
+  const minBookmarks = parseInt($('#minBookmarks').value) || 0;
+  if (type === 'user' && !query) { showToast('请输入画师ID'); return; }
+
+  const sort = $('#sortOrder').value || 'date_d';
+  const tagMode = $('#tagMode').value || 'or';
+  const r18Mode = $('#r18Mode').value;
+  resetPagination();
+  $('#masonryGrid').innerHTML = '';
+  $('#emptyState').style.display = 'none';
+  $('#authErrorState').style.display = 'none';
+  batchInProgress = false;
+
+  showLoading(true);
+  try {
+    let url;
+    if (type === 'following') url = `/api/following?page=1&r18_mode=${r18Mode}`;
+    else url = `/search?${new URLSearchParams({type,query,min_bookmarks:minBookmarks,sort,tag_mode:tagMode,r18_mode:r18Mode})}`;
+
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      if (resp.status === 401) {
+        showToast('Cookie 已过期，请更新 cookies.txt', true);
+        $('#authErrorState').style.display = 'block';
+        return;
+      }
+      const err = await resp.json().catch(() => ({}));
+      if (err.error_code === 'CURSOR_EXPIRED') {
+        showToast('搜索已过期，自动重新搜索');
+        return doSearch();
+      }
+      showToast(resp.status === 429 ? '请求过于频繁' : (err.error || '搜索失败'), true);
+      return;
+    }
+    const data = await resp.json();
+    if (!data.results.length) {
+      $('#emptyState').style.display = 'block';
+      return;
+    }
+    loadedPages = [data.results];
+    nextCursor = data.cursor || null;
+    hasMore = data.has_more || false;
+    currentPage = 1;
+    data.results.forEach(r => renderCard(r));
+    renderPaginationBar();
     lazyLoad();
-    return true;
-  } catch { return false; }
+  } catch { showToast('网络错误', true); }
+  finally { showLoading(false); }
 }
 
 // ── UI Toggle ──
@@ -452,14 +566,15 @@ function updateSearchUI() {
   $('#searchQuery').placeholder = type === 'following' ? '' : isTag ? '多个标签用逗号分隔' : '输入画师UID...';
 
   const show = type !== 'following';
-  ['#sortOrder','#startPage','#minBookmarks'].forEach(id => {
-    $(id).closest('label') && ($(id).style.display = show ? '' : 'none');
+  ['#sortOrder','#minBookmarks'].forEach(id => {
+    const el = $(id);
+    if (el) el.style.display = show ? '' : 'none';
   });
   $$('.filters-row label').forEach(l => l.style.display = show ? '' : 'none');
   if (!show) {
-    ['#sortOrder','#startPage','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = 'none');
+    ['#sortOrder','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = 'none');
   } else {
-    ['#sortOrder','#startPage','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = '');
+    ['#sortOrder','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = '');
   }
 }
 $('#searchType').addEventListener('change', updateSearchUI);
@@ -488,11 +603,11 @@ async function removeBlockedTag(tag) {
   const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, { method:'DELETE', headers:{'X-CSRF-Token':csrfToken} });
   if (r.ok) { blockedTags = blockedTags.filter(t => t !== tag); renderBlockedTags(); refreshCurrentSearch(); }
 }
-function refreshCurrentSearch() { if (lastSearchParams) doSearch(); }
+function refreshCurrentSearch() { doSearch(); }
 
 $('#r18Mode').addEventListener('change', () => {
   sessionStorage.setItem(R18_STATE_KEY, $('#r18Mode').value);
-  if (lastSearchParams) doSearch();
+  doSearch();
 });
 
 $('#toggleBlockedBtn').addEventListener('click', () => {
@@ -506,105 +621,6 @@ $('#addBlockedBtn').addEventListener('click', () => {
   if (t) { addBlockedTag(t); $('#newBlockedTag').value = ''; }
 });
 $('#newBlockedTag').addEventListener('keydown', e => { if (e.key==='Enter') $('#addBlockedBtn').click(); });
-
-// ── Search ──
-$('#searchBtn').addEventListener('click', () => doSearch());
-$('#searchQuery').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
-
-function showToolbar(v) { $('#downloadToolbar').style.display = v ? 'flex' : 'none'; }
-
-async function doSearch() {
-  const type = $('#searchType').value;
-  const query = $('#searchQuery').value.trim();
-  const minBookmarks = parseInt($('#minBookmarks').value) || 0;
-  if (type === 'user' && !query) { showToast('请输入画师ID'); return; }
-
-  const sort = $('#sortOrder').value || 'date_d';
-  const startPage = Math.max(1, parseInt($('#startPage').value) || 1);
-  const tagMode = $('#tagMode').value || 'or';
-
-  const r18Mode = $('#r18Mode').value;
-  lastSearchParams = { type, query, minBookmarks, sort, startPage, tagMode, r18Mode };
-  currentPage = startPage;
-  allResults = [];
-  hasMorePages = false;
-  saveSearchState([]);
-  $('#masonryGrid').innerHTML = '';
-  $('#emptyState').style.display = 'none';
-  $('#authErrorState').style.display = 'none';
-  $('#loadMoreWrap').style.display = 'none';
-  showToolbar(false);
-  batchInProgress = false;
-
-  showLoading(true);
-  try {
-    let url;
-    if (type === 'following') url = `/api/following?page=${startPage}&r18_mode=${r18Mode}`;
-    else url = `/search?${new URLSearchParams({type,query,min_bookmarks:minBookmarks,page:String(startPage),sort,tag_mode:tagMode,r18_mode:r18Mode})}`;
-
-    const resp = await fetch(url);
-    if (!resp.ok) {
-      if (resp.status === 401) {
-        showToast('Cookie 已过期，请更新 cookies.txt', true);
-        $('#authErrorState').style.display = 'block';
-        $('#emptyState').style.display = 'none';
-        return;
-      }
-      showToast(resp.status===429 ? '请求过于频繁' : ((await resp.json().catch(()=>({}))).error||'搜索失败'), true);
-      return;
-    }
-    const data = await resp.json();
-
-    if (!data.results.length) {
-      $('#emptyState').style.display = 'block';
-      return;
-    }
-
-    data.results.forEach(r => renderCard(r));
-    allResults = data.results;
-    hasMorePages = data.has_more || false;
-    saveSearchState(allResults);
-    $('#resultCount').textContent = allResults.length ? `已加载 ${allResults.length} 件` : '';
-    showToolbar(true);
-    updateLoadMore();
-    lazyLoad();
-  } catch { showToast('网络错误', true); }
-  finally { showLoading(false); }
-}
-
-async function loadMore() {
-  if (!lastSearchParams) return;
-  currentPage++;
-  showLoading(true);
-  try {
-    const p = lastSearchParams;
-    let url;
-    if (p.type === 'following') url = `/api/following?page=${currentPage}&r18_mode=${p.r18Mode || 'all'}`;
-    else url = `/search?${new URLSearchParams({type:p.type,query:p.query,min_bookmarks:p.minBookmarks,page:String(currentPage),sort:p.sort,tag_mode:p.tagMode,r18_mode:p.r18Mode||'all'})}`;
-
-    const resp = await fetch(url);
-    if (!resp.ok) { if (resp.status === 401) showToast('Cookie 已过期，请更新 cookies.txt', true); else showToast('加载失败', true); return; }
-    const data = await resp.json();
-
-    if (!data.results.length) { hasMorePages = false; updateLoadMore(); return; }
-
-    data.results.forEach(r => renderCard(r));
-    allResults.push(...data.results);
-    hasMorePages = data.has_more || false;
-    $('#startPage').value = currentPage + 1;
-    $('#resultCount').textContent = allResults.length ? `已加载 ${allResults.length} 件` : '';
-    saveSearchState(allResults);
-    updateLoadMore();
-    lazyLoad();
-  } catch { showToast('网络错误', true); }
-  finally { showLoading(false); }
-}
-
-function updateLoadMore() {
-  $('#loadMoreWrap').style.display = hasMorePages ? 'block' : 'none';
-}
-
-$('#loadMoreBtn').addEventListener('click', loadMore);
 
 // ── Render Card ──
 function renderCard(r) {
@@ -745,15 +761,16 @@ function loadR18Mode() {
 loadBlockedTags();
 loadR18Mode();
 
-// 检查 URL 参数（从详情页等跳转过来）
+$('#searchBtn').addEventListener('click', () => doSearch());
+$('#searchQuery').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
+
+// Check URL params (e.g., from detail page redirects)
 const urlParams = new URLSearchParams(location.search);
 if (urlParams.has('query')) {
   $('#searchQuery').value = urlParams.get('query');
   if (urlParams.has('type')) $('#searchType').value = urlParams.get('type');
   updateSearchUI();
   doSearch();
-} else if (!restoreSearchState()) {
-  sessionStorage.removeItem(SEARCH_STATE_KEY);
 }
 </script>
 </div>
