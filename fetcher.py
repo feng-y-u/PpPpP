@@ -155,7 +155,7 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
         next_pixiv_page += 1
 
     remaining = len(collected) - len(batch)
-    has_more = remaining > 0 or (pixiv_has_more and pages_scanned >= _MAX_SCAN_PAGES)
+    has_more = remaining > 0 or pixiv_has_more
 
     next_cursor = None
     if has_more:
