@@ -409,6 +409,7 @@ let loadedPages = [];
 let nextCursor = null;
 let currentPage = 1;
 let hasMore = false;
+let currentSearchType = null;
 
 const R18_STATE_KEY = 'pixiv_r18_mode';
 
@@ -417,6 +418,7 @@ function resetPagination() {
   nextCursor = null;
   currentPage = 1;
   hasMore = false;
+  currentSearchType = null;
   $('#prevPageBtn').disabled = true;
   $('#nextPageBtn').disabled = true;
   $('#pageNumbers').innerHTML = '';
@@ -455,6 +457,7 @@ function renderPage(pageNum) {
   $('#masonryGrid').innerHTML = '';
   page.forEach(r => renderCard(r));
   lazyLoad();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function jumpToPage(pageNum) {
@@ -468,6 +471,29 @@ $('#prevPageBtn').addEventListener('click', () => jumpToPage(currentPage - 1));
 $('#nextPageBtn').addEventListener('click', () => loadNextPage());
 
 async function loadNextPage() {
+  if (currentSearchType === 'following') {
+    const nextPage = loadedPages.length + 1;
+    const r18Mode = $('#r18Mode').value;
+    $('#nextPageBtn').disabled = true;
+    $('#nextPageBtn').textContent = '加载中...';
+    try {
+      const resp = await fetch(`/api/following?page=${nextPage}&r18_mode=${r18Mode}`);
+      if (!resp.ok) { showToast('加载失败', true); renderPaginationBar(); return; }
+      const data = await resp.json();
+      if (!data.results.length) { hasMore = false; renderPaginationBar(); return; }
+      loadedPages.push(data.results);
+      hasMore = data.has_more || false;
+      currentPage = loadedPages.length;
+      renderPage(currentPage);
+      renderPaginationBar();
+    } catch { showToast('网络错误', true); }
+    finally {
+      $('#nextPageBtn').disabled = !hasMore;
+      $('#nextPageBtn').textContent = '下一页';
+    }
+    return;
+  }
+
   if (!nextCursor) return;
   $('#nextPageBtn').disabled = true;
   $('#nextPageBtn').textContent = '加载中...';
@@ -515,6 +541,7 @@ async function doSearch() {
   const sort = $('#sortOrder').value || 'date_d';
   const tagMode = $('#tagMode').value || 'or';
   const r18Mode = $('#r18Mode').value;
+  currentSearchType = type;
   resetPagination();
   $('#masonryGrid').innerHTML = '';
   $('#emptyState').style.display = 'none';
