@@ -174,8 +174,13 @@
     <p class="small" id="emptyDesc">搜索作品并下载后在此查看</p>
   </div>
   <div id="stats" class="small mb-3" style="display:none;"></div>
-  <div id="loadMoreWrap" style="text-align:center;padding:1rem 0;display:none;">
-    <button id="loadMoreBtn" class="btn btn-outline-primary btn-sm">加载更多</button>
+  <div id="paginationBar" style="display:none; text-align:center; padding: 1rem 0;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:6px;">
+      <button id="prevPageBtn" class="btn btn-sm btn-outline-secondary" disabled>上一页</button>
+      <div id="pageNumbers" style="display:flex; gap:4px;"></div>
+      <button id="nextPageBtn" class="btn btn-sm btn-outline-primary">下一页</button>
+    </div>
+    <div id="paginationStatus" style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;"></div>
   </div>
 </div>
 
@@ -212,7 +217,7 @@ const csrfToken = {{ csrf_token | tojson }};
 
 let deleteTarget = null, deleteMode = 'single', activeTag = '';
 let selectedPids = new Set(), batchMode = false;
-let galleryOffset = 0, galleryTotal = 0, galleryHasMore = false, galleryFavTotal = 0;
+let galleryCurrentPage = 1, galleryTotal = 0, galleryTotalPages = 0, galleryFavTotal = 0;
 let allTags = [];
 let activeCollectionId = '';
 let sortOrder = 'created';
@@ -226,7 +231,7 @@ if (urlParams.has('tag')) {
 }
 activeCollectionId = urlParams.get('collection_id') || '';
 
-loadGallery(0);
+loadGallery(1);
 loadTags();
 loadCollections();
 
@@ -249,7 +254,7 @@ function setActiveTag(tag) {
     el.style.display = 'none';
     input.value = '';
   }
-  loadGallery(0);
+  loadGallery(1);
 }
 
 $('#tagFilter').addEventListener('input', function() {
@@ -270,7 +275,8 @@ $('#tagFilterActive')?.addEventListener('click', function(e) {
 });
 
 
-function loadGallery(offset) {
+function loadGallery(pageNum) {
+  const offset = (pageNum - 1) * PAGE_SIZE;
   const params = new URLSearchParams();
   if (activeTag) params.set('tag', activeTag);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
@@ -280,24 +286,21 @@ function loadGallery(offset) {
   fetch('/api/gallery?' + params.toString())
     .then(r => r.json())
     .then(data => {
-      if (offset === 0) {
-        $('#cardGrid').innerHTML = '';
-        selectedPids.clear();
-        updateBatchUI();
-      }
+      $('#cardGrid').innerHTML = '';
+      selectedPids.clear();
+      updateBatchUI();
+
       if (data.data.length === 0) {
-        if (offset === 0) {
-          $('#emptyState').style.display = 'block';
-          $('#stats').style.display = 'none';
-          if (activeCollectionId) {
-            $('#emptyTitle').textContent = '暂无收藏作品';
-            $('#emptyDesc').textContent = '在作品详情页点击 ♥ 收藏添加到此处';
-          } else {
-            $('#emptyTitle').textContent = '暂无已下载作品';
-            $('#emptyDesc').textContent = '搜索作品并下载后在此查看';
-          }
+        $('#emptyState').style.display = 'block';
+        $('#stats').style.display = 'none';
+        $('#paginationBar').style.display = 'none';
+        if (activeCollectionId) {
+          $('#emptyTitle').textContent = '暂无收藏作品';
+          $('#emptyDesc').textContent = '在作品详情页点击 ♥ 收藏添加到此处';
+        } else {
+          $('#emptyTitle').textContent = '暂无已下载作品';
+          $('#emptyDesc').textContent = '搜索作品并下载后在此查看';
         }
-        $('#loadMoreWrap').style.display = 'none';
         return;
       }
       $('#emptyState').style.display = 'none';
@@ -307,22 +310,61 @@ function loadGallery(offset) {
         renderCard(item);
       });
       updateBatchUI();
-      galleryOffset = offset + data.data.length;
+      galleryCurrentPage = pageNum;
       galleryTotal = data.total;
+      galleryTotalPages = Math.ceil(galleryTotal / PAGE_SIZE);
       galleryFavTotal = data.favorite_total || 0;
-      galleryHasMore = data.has_more;
       $('#stats').style.display = 'block';
-      const shown = Math.min(galleryTotal, galleryOffset);
-      let statsText = `${shown} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
+      const start = offset + 1;
+      const end = Math.min(galleryTotal, offset + data.data.length);
+      let statsText = `${start}-${end} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
       if (activeTag) statsText += ` · 标签: ${escHtml(activeTag)}`;
       if (!activeCollectionId && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
       $('#stats').textContent = statsText;
-      $('#loadMoreWrap').style.display = data.has_more ? 'block' : 'none';
+      renderGalleryPagination();
     })
     .catch(() => showToast('加载图库失败', true));
 }
 
-$('#loadMoreBtn').addEventListener('click', () => loadGallery(galleryOffset));
+function renderGalleryPagination() {
+  const bar = $('#paginationBar');
+  const container = $('#pageNumbers');
+  const total = galleryTotalPages;
+  if (total <= 1) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+
+  let html = '';
+  for (let i = 0; i < total && i < 20; i++) {
+    const num = i + 1;
+    if (num === galleryCurrentPage) {
+      html += `<span style="padding:2px 10px;border-radius:4px;background:var(--accent);color:#fff;font-size:0.8rem;font-weight:600;">${num}</span>`;
+    } else {
+      html += `<button class="btn btn-sm btn-soft gallery-page-btn" data-page="${num}" style="min-width:32px;font-size:0.75rem;padding:2px 8px;">${num}</button>`;
+    }
+  }
+  container.innerHTML = html;
+
+  container.querySelectorAll('.gallery-page-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = parseInt(btn.dataset.page);
+      loadGallery(p);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+
+  $('#prevPageBtn').disabled = galleryCurrentPage <= 1;
+  $('#nextPageBtn').disabled = galleryCurrentPage >= total;
+  $('#paginationStatus').textContent = `第 ${galleryCurrentPage} 页 · 共 ${total} 页`;
+}
+
+$('#prevPageBtn').addEventListener('click', () => {
+  if (galleryCurrentPage > 1) loadGallery(galleryCurrentPage - 1);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+$('#nextPageBtn').addEventListener('click', () => {
+  if (galleryCurrentPage < galleryTotalPages) loadGallery(galleryCurrentPage + 1);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
 
 function loadTags() {
   fetch('/api/gallery/tags')
@@ -489,12 +531,12 @@ $('#collectionSelect').addEventListener('change', function() {
   setActiveTag('');
   const name = this.options[this.selectedIndex]?.text || '';
   $('#pageTitle').textContent = activeCollectionId ? `${name} - 收藏夹` : '已下载作品';
-  loadGallery(0);
+  loadGallery(1);
 });
 
 $('#sortSelect').addEventListener('change', function() {
   sortOrder = this.value;
-  loadGallery(0);
+  loadGallery(1);
 });
 
 function updateBatchUI() {
