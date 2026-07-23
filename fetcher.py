@@ -73,7 +73,7 @@ def decode_cursor(cursor: str) -> dict | None:
         return None
 
 
-_MAX_SCAN_PAGES = 10
+_MAX_SCAN_PAGES = 30
 _CURSOR_TTL = 305  # 5 分钟 + 5 秒缓冲
 
 
