@@ -138,11 +138,6 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
 
     batch = collected[:items_per_page]
 
-    logger.info(f'paginated_search: collected={len(collected)} batch={len(batch)} pages_scanned={pages_scanned} pixiv_has_more={pixiv_has_more} cursor_in={cursor_data}')
-    if batch:
-        first_ids = [item.get('pixiv_id', '?') for item in batch[:3]]
-        logger.info(f'paginated_search: first 3 pixiv_ids={first_ids}')
-
     # 计算下一页 cursor：遍历 page_sizes 找到 batch 结束位置
     cursor_pixiv_page = cursor_data.get('pixiv_page', 1) if cursor_data else 1
     cursor_skip = cursor_data.get('skip_count', 0) if cursor_data else 0
@@ -639,7 +634,6 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
     total_pages = min((total + PER_PAGE - 1) // PER_PAGE, max_pages) if total else max_pages
     has_more = page < total_pages
-    logger.info(f'search_by_tag page={page}: total={total} total_pages={total_pages} raw={len(illusts_data)} filtered={len(results)} has_more={has_more} key={keyword!r}')
     _cache_put(cache_key, (results, has_more))
     return results, has_more
 
