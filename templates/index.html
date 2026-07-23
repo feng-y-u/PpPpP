@@ -583,6 +583,7 @@ async function doSearch() {
     loadedPages = [data.results];
     nextCursor = data.cursor || null;
     hasMore = data.has_more || false;
+    console.log('搜索完成:', {results: data.results.length, cursor: nextCursor, has_more: data.has_more, hasMore});
     currentPage = 1;
     data.results.forEach(r => renderCard(r));
     renderPaginationBar();
