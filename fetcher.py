@@ -132,7 +132,6 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
 
         if not has_more:
             pixiv_has_more = False
-            break
 
     if pages_scanned == _MAX_SCAN_PAGES and len(collected) < items_per_page:
         logger.info(f'paginated_search: 扫描 {_MAX_SCAN_PAGES} 页未攒够 {items_per_page} 件')
