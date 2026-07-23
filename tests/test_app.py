@@ -132,9 +132,9 @@ class TestSearch:
         resp = client.get('/search?type=tag&query=' + 'a' * 201)
         assert resp.status_code == 400
 
-    @patch('app.search_by_tag')
-    def test_search_with_all_params(self, mock_search, client):
-        mock_search.return_value = ([{'pixiv_id': 1, 'title': 't'}], True)
+    @patch('app.paginated_search')
+    def test_search_with_all_params(self, mock_paginated, client):
+        mock_paginated.return_value = ([{'pixiv_id': 1, 'title': 't'}], 'cursor_abc', True)
         resp = client.get(
             '/search?type=tag&query=test&min_bookmarks=500'
             '&page=2&sort=date_d&tag_mode=and&r18_mode=safe'
@@ -142,6 +142,7 @@ class TestSearch:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data['has_more'] is True
+        assert data['cursor'] == 'cursor_abc'
         assert len(data['results']) == 1
 
     @patch('app.browse_discovery')

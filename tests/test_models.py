@@ -63,7 +63,7 @@ class TestIllustToDict:
             'id', 'pixiv_id', 'title', 'user_id', 'user_name', 'tags',
             'page_count', 'bookmark_count', 'upload_date', 'thumb_url',
             'description', 'original_urls', 'local_paths', 'download_status',
-            'file_size', 'is_favorite', 'favorited_at', 'created_at',
+            'downloaded_at', 'file_size', 'is_favorite', 'favorited_at', 'created_at',
         }
         assert set(d.keys()) == expected_keys
 

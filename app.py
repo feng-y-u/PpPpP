@@ -30,11 +30,11 @@ from config import (
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     MEDIUM_IMAGE_SIZE,
     SETTINGS_PASSWORD,
-    SSL_VERIFY,
+    SSL_VERIFY, ITEMS_PER_PAGE,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
 import fetcher
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search
 
 logging.basicConfig(
     level=logging.INFO,
@@ -424,22 +424,16 @@ def search() -> Response:
     search_type = request.args.get('type', 'tag')
     query = request.args.get('query', '').strip()
     min_bookmarks = request.args.get('min_bookmarks', MAX_BOOKMARKS_DEFAULT)
-    start_page = request.args.get('page', '1')
     sort_order = request.args.get('sort', 'date_d')
+    cursor_str = request.args.get('cursor', '')
 
-    if search_type == 'user' and not query:
+    if search_type == 'user' and not cursor_str and not query:
         return jsonify({'error': '请输入画师ID'}), 400
 
     try:
         min_bookmarks = int(min_bookmarks)
     except (ValueError, TypeError):
         min_bookmarks = MAX_BOOKMARKS_DEFAULT
-
-    try:
-        start_page = int(start_page)
-    except (ValueError, TypeError):
-        start_page = 1
-    start_page = max(1, start_page)
 
     tag_mode = request.args.get('tag_mode', 'or')
     if tag_mode not in ('or', 'and'):
@@ -452,22 +446,51 @@ def search() -> Response:
     if r18_mode not in ('all', 'safe'):
         r18_mode = 'all'
 
-    logger.info(f'搜索：type={search_type}, query={query!r}, min={min_bookmarks}, start={start_page}, sort={sort_order}, tag_mode={tag_mode}')
+    # 解析游标
+    cursor_data = None
+    if cursor_str:
+        cursor_data = decode_cursor(cursor_str)
+        if cursor_data is None:
+            return jsonify({'error': '游标无效', 'error_code': 'CURSOR_INVALID'}), 400
+        if time.time() - cursor_data.get('created_at', 0) > 305:
+            return jsonify({'error': '搜索已过期，请重新搜索', 'error_code': 'CURSOR_EXPIRED'}), 400
+        # 从游标恢复搜索参数
+        search_type = cursor_data.get('type', search_type)
+        query = cursor_data.get('query', query)
+        sort_order = cursor_data.get('sort', sort_order)
+        tag_mode = cursor_data.get('tag_mode', tag_mode)
+        r18_mode = cursor_data.get('r18_mode', r18_mode)
+        min_bookmarks = cursor_data.get('min_bookmarks', min_bookmarks)
 
-    all_results = []
-    has_more = False
+    logger.info(f'搜索：type={search_type}, query={query!r}, min={min_bookmarks}, sort={sort_order}, tag_mode={tag_mode}')
+
+    query_params = {
+        'type': search_type,
+        'query': query,
+        'sort': sort_order,
+        'tag_mode': tag_mode,
+        'r18_mode': r18_mode,
+        'min_bookmarks': min_bookmarks,
+    }
+
     try:
         if search_type == 'tag':
             if len(query) > 200:
                 return jsonify({'error': '搜索关键词过长'}), 400
             if not query:
-                all_results, has_more = browse_discovery(start_page, sort_order, min_bookmarks, r18_mode=r18_mode)
+                def _browse_fn(page):
+                    return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode)
+                results, next_cursor, has_more = paginated_search(_browse_fn, query_params, ITEMS_PER_PAGE, cursor_data)
             else:
-                all_results, has_more = search_by_tag(query, min_bookmarks, start_page, sort_order, 9999, tag_mode, r18_mode=r18_mode)
+                def _tag_fn(page):
+                    return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode)
+                results, next_cursor, has_more = paginated_search(_tag_fn, query_params, ITEMS_PER_PAGE, cursor_data)
         else:
-            if not query.isdigit():
+            if not cursor_str and not query.isdigit():
                 return jsonify({'error': '画师ID必须为数字'}), 400
-            all_results, has_more = search_by_user(query, min_bookmarks, start_page, hide_r18=(r18_mode == 'safe'))
+            def _user_fn(page):
+                return search_by_user(query, min_bookmarks, page, hide_r18=(r18_mode == 'safe'))
+            results, next_cursor, has_more = paginated_search(_user_fn, query_params, ITEMS_PER_PAGE, cursor_data)
     except PixivAuthError as e:
         logger.warning(f'搜索认证失败：{e}')
         return jsonify({'error': 'Cookie 已过期，请更新 cookies.txt 后重试'}), 401
@@ -476,9 +499,13 @@ def search() -> Response:
         return jsonify({'error': f'缺少文件: {e}'}), 500
     except Exception as e:
         logger.error(f'搜索失败：{e}', exc_info=True)
-        return jsonify({'error': f'搜索出错: {e}'}), 500
+        return jsonify({'error': '搜索服务暂时不可用，请稍后重试'}), 502
 
-    return jsonify({'results': all_results, 'has_more': has_more})
+    return jsonify({
+        'results': results,
+        'cursor': next_cursor,
+        'has_more': has_more,
+    })
 
 
 @app.route('/api/following')
