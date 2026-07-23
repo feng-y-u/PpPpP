@@ -1,8 +1,21 @@
 import json
 import os
 import platform
+import secrets
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 游标签名密钥
+_instance_dir = os.path.join(BASE_DIR, 'instance')
+_cursor_secret_path = os.path.join(_instance_dir, '.cursor_secret')
+if os.path.exists(_cursor_secret_path):
+    with open(_cursor_secret_path) as _f:
+        CURSOR_SECRET = _f.read().strip()
+else:
+    CURSOR_SECRET = secrets.token_hex(32)
+    os.makedirs(_instance_dir, exist_ok=True)
+    with open(_cursor_secret_path, 'w') as _f:
+        _f.write(CURSOR_SECRET)
 
 # ── .env 文件加载 ──
 _dotenv = os.path.join(BASE_DIR, '.env')
@@ -49,6 +62,9 @@ PAGE_DOWNLOAD_INTERVAL = 3 # 多页作品页面间下载间隔（秒）
 # 搜索设置
 MAX_BOOKMARKS_DEFAULT = 0  # 默认最低收藏数
 
+# 翻页设置
+ITEMS_PER_PAGE = 24            # 每页展示作品数 (1-60)
+
 # 自动关注抓取
 AUTO_FOLLOW_INTERVAL = 600   # 检查间隔（秒），0 禁用
 AUTO_FOLLOW_DOWNLOAD = False # 是否自动下载新作品
@@ -84,6 +100,7 @@ if os.path.exists(_settings_path):
             'auto_follow_download': 'AUTO_FOLLOW_DOWNLOAD',
             'fetch_detail_workers': 'FETCH_DETAIL_WORKERS',
             'medium_image_size': 'MEDIUM_IMAGE_SIZE',
+            'items_per_page': 'ITEMS_PER_PAGE',
         }
         for _json_key, _const_name in _key_map.items():
             if _json_key in _overrides and _overrides[_json_key] != '':
