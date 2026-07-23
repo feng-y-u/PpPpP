@@ -5,7 +5,6 @@ import os
 import random
 import re
 import time
-import uuid
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,8 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from config import (
     COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY, SSL_VERIFY, PIXIV_USERNAME, PIXIV_PASSWORD,
-    PIXIV_REFRESH_TOKEN,
+    PROXY, SSL_VERIFY,
 )
 from models import Illust, BlockedTag, get_session, safe_commit
 
@@ -35,65 +33,20 @@ _cookie_value = ''
 _pixiv_hostname = urlparse(PIXIV_BASE_URL).hostname or 'www.pixiv.net'
 
 
-_logged_in_once = False
+class PixivAuthError(Exception):
+    """认证失败：Cookie 过期或无效。"""
 
 
-def _web_login() -> bool:
-    """通过 Pixiv 网页登录获取 PHPSESSID，写入 cookies.txt。返回是否成功。"""
-    global _cookie_value, _cookie_mtime
-
-    if not (PIXIV_USERNAME and PIXIV_PASSWORD):
-        return False
-
-    s = requests.Session()
-    s.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'})
-
-    try:
-        resp = s.get('https://accounts.pixiv.net/login', timeout=15)
-        post_key = ''
-        m = re.search(r'"post_key":"([^"]+)"', resp.text)
-        if m: post_key = m.group(1)
-        if not post_key:
-            m = re.search(r'name="post_key" value="([^"]+)"', resp.text)
-            if m: post_key = m.group(1)
-
-        resp2 = s.post('https://accounts.pixiv.net/api/login', data={
-            'pixiv_id': PIXIV_USERNAME,
-            'password': PIXIV_PASSWORD,
-            'post_key': post_key,
-            'return_to': 'https://www.pixiv.net/',
-        }, allow_redirects=False, timeout=15)
-
-        if resp2.status_code in (301, 302, 307, 308):
-            s.get(resp2.headers['Location'], timeout=15)
-
-        phpsessid = ''
-        for c in s.cookies:
-            if 'PHPSESSID' in c.name:
-                phpsessid = c.value
-                break
-
-        if not phpsessid:
-            logger.warning('登录成功但无 PHPSESSID')
-            return False
-
-        with open(COOKIE_PATH, 'w') as f:
-            f.write(f'PHPSESSID={phpsessid}\n')
-        _cookie_value = phpsessid
-        _cookie_mtime = os.path.getmtime(COOKIE_PATH)
-        logger.info('PHPSESSID 自动登录成功')
-        return True
-
-    except Exception as e:
-        logger.warning(f'网页登录失败: {e}')
-        return False
+def _is_auth_error(msg: str) -> bool:
+    for kw in ('認証', 'auth', 'login', 'ログイン', 'session', 'expired'):
+        if kw.lower() in msg.lower():
+            return True
+    return False
 
 
 def _load_cookie() -> None:
-    global _cookie_mtime, _cookie_value, _logged_in_once
+    global _cookie_mtime, _cookie_value
     if not os.path.exists(COOKIE_PATH):
-        if _web_login():
-            return
         raise FileNotFoundError(f'Cookie file not found: {COOKIE_PATH}')
     mtime = os.path.getmtime(COOKIE_PATH)
     if mtime != _cookie_mtime:
@@ -104,94 +57,19 @@ def _load_cookie() -> None:
         else:
             _cookie_value = raw
         _cookie_mtime = mtime
-        _logged_in_once = True
-
-
-# ── OAuth ──
-
-PIXIV_CLIENT_ID = 'MOBrBDS8blbauoSck0ZfDbtuzpyT'
-PIXIV_CLIENT_SECRET = 'lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj'
-
-_token_data = {}  # { 'access_token': str, 'refresh_token': str, 'expires_at': float }
-_device_token = str(uuid.uuid4())
-
-
-def _oauth_refresh() -> None:
-    """使用 refresh_token 获取/刷新 access_token。
-    优先使用 PIXIV_REFRESH_TOKEN（来自 .env），其次使用内存中的 refresh_token。
-    """
-    global _token_data
-    rt = PIXIV_REFRESH_TOKEN or _token_data.get('refresh_token', '')
-    if not rt:
-        raise ValueError('No refresh_token available')
-
-    try:
-        resp = requests.post('https://oauth.secure.pixiv.net/auth/token', data={
-            'client_id': PIXIV_CLIENT_ID,
-            'client_secret': PIXIV_CLIENT_SECRET,
-            'grant_type': 'refresh_token',
-            'refresh_token': rt,
-            'device_token': _device_token,
-        }, verify=SSL_VERIFY, timeout=(5, 15))
-        resp.raise_for_status()
-        body = resp.json()
-        _token_data = {
-            'access_token': body['access_token'],
-            'refresh_token': body.get('refresh_token', rt),
-            'expires_at': time.time() + body.get('expires_in', 3600),
-        }
-        logger.info('OAuth token refreshed')
-    except Exception as e:
-        logger.error(f'OAuth refresh failed: {e}')
-        _token_data = {}
-        raise
-
-
-def _ensure_token() -> None:
-    """确保存在有效的 access_token。"""
-    if not _token_data:
-        _oauth_refresh()
-    elif _token_data['expires_at'] - time.time() < 300:  # 5 min buffer
-        _oauth_refresh()
-
-
-class PixivSession(requests.Session):
-    """检测 401 后自动 refresh OAuth token 并重试一次。"""
-
-    def request(self, method, url, **kwargs):
-        resp = super().request(method, url, **kwargs)
-        if resp.status_code == 401 and (PIXIV_REFRESH_TOKEN or _token_data.get('refresh_token')):
-            logger.info('API 返回 401，刷新 OAuth Token')
-            try:
-                _ensure_token()
-                self.headers.update({'Authorization': f'Bearer {_token_data["access_token"]}'})
-                resp = super().request(method, url, **kwargs)
-            except Exception:
-                logger.warning('Token 刷新失败')
-        return resp
 
 
 def _build_session() -> requests.Session:
-    s = PixivSession()
+    s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         'Referer': f'{PIXIV_BASE_URL}/',
         'Accept-Language': 'ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7',
     })
 
-    oauth_ok = False
-    if PIXIV_REFRESH_TOKEN:
-        try:
-            _ensure_token()
-            s.headers.update({'Authorization': f'Bearer {_token_data["access_token"]}'})
-            oauth_ok = True
-        except Exception:
-            logger.warning('OAuth refresh_token 失效，回退到 Cookie 认证')
-
-    if not oauth_ok:
-        _load_cookie()
-        s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
-        s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
+    _load_cookie()
+    s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
+    s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
 
     s.verify = SSL_VERIFY
 
@@ -590,10 +468,16 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
         search_data = resp.json()
     except requests.RequestException as e:
         logger.error(f'Search API failed: {e}')
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (401, 403):
+            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
         return [], False
 
     if search_data.get('error'):
-        logger.error(f'Search API error: {search_data.get("message")}')
+        msg = str(search_data.get('message', ''))
+        logger.error(f'Search API error: {msg}')
+        if _is_auth_error(msg):
+            raise PixivAuthError(msg)
         return [], False
 
     illusts_data = (
@@ -646,10 +530,16 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
         data = resp.json()
     except requests.RequestException as e:
         logger.error(f'Discovery API failed: {e}')
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (401, 403):
+            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
         return [], False
 
     if data.get('error'):
-        logger.error(f'Discovery API error: {data.get("message")}')
+        msg = str(data.get('message', ''))
+        logger.error(f'Discovery API error: {msg}')
+        if _is_auth_error(msg):
+            raise PixivAuthError(msg)
         return [], False
 
     body = data.get('body', {})
@@ -691,10 +581,16 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
         profile_data = resp.json()
     except requests.RequestException as e:
         logger.error(f'User profile API failed: {e}')
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (401, 403):
+            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
         return [], False
 
     if profile_data.get('error'):
-        logger.error(f'User profile API error: {profile_data.get("message")}')
+        msg = str(profile_data.get('message', ''))
+        logger.error(f'User profile API error: {msg}')
+        if _is_auth_error(msg):
+            raise PixivAuthError(msg)
         return [], False
 
     all_illusts = profile_data.get('body', {}).get('illusts', {})
@@ -742,10 +638,16 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
         data = resp.json()
     except requests.RequestException as e:
         logger.error(f'Follow latest API failed: {e}')
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (401, 403):
+            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
         return [], False
 
     if data.get('error'):
-        logger.error(f'Follow latest API error: {data.get("message")}')
+        msg = str(data.get('message', ''))
+        logger.error(f'Follow latest API error: {msg}')
+        if _is_auth_error(msg):
+            raise PixivAuthError(msg)
         return [], False
 
     body = data.get('body', {})

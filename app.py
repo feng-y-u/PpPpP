@@ -30,10 +30,10 @@ from config import (
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     MEDIUM_IMAGE_SIZE,
     SETTINGS_PASSWORD,
-    SSL_VERIFY,
+    SSL_VERIFY, COOKIE_PATH,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -467,6 +467,9 @@ def search() -> Response:
             if not query.isdigit():
                 return jsonify({'error': '画师ID必须为数字'}), 400
             all_results, has_more = search_by_user(query, min_bookmarks, start_page, hide_r18=(r18_mode == 'safe'))
+    except PixivAuthError as e:
+        logger.warning(f'搜索认证失败：{e}')
+        return jsonify({'error': 'Cookie 已过期，请更新 cookies.txt 后重试'}), 401
     except FileNotFoundError as e:
         logger.error(f'搜索失败 - 文件未找到：{e}')
         return jsonify({'error': f'缺少文件: {e}'}), 500
@@ -487,7 +490,11 @@ def api_following() -> Response:
     r18_mode = request.args.get('r18_mode', 'all')
     if r18_mode not in ('all', 'safe'):
         r18_mode = 'all'
-    results, has_more = fetch_following(page, r18_mode=r18_mode)
+    try:
+        results, has_more = fetch_following(page, r18_mode=r18_mode)
+    except PixivAuthError as e:
+        logger.warning(f'关注列表认证失败：{e}')
+        return jsonify({'error': 'Cookie 已过期，请更新 cookies.txt 后重试'}), 401
     return jsonify({'results': results, 'has_more': has_more})
 
 
@@ -1281,6 +1288,15 @@ def api_settings_post() -> Response:
 
     body = request.get_json(silent=True) or {}
     current = _load_settings()
+
+    # Cookie 字段特殊处理：写入 cookies.txt，不存入 settings.json
+    cookie_val = body.pop('cookie', '').strip()
+    if cookie_val:
+        os.makedirs(os.path.dirname(COOKIE_PATH), exist_ok=True)
+        with open(COOKIE_PATH, 'w') as f:
+            f.write(f'PHPSESSID={cookie_val}\n')
+        logger.info('cookies.txt 已通过设置页更新')
+
     # 仅合并已知的配置键
     for key in _SETTINGS_DEFAULTS:
         if key in body:

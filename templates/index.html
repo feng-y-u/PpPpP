@@ -369,6 +369,14 @@
     <p class="small">尝试其他关键词或降低收藏数下限</p>
   </div>
 
+  <!-- Auth Error State -->
+  <div id="authErrorState" class="empty-state" style="display:none;">
+    <svg viewBox="0 0 24 24" fill="var(--danger)"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+    <h5 style="color:var(--danger);">认证失败</h5>
+    <p class="small">Cookie 已过期或无效，请检查 cookies.txt 文件。</p>
+    <p class="small" style="color:var(--text-muted);">在浏览器中登录 Pixiv 后，将 PHPSESSID Cookie 值复制到项目根目录的 cookies.txt 文件中。</p>
+  </div>
+
 </div>
 
 <!-- Loading Indicator -->
@@ -523,6 +531,7 @@ async function doSearch() {
   saveSearchState([]);
   $('#masonryGrid').innerHTML = '';
   $('#emptyState').style.display = 'none';
+  $('#authErrorState').style.display = 'none';
   $('#loadMoreWrap').style.display = 'none';
   showToolbar(false);
   batchInProgress = false;
@@ -535,6 +544,12 @@ async function doSearch() {
 
     const resp = await fetch(url);
     if (!resp.ok) {
+      if (resp.status === 401) {
+        showToast('Cookie 已过期，请更新 cookies.txt', true);
+        $('#authErrorState').style.display = 'block';
+        $('#emptyState').style.display = 'none';
+        return;
+      }
       showToast(resp.status===429 ? '请求过于频繁' : ((await resp.json().catch(()=>({}))).error||'搜索失败'), true);
       return;
     }
@@ -568,7 +583,7 @@ async function loadMore() {
     else url = `/search?${new URLSearchParams({type:p.type,query:p.query,min_bookmarks:p.minBookmarks,page:String(currentPage),sort:p.sort,tag_mode:p.tagMode,r18_mode:p.r18Mode||'all'})}`;
 
     const resp = await fetch(url);
-    if (!resp.ok) { showToast('加载失败', true); return; }
+    if (!resp.ok) { if (resp.status === 401) showToast('Cookie 已过期，请更新 cookies.txt', true); else showToast('加载失败', true); return; }
     const data = await resp.json();
 
     if (!data.results.length) { hasMorePages = false; updateLoadMore(); return; }

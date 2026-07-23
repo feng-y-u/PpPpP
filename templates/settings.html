@@ -38,6 +38,11 @@
         <input class="form-control form-control-sm" id="proxy" type="text" placeholder="如 http://127.0.0.1:7890，留空禁用">
         <div class="form-text">HTTP/SOCKS5 代理，修改后需重启生效</div>
       </div>
+      <div class="mb-0">
+        <label class="form-label" for="cookie">Pixiv Cookie</label>
+        <input class="form-control form-control-sm" id="cookie" type="password" placeholder="输入 PHPSESSID 值，保存后立即生效" autocomplete="off">
+        <div class="form-text">在浏览器中登录 Pixiv 后，将 PHPSESSID 粘贴至此。只写不入库，页面不会回显</div>
+      </div>
     </div>
   </div>
 
@@ -195,6 +200,9 @@ $('#saveBtn').addEventListener('click', async () => {
       body[key] = el.value;
     }
   });
+
+  const cookieVal = $('#cookie').value.trim();
+  if (cookieVal) body.cookie = cookieVal;
 
   try {
     const r = await fetch('/api/settings', {
