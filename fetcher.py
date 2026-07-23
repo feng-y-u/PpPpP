@@ -73,7 +73,7 @@ def decode_cursor(cursor: str) -> dict | None:
         return None
 
 
-_MAX_SCAN_PAGES = 30
+_MAX_SCAN_PAGES = 10
 
 
 def paginated_search(search_fn, query_params: dict, items_per_page: int,
