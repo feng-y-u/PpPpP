@@ -73,7 +73,7 @@ def decode_cursor(cursor: str) -> dict | None:
         return None
 
 
-_MAX_SCAN_PAGES = 5
+_MAX_SCAN_PAGES = 10
 _CURSOR_TTL = 305  # 5 分钟 + 5 秒缓冲
 
 
@@ -140,12 +140,17 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
     batch = collected[:items_per_page]
 
     # 计算下一页 cursor：遍历 page_sizes 找到 batch 结束位置
+    cursor_pixiv_page = cursor_data.get('pixiv_page', 1) if cursor_data else 1
+    cursor_skip = cursor_data.get('skip_count', 0) if cursor_data else 0
     next_pixiv_page = effective_start
     next_skip = 0
     cumulative = 0
     for sz in page_sizes:
         if cumulative + sz > len(batch):
             next_skip = len(batch) - cumulative
+            # 如果还在游标的同一页内，累加之前的偏移
+            if next_pixiv_page == cursor_pixiv_page:
+                next_skip += cursor_skip
             break
         cumulative += sz
         next_pixiv_page += 1
