@@ -468,7 +468,13 @@ function jumpToPage(pageNum) {
 }
 
 $('#prevPageBtn').addEventListener('click', () => jumpToPage(currentPage - 1));
-$('#nextPageBtn').addEventListener('click', () => loadNextPage());
+$('#nextPageBtn').addEventListener('click', () => {
+  if (currentPage < loadedPages.length) {
+    jumpToPage(currentPage + 1);
+  } else {
+    loadNextPage();
+  }
+});
 
 async function loadNextPage() {
   if (currentSearchType === 'following') {
