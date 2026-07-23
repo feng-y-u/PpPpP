@@ -438,6 +438,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
     to_fetch: list[int] = []           # 同步拉详情（非 defer 路径）
     to_fill: list[int] = []            # 后台补全（defer 路径新写入 + 已有但缺原图）
     to_refetch: list[int] = []         # 已有记录但 bookmark_count=0，需同步补全后重新判断过滤
+    new_illusts: list[Illust] = []     # defer 路径批量写入
 
     for item in items:
         pixiv_id = id_extractor(item)
@@ -466,9 +467,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             if isinstance(item, dict) and item.get('bookmarkCount', 0) < min_bookmarks:
                 continue
             illust = illust_factory(item, None)
-            db.add(illust)
-            db.flush()
-            results.append(illust.to_dict())
+            new_illusts.append(illust)
             to_fill.append(pixiv_id)
         else:
             to_fetch.append(pixiv_id)
@@ -492,6 +491,12 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             if detail.get('description') and not existing.description:
                 existing.description = detail['description']
             results.append(existing.to_dict())
+
+    if new_illusts:
+        db.add_all(new_illusts)
+        db.flush()
+        for illust in new_illusts:
+            results.append(illust.to_dict())
 
     if defer_details:
         if to_fill:
