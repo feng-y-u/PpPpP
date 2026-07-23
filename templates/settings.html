@@ -91,6 +91,11 @@
         <input class="form-control form-control-sm" id="max_bookmarks_default" type="number" min="0" style="max-width:140px;">
         <div class="form-text">搜索时默认的最低收藏数过滤 (0 表示不限制)</div>
       </div>
+      <div class="mb-0">
+        <label class="form-label" for="items_per_page">每页展示件数</label>
+        <input class="form-control form-control-sm" id="items_per_page" type="number" min="1" max="60" style="max-width:140px;">
+        <div class="form-text">搜索结果每页展示数量 (1-60)，修改后搜索自动重置</div>
+      </div>
     </div>
   </div>
 
@@ -163,7 +168,7 @@ const csrfToken = {{ csrf_token | tojson }};
 
 const FIELD_MAP = [
   'proxy', 'download_max_workers', 'fetch_detail_workers', 'medium_image_size',
-  'per_page', 'search_pages',
+  'per_page', 'search_pages', 'items_per_page',
   'max_bookmarks_default', 'auto_follow_interval', 'auto_follow_download',
 ];
 
