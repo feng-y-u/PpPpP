@@ -67,13 +67,13 @@ cursor = base64(json) + "." + HMAC-SHA256(base64(json), CURSOR_SECRET)
 
 ### 生命周期
 
-- 有效期 5 分钟，超时返回 400 `"搜索已过期，请重新搜索"`
+- 有效期 5 分钟 + 5 秒缓冲（`now - created_at > 305`），超时返回 400 `"搜索已过期，请重新搜索"`
 - `has_more=false` 时返回 `cursor: null`，前端据此禁用"下一页"
 - 验签失败或格式错误返回 400，前端保留当前缓存和游标不变
 
 ### 过期后的前端行为
 
-收到 400 且错误为"搜索已过期"时，自动清空 `loadedPages`、`nextCursor`，重置为第 1 页并发起无游标新请求。
+前端根据 `error_code` 而非文案判断行为。收到 `error_code: "CURSOR_EXPIRED"` 时，自动清空 `loadedPages`、`nextCursor`，重置为第 1 页并发起无游标新请求。其他 400 错误（`CURSOR_INVALID` 等）仅 toast 提示，保留缓存和游标不变。
 
 ---
 
@@ -112,12 +112,14 @@ next_cursor = encode_cursor(result) if has_more else None
 
 ## 错误处理
 
-| 场景 | HTTP | 响应 | 前端行为 |
-|------|------|------|----------|
-| 游标验签失败 | 400 | `"游标无效"` | toast，保留缓存和游标 |
-| 游标格式错误 | 400 | `"游标格式错误"` | toast，保留缓存和游标 |
-| 游标超 5 分钟 | 400 | `"搜索已过期，请重新搜索"` | toast + 自动重置重新搜索 |
-| Pixiv API 异常 | 502 | `"搜索服务暂时不可用，请稍后重试"` | toast，保留缓存和游标 |
+后端 400 响应统一带 `error_code` 字段，前端按 code 分支，不匹配文案。
+
+| 场景 | HTTP | error_code | 响应 | 前端行为 |
+|------|------|------------|------|----------|
+| 游标验签失败 | 400 | `CURSOR_INVALID` | `"游标无效"` | toast，保留缓存和游标 |
+| 游标格式错误 | 400 | `CURSOR_INVALID` | `"游标格式错误"` | toast，保留缓存和游标 |
+| 游标超时 | 400 | `CURSOR_EXPIRED` | `"搜索已过期，请重新搜索"` | toast + 自动重置重新搜索 |
+| Pixiv API 异常 | 502 | — | `"搜索服务暂时不可用，请稍后重试"` | toast，保留缓存和游标 |
 
 ---
 
@@ -132,7 +134,12 @@ next_cursor = encode_cursor(result) if has_more else None
 
 ### 搜索重置
 
-切换搜索条件或表单提交时：清空 `loadedPages`、`nextCursor=null`、`currentPage=1`、发起无游标请求。
+触发条件：
+- 切换搜索条件或表单提交
+- 设置页修改 `items_per_page` 保存后，前端自动重置搜索并 toast "每页件数已变更，搜索已重置"
+- 收到 `CURSOR_EXPIRED` 错误码
+
+重置操作：清空 `loadedPages`、`nextCursor=null`、`currentPage=1`、发起无游标请求。
 
 ---
 
