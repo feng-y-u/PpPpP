@@ -74,7 +74,6 @@ def decode_cursor(cursor: str) -> dict | None:
 
 
 _MAX_SCAN_PAGES = 30
-_CURSOR_TTL = 305  # 5 分钟 + 5 秒缓冲
 
 
 def paginated_search(search_fn, query_params: dict, items_per_page: int,
