@@ -541,8 +541,8 @@ async function doSearch() {
   const sort = $('#sortOrder').value || 'date_d';
   const tagMode = $('#tagMode').value || 'or';
   const r18Mode = $('#r18Mode').value;
-  currentSearchType = type;
   resetPagination();
+  currentSearchType = type;
   $('#masonryGrid').innerHTML = '';
   $('#emptyState').style.display = 'none';
   $('#authErrorState').style.display = 'none';
