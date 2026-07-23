@@ -158,10 +158,10 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
     has_more = remaining > 0 or (pixiv_has_more and pages_scanned >= _MAX_SCAN_PAGES)
 
     next_cursor = None
-    if has_more and batch:
+    if has_more:
         next_cursor = encode_cursor({
             **query_params,
-            'pixiv_page': next_pixiv_page,
+            'pixiv_page': next_pixiv_page if batch else pixiv_page,
             'skip_count': next_skip,
             'created_at': int(time.time()),
         })

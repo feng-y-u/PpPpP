@@ -486,7 +486,7 @@ async function loadNextPage() {
       const resp = await fetch(`/api/following?page=${nextPage}&r18_mode=${r18Mode}`);
       if (!resp.ok) { showToast('加载失败', true); renderPaginationBar(); return; }
       const data = await resp.json();
-      if (!data.results.length) { hasMore = false; renderPaginationBar(); return; }
+      if (!data.results.length) { hasMore = data.has_more || false; renderPaginationBar(); return; }
       loadedPages.push(data.results);
       hasMore = data.has_more || false;
       currentPage = loadedPages.length;
@@ -521,7 +521,7 @@ async function loadNextPage() {
     }
     const data = await resp.json();
     if (!data.results.length) {
-      hasMore = false;
+      hasMore = data.has_more || false;
       renderPaginationBar();
       return;
     }
