@@ -428,6 +428,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             item_tags = _parse_tags(item.get('tags', [])) if isinstance(item, dict) else []
             if _is_blocked(item_tags, blocked) or (hide_r18 and _is_r18(item_tags)):
                 continue
+            if isinstance(item, dict) and item.get('bookmarkCount', 0) < min_bookmarks:
+                continue
             illust = illust_factory(item, None)
             db.add(illust)
             db.flush()
