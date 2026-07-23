@@ -30,9 +30,10 @@ from config import (
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     MEDIUM_IMAGE_SIZE,
     SETTINGS_PASSWORD,
-    SSL_VERIFY, COOKIE_PATH,
+    SSL_VERIFY,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
+import fetcher
 from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError
 
 logging.basicConfig(
@@ -1289,12 +1290,14 @@ def api_settings_post() -> Response:
     body = request.get_json(silent=True) or {}
     current = _load_settings()
 
-    # Cookie 字段特殊处理：写入 cookies.txt，不存入 settings.json
+    # Cookie 字段特殊处理：写入项目根目录 cookies.txt，立即更新内存状态
     cookie_val = body.pop('cookie', '').strip()
     if cookie_val:
-        os.makedirs(os.path.dirname(COOKIE_PATH), exist_ok=True)
-        with open(COOKIE_PATH, 'w') as f:
+        cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
+        with open(cookie_path, 'w') as f:
             f.write(f'PHPSESSID={cookie_val}\n')
+        fetcher._cookie_value = cookie_val
+        fetcher._cookie_mtime = os.path.getmtime(cookie_path)
         logger.info('cookies.txt 已通过设置页更新')
 
     # 仅合并已知的配置键
