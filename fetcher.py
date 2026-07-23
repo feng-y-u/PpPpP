@@ -73,6 +73,70 @@ def decode_cursor(cursor: str) -> dict | None:
         return None
 
 
+_MAX_SCAN_PAGES = 10
+_CURSOR_TTL = 305  # 5 分钟 + 5 秒缓冲
+
+
+def paginated_search(search_fn, query_params: dict, items_per_page: int,
+                     cursor_data: dict | None = None) -> tuple:
+    """游标驱动的分页搜索。
+
+    Args:
+        search_fn: 搜索函数，签名为 (page: int) -> tuple[list[dict], bool]
+        query_params: {type, query, sort, tag_mode, r18_mode, min_bookmarks}
+        items_per_page: 每页件数
+        cursor_data: 解码后的游标，None 表示新搜索
+
+    Returns:
+        (results, next_cursor, has_more)
+    """
+    yielded_total = cursor_data.get('yielded', 0) if cursor_data else 0
+    pixiv_page = 1
+    collected: list[dict] = []
+    pages_scanned = 0
+    pixiv_has_more = True
+
+    while len(collected) - yielded_total < items_per_page and pages_scanned < _MAX_SCAN_PAGES:
+        try:
+            results, has_more = search_fn(page=pixiv_page)
+        except PixivAuthError:
+            raise
+        except Exception as e:
+            logger.error(f'paginated_search: page {pixiv_page} failed: {e}')
+            break
+
+        if not results and not has_more:
+            pixiv_has_more = False
+            break
+
+        collected.extend(results)
+        pages_scanned += 1
+        pixiv_page += 1
+
+        if not has_more:
+            pixiv_has_more = False
+            break
+
+    if pages_scanned == _MAX_SCAN_PAGES and len(collected) - yielded_total < items_per_page:
+        logger.info(f'paginated_search: 扫描 {_MAX_SCAN_PAGES} 页未攒够 {items_per_page} 件')
+
+    batch = collected[yielded_total : yielded_total + items_per_page]
+    new_yielded = yielded_total + len(batch)
+
+    remaining = len(collected) - new_yielded
+    has_more = remaining > 0 or (pixiv_has_more and pages_scanned >= _MAX_SCAN_PAGES)
+
+    next_cursor = None
+    if has_more and batch:
+        next_cursor = encode_cursor({
+            **query_params,
+            'yielded': new_yielded,
+            'created_at': int(time.time()),
+        })
+
+    return batch, next_cursor, has_more
+
+
 def _load_cookie() -> None:
     global _cookie_mtime, _cookie_value
     if not os.path.exists(COOKIE_PATH):
