@@ -73,7 +73,7 @@ def decode_cursor(cursor: str) -> dict | None:
         return None
 
 
-_MAX_SCAN_PAGES = 10
+_MAX_SCAN_PAGES = 5
 _CURSOR_TTL = 305  # 5 分钟 + 5 秒缓冲
 
 
@@ -529,7 +529,8 @@ def _illust_from_detail(item: int, detail: dict) -> Illust:
 
 def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
                   sort_order: str = 'popular_d', max_pages: int = 10,
-                  tag_mode: str = 'or', r18_mode: str = 'all') -> tuple[list[dict], bool]:
+                  tag_mode: str = 'or', r18_mode: str = 'all',
+                  defer_details: bool = False) -> tuple[list[dict], bool]:
     """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。"""
     if page > max_pages:
         return [], False
@@ -584,7 +585,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
         _cache_put(cache_key, ([], False))
         return [], False
 
-    defer = (min_bookmarks == 0)
+    defer = defer_details or (min_bookmarks == 0)
     with get_session() as db:
         blocked = _get_blocked_tags(db)
         results = _process_items(
@@ -604,7 +605,8 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
 
 def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
-                     min_bookmarks: int = 0, r18_mode: str = 'all') -> tuple[list[dict], bool]:
+                     min_bookmarks: int = 0, r18_mode: str = 'all',
+                     defer_details: bool = False) -> tuple[list[dict], bool]:
     """浏览 Pixiv 发现页（全部作品），无需指定标签。"""
     cache_key = f'disc|p={page}|s={sort_order}|r={r18_mode}|mb={min_bookmarks}'
     cached = _cache_get(cache_key)
@@ -646,7 +648,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE) if total else 1
     has_more = page < total_pages
 
-    defer = (min_bookmarks == 0)
+    defer = defer_details or (min_bookmarks == 0)
     with get_session() as db:
         blocked = _get_blocked_tags(db)
         results = _process_items(

@@ -479,11 +479,11 @@ def search() -> Response:
                 return jsonify({'error': '搜索关键词过长'}), 400
             if not query:
                 def _browse_fn(page):
-                    return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode)
+                    return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode, defer_details=True)
                 results, next_cursor, has_more = paginated_search(_browse_fn, query_params, ITEMS_PER_PAGE, cursor_data)
             else:
                 def _tag_fn(page):
-                    return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode)
+                    return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode, defer_details=True)
                 results, next_cursor, has_more = paginated_search(_tag_fn, query_params, ITEMS_PER_PAGE, cursor_data)
         else:
             if not cursor_str and not query.isdigit():
