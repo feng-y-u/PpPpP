@@ -91,13 +91,14 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
         (results, next_cursor, has_more)
     """
     pixiv_page = cursor_data.get('pixiv_page', 1) if cursor_data else 1
-    skip_first = cursor_data.get('skip_count', 0) if cursor_data else 0
+    skip_count = cursor_data.get('skip_count', 0) if cursor_data else 0
     collected: list[dict] = []
-    page_sizes: list[int] = []  # 每页结果数，用于计算下一页游标
+    page_sizes: list[int] = []
     pages_scanned = 0
     pixiv_has_more = True
+    effective_start = pixiv_page  # 实际开始收集的页号（跳过整页后会滞后）
 
-    while len(collected) < items_per_page + skip_first and pages_scanned < _MAX_SCAN_PAGES:
+    while len(collected) < items_per_page and pages_scanned < _MAX_SCAN_PAGES:
         try:
             results, has_more = search_fn(page=pixiv_page)
         except PixivAuthError:
@@ -110,6 +111,20 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
             pixiv_has_more = False
             break
 
+        if skip_count > 0 and results:
+            if len(results) <= skip_count:
+                skip_count -= len(results)
+                pages_scanned += 1
+                pixiv_page += 1
+                effective_start = pixiv_page
+                if not has_more:
+                    pixiv_has_more = False
+                    break
+                continue
+            else:
+                results = results[skip_count:]
+                skip_count = 0
+
         collected.extend(results)
         page_sizes.append(len(results))
         pages_scanned += 1
@@ -119,26 +134,23 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
             pixiv_has_more = False
             break
 
-    if pages_scanned == _MAX_SCAN_PAGES and len(collected) - skip_first < items_per_page:
+    if pages_scanned == _MAX_SCAN_PAGES and len(collected) < items_per_page:
         logger.info(f'paginated_search: 扫描 {_MAX_SCAN_PAGES} 页未攒够 {items_per_page} 件')
 
-    # 跳过前 skip_first 件，取 items_per_page 件
-    batch = collected[skip_first : skip_first + items_per_page]
+    batch = collected[:items_per_page]
 
-    # 计算下一页 cursor：找到 batch 结束位置所在的 Pixiv 页和页内偏移
-    start_page = cursor_data.get('pixiv_page', 1) if cursor_data else 1
-    next_pixiv_page = start_page
+    # 计算下一页 cursor：遍历 page_sizes 找到 batch 结束位置
+    next_pixiv_page = effective_start
     next_skip = 0
     cumulative = 0
-    threshold = skip_first + len(batch)
     for sz in page_sizes:
-        if cumulative + sz > threshold:
-            next_skip = threshold - cumulative
+        if cumulative + sz > len(batch):
+            next_skip = len(batch) - cumulative
             break
         cumulative += sz
         next_pixiv_page += 1
 
-    remaining = len(collected) - skip_first - len(batch)
+    remaining = len(collected) - len(batch)
     has_more = remaining > 0 or (pixiv_has_more and pages_scanned >= _MAX_SCAN_PAGES)
 
     next_cursor = None
