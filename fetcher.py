@@ -5,6 +5,10 @@ import os
 import random
 import re
 import time
+import hashlib
+import hmac
+import json
+from base64 import urlsafe_b64encode, urlsafe_b64decode
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,7 +26,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from config import (
     COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY, SSL_VERIFY,
+    PROXY, SSL_VERIFY, CURSOR_SECRET, ITEMS_PER_PAGE,
 )
 from models import Illust, BlockedTag, get_session, safe_commit
 
@@ -42,6 +46,31 @@ def _is_auth_error(msg: str) -> bool:
         if kw.lower() in msg.lower():
             return True
     return False
+
+
+def encode_cursor(data: dict) -> str:
+    payload = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
+    b64 = urlsafe_b64encode(payload.encode()).decode().rstrip('=')
+    sig = hmac.new(CURSOR_SECRET.encode(), b64.encode(), 'sha256').hexdigest()
+    return b64 + '.' + sig
+
+
+def decode_cursor(cursor: str) -> dict | None:
+    try:
+        b64, sig = cursor.rsplit('.', 1)
+    except ValueError:
+        return None
+    expected = hmac.new(CURSOR_SECRET.encode(), b64.encode(), 'sha256').hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        payload = urlsafe_b64decode(b64 + '===').decode()
+    except Exception:
+        return None
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return None
 
 
 def _load_cookie() -> None:
