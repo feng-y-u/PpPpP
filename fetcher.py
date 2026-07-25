@@ -406,6 +406,11 @@ def _cache_put(key: str, value: tuple[list[dict], bool]) -> None:
             _SEARCH_CACHE.popitem(last=False)
 
 
+def clear_search_cache() -> None:
+    with _search_cache_lock:
+        _SEARCH_CACHE.clear()
+
+
 # ── 公共流水线 ──
 
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,

@@ -34,7 +34,7 @@ from config import (
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
 import fetcher
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1258,6 +1258,7 @@ def add_blocked_tag() -> Response:
             return jsonify({'error': '标签已存在'}), 409
         db.add(BlockedTag(tag=tag))
         safe_commit(db)
+        clear_search_cache()
         return jsonify({'status': 'added', 'tag': tag})
 
 
@@ -1270,6 +1271,7 @@ def remove_blocked_tag(tag: str) -> Response:
             return jsonify({'error': '标签不存在'}), 404
         db.delete(entry)
         safe_commit(db)
+        clear_search_cache()
         return jsonify({'status': 'deleted', 'tag': tag})
 
 
