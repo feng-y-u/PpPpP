@@ -458,6 +458,19 @@ def login_submit():
     return jsonify({'error': '密码错误'}), 403
 
 
+@app.after_request
+def _security_headers(resp: Response) -> Response:
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'DENY'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    # 宽松版 CSP：内联 script 抽离到 static/（批次 C）后收紧为 script-src 'self'
+    resp.headers['Content-Security-Policy'] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    )
+    return resp
+
+
 def _original_to_resized(url: str) -> str:
     """Pixiv 原图 URL → 中图（尺寸可配）。"""
     m = re.match(r'(https://i\.pximg\.net/)img-original/img/(.+)\.(\w+)(\?.*)?$', url)

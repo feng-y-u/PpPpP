@@ -117,3 +117,17 @@ class TestOpenDir:
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         assert called == [str(tmp_path)]
+
+
+class TestSecurityHeaders:
+    def test_headers_present(self, client):
+        resp = client.get('/')
+        assert resp.headers['X-Content-Type-Options'] == 'nosniff'
+        assert resp.headers['X-Frame-Options'] == 'DENY'
+        assert resp.headers['Referrer-Policy'] == 'no-referrer'
+        assert "script-src 'self' 'unsafe-inline'" in resp.headers['Content-Security-Policy']
+
+    def test_csp_allows_self_and_data_images(self, client):
+        resp = client.get('/')
+        csp = resp.headers['Content-Security-Policy']
+        assert "img-src 'self' data:" in csp
