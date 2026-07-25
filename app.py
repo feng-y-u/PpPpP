@@ -958,6 +958,11 @@ def api_gallery() -> Response:
         if tag_filter:
             wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value = :tag_filter)')
             params['tag_filter'] = tag_filter
+        if collection_id:
+            wheres.append('illusts.pixiv_id IN (SELECT pixiv_id FROM collection_items WHERE collection_id = :collection_id)')
+            params['collection_id'] = collection_id
+        if favorites_only:
+            wheres.append('is_favorite = 1')
 
         where_clause = ' AND '.join(wheres)
 
@@ -1594,6 +1599,53 @@ def illust_collections(pixiv_id: int) -> Response:
     with get_session() as db:
         items = db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).all()
         return jsonify([item.collection_id for item in items])
+
+
+@app.route('/api/collections/<int:collection_id>/items/batch', methods=['POST'])
+@_csrf_required
+def batch_add_collection_items(collection_id: int) -> Response:
+    body = request.get_json(silent=True) or {}
+    pixiv_ids = body.get('pixiv_ids', [])
+    if not pixiv_ids or not isinstance(pixiv_ids, list):
+        return jsonify({'error': '请提供作品ID列表'}), 400
+    pixiv_ids = [int(pid) for pid in pixiv_ids]
+    with get_session() as db:
+        if not db.query(Collection).filter(Collection.id == collection_id).first():
+            return jsonify({'error': '收藏夹不存在'}), 404
+        added = 0
+        for pid in pixiv_ids:
+            existing = db.query(CollectionItem).filter(
+                CollectionItem.collection_id == collection_id,
+                CollectionItem.pixiv_id == pid,
+            ).first()
+            if not existing:
+                db.add(CollectionItem(collection_id=collection_id, pixiv_id=pid))
+                added += 1
+        safe_commit(db)
+        for pid in pixiv_ids:
+            _sync_is_favorite(pid)
+    return jsonify({'added': added, 'total': len(pixiv_ids)})
+
+
+@app.route('/api/collections/<int:collection_id>/items/batch', methods=['DELETE'])
+@_csrf_required
+def batch_remove_collection_items(collection_id: int) -> Response:
+    body = request.get_json(silent=True) or {}
+    pixiv_ids = body.get('pixiv_ids', [])
+    if not pixiv_ids or not isinstance(pixiv_ids, list):
+        return jsonify({'error': '请提供作品ID列表'}), 400
+    pixiv_ids = [int(pid) for pid in pixiv_ids]
+    with get_session() as db:
+        if not db.query(Collection).filter(Collection.id == collection_id).first():
+            return jsonify({'error': '收藏夹不存在'}), 404
+        removed = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id,
+            CollectionItem.pixiv_id.in_(pixiv_ids),
+        ).delete(synchronize_session='fetch')
+        safe_commit(db)
+        for pid in pixiv_ids:
+            _sync_is_favorite(pid)
+    return jsonify({'removed': removed})
 
 
 # ── 收藏 ──
