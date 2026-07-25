@@ -77,3 +77,22 @@ class TestLogin:
     def test_login_requires_csrf(self, client, auth_enabled):
         resp = client.post('/login', json={'password': 'test-secret'})
         assert resp.status_code == 403
+
+
+class TestSettingsCompat:
+    def test_authed_session_skips_settings_lock(self, client, auth_enabled, monkeypatch):
+        monkeypatch.setattr('app.SETTINGS_PASSWORD', 'settings-pw')
+        token = _get_token(client)
+        client.post('/login', json={'password': 'test-secret'},
+                    headers={'X-CSRF-Token': token})
+        assert client.get('/settings').status_code == 200
+        assert client.get('/api/settings').status_code == 200
+
+    def test_unlock_passthrough_when_authed(self, client, auth_enabled):
+        token = _get_token(client)
+        client.post('/login', json={'password': 'test-secret'},
+                    headers={'X-CSRF-Token': token})
+        token = _get_token(client)
+        resp = client.post('/api/settings/unlock', json={},
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200

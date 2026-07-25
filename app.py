@@ -398,7 +398,8 @@ def _csrf_required(f: Callable) -> Callable:
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get('X-CSRF-Token', '')
-        if not token or token != session.get('_csrf_token', ''):
+        expected = session.get('_csrf_token', '')
+        if not token or not expected or not hmac.compare_digest(token, expected):
             return jsonify({'error': 'CSRF校验失败'}), 403
         return f(*args, **kwargs)
     return decorated
@@ -1353,9 +1354,16 @@ def _load_settings() -> dict:
     return dict(_SETTINGS_DEFAULTS)
 
 
+def _settings_locked() -> bool:
+    """设置页门禁：已全局登录则直通；否则按旧 SETTINGS_PASSWORD 流程。"""
+    if session.get('authed'):
+        return False
+    return bool(SETTINGS_PASSWORD) and not session.get('settings_unlocked')
+
+
 @app.route('/settings')
 def settings_page() -> str:
-    if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
+    if _settings_locked():
         return render_template('settings_unlock.html', csrf_token=_get_csrf_token())
     return render_template('settings.html', csrf_token=_get_csrf_token())
 
@@ -1364,8 +1372,10 @@ def settings_page() -> str:
 @_rate_limit(max_attempts=5, window=60)
 @_csrf_required
 def settings_unlock() -> Response:
+    if session.get('authed') or not SETTINGS_PASSWORD:
+        return jsonify({'ok': True})
     body = request.get_json(silent=True) or {}
-    if body.get('password') == SETTINGS_PASSWORD:
+    if hmac.compare_digest(str(body.get('password', '')).encode(), SETTINGS_PASSWORD.encode()):
         session['settings_unlocked'] = True
         return jsonify({'ok': True})
     return jsonify({'error': '密码错误'}), 403
@@ -1373,7 +1383,7 @@ def settings_unlock() -> Response:
 
 @app.route('/api/settings', methods=['GET'])
 def api_settings_get() -> Response:
-    if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
+    if _settings_locked():
         return jsonify({'error': '需要密码访问'}), 403
     return jsonify(_load_settings())
 
@@ -1381,7 +1391,7 @@ def api_settings_get() -> Response:
 @app.route('/api/settings', methods=['POST'])
 @_csrf_required
 def api_settings_post() -> Response:
-    if SETTINGS_PASSWORD and not session.get('settings_unlocked'):
+    if _settings_locked():
         return jsonify({'error': '需要密码访问'}), 403
 
     body = request.get_json(silent=True) or {}
