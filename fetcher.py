@@ -183,7 +183,12 @@ def _load_cookie() -> None:
         _cookie_mtime = mtime
 
 
-def _build_session() -> requests.Session:
+def build_pixiv_session() -> requests.Session:
+    """构造访问 Pixiv 的 requests.Session（UA/Referer/Cookie/PROXY/SSL_VERIFY/重试 齐全）。
+
+    所有指向 Pixiv 的请求（搜索、详情、下载、缩略图代理）必须经由此工厂，
+    禁止裸建 requests.Session()（2026-07-25 审查 P0-2）。
+    """
     s = requests.Session()
     s.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -205,6 +210,10 @@ def _build_session() -> requests.Session:
     adapter.max_retries = retry
     s.mount('https://', adapter)
     return s
+
+
+# 向后兼容别名
+_build_session = build_pixiv_session
 
 
 def _split_tags(keyword: str) -> list[str]:

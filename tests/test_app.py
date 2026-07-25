@@ -178,3 +178,26 @@ class TestDbIsolation:
         """P0-1 回归测试：测试 engine 必须指向临时库，而非生产 instance/pixiv.db。"""
         import models
         assert 'pixiv_test_' in str(models.engine.url)
+
+
+class TestSessionFactory:
+    def _build(self, monkeypatch, proxy=''):
+        import fetcher
+        monkeypatch.setattr(fetcher, 'PROXY', proxy)
+        monkeypatch.setattr(fetcher, '_load_cookie', lambda: None)
+        monkeypatch.setattr(fetcher, '_cookie_value', 'test')
+        return fetcher.build_pixiv_session()
+
+    def test_proxy_applied(self, monkeypatch):
+        s = self._build(monkeypatch, proxy='http://127.0.0.1:7890')
+        assert s.proxies == {'https': 'http://127.0.0.1:7890', 'http': 'http://127.0.0.1:7890'}
+
+    def test_no_proxy_by_default(self, monkeypatch):
+        s = self._build(monkeypatch, proxy='')
+        assert s.proxies == {}
+
+    def test_pixiv_headers_present(self, monkeypatch):
+        s = self._build(monkeypatch)
+        assert s.headers['Referer'].startswith('https://')
+        assert 'Mozilla' in s.headers['User-Agent']
+        assert 'PHPSESSID=test' in s.headers['Cookie']

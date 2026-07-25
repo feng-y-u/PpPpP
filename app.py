@@ -30,11 +30,11 @@ from config import (
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     MEDIUM_IMAGE_SIZE,
     SETTINGS_PASSWORD,
-    SSL_VERIFY, ITEMS_PER_PAGE,
+    ITEMS_PER_PAGE,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
 import fetcher
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, _build_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -276,12 +276,7 @@ def _download_illust(pixiv_id: int) -> None:
             work_dir = _get_download_dir(pixiv_id)
             os.makedirs(work_dir, exist_ok=True)
 
-            session_obj = requests.Session()
-            session_obj.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': 'https://www.pixiv.net/',
-            })
-            session_obj.verify = SSL_VERIFY
+            session_obj = build_pixiv_session()
 
             local_paths = []
             for i, url in enumerate(urls):
@@ -417,7 +412,7 @@ def _proxy_thumb(url: str) -> str:
 
 def _fetch_original_urls(pixiv_id: int) -> list[str]:
     """按需拉取 Pixiv 详情，返回 original_urls。用于惰性详情场景。"""
-    session = _build_session()
+    session = build_pixiv_session()
     detail = _get_illust_detail(session, pixiv_id)
     return detail.get('original_urls', []) if detail else []
 
@@ -746,13 +741,7 @@ def thumb_proxy(url_b64: str) -> Response:
         return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
 
     try:
-        s = requests.Session()
-        s.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.pixiv.net/',
-        })
-        s.verify = SSL_VERIFY
-        resp = s.get(url, timeout=(10, 30))
+        resp = build_pixiv_session().get(url, timeout=(10, 30))
         resp.raise_for_status()
     except requests.RequestException:
         return abort(502)
