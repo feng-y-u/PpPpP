@@ -184,16 +184,36 @@ def _auto_follow_worker() -> None:
             _auto_follow_stop.wait(30)
             continue
         try:
-            results, _ = fetch_following(page=1)
-            if not results:
+            collected = []
+            page = 1
+            while page <= 10:
+                results, has_more = fetch_following(page=page)
+                if not results:
+                    break
+                collected.extend(results)
+                if not has_more:
+                    break
+                page += 1
+                time.sleep(1)
+
+            if not collected:
                 _auto_follow_stop.wait(interval)
                 continue
-            pixiv_ids = [r['pixiv_id'] for r in results]
+
+            seen = set()
+            unique = []
+            for r in collected:
+                pid = r['pixiv_id']
+                if pid not in seen:
+                    seen.add(pid)
+                    unique.append(r)
+
+            pixiv_ids = [r['pixiv_id'] for r in unique]
             with get_session() as db:
                 existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(Illust.pixiv_id.in_(pixiv_ids)).all()}
 
             new_illusts = []
-            for r in results:
+            for r in unique:
                 if r['pixiv_id'] in existing_ids:
                     continue
                 illust = Illust(
