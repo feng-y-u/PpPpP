@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# 反代后还原真实客户端 IP（限流/open-dir 本机判断依赖）；x_proto 供 HTTPS 判定
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
 _secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', '.secret_key')
 if os.path.exists(_secret_path):
     with open(_secret_path) as f:
@@ -1586,6 +1590,8 @@ def illust_collections(pixiv_id: int) -> Response:
 @_csrf_required
 def api_open_dir() -> Response:
     """打开本地文件夹（仅限本机浏览器访问时有效）。"""
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'error': '该功能仅本机可用'}), 403
     body = request.get_json(silent=True) or {}
     path = body.get('path', '')
     if not path or not os.path.isdir(path):

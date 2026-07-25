@@ -96,3 +96,24 @@ class TestSettingsCompat:
         resp = client.post('/api/settings/unlock', json={},
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
+
+
+class TestOpenDir:
+    def test_non_localhost_forbidden(self, client):
+        token = _get_token(client)
+        resp = client.post('/api/open-dir', json={'path': '/tmp'},
+                           headers={'X-CSRF-Token': token,
+                                    'X-Forwarded-For': '8.8.8.8'})
+        assert resp.status_code == 403
+
+    def test_localhost_allowed(self, client, monkeypatch, tmp_path):
+        import app as app_module
+        monkeypatch.setattr(app_module.platform, 'system', lambda: 'Windows')
+        called = []
+        monkeypatch.setattr(app_module.os, 'startfile',
+                            lambda p: called.append(p), raising=False)
+        token = _get_token(client)
+        resp = client.post('/api/open-dir', json={'path': str(tmp_path)},
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert called == [str(tmp_path)]
