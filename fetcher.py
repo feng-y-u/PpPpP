@@ -357,8 +357,7 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
                     continue
                 if detail.get('original_urls'):
                     existing.original_urls_list = detail['original_urls']
-                if detail.get('bookmark_count'):
-                    existing.bookmark_count = detail['bookmark_count']
+                existing.bookmark_count = detail.get('bookmark_count', existing.bookmark_count)
                 if detail.get('description') and not existing.description:
                     existing.description = detail['description']
             safe_commit(db)
@@ -445,7 +444,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         existing = existing_map.get(pixiv_id)
         if existing:
             # 已有记录但 bookmark_count 未补全 + 用户设了最低收藏 → 同步重新拉取
-            if existing.bookmark_count == 0 and min_bookmarks > 0 and not existing.original_urls_list:
+            if existing.bookmark_count == 0 and min_bookmarks > 0:
                 # defer 路径：API 返回数据自带 bookmarkCount，直接更新跳过补全
                 if defer_details and isinstance(item, dict) and item.get('bookmarkCount', 0) > 0:
                     existing.bookmark_count = item['bookmarkCount']
@@ -484,8 +483,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                or (hide_r18 and _is_r18(detail.get('tags', []))):
                 continue
             existing = existing_map[pixiv_id]
-            if detail.get('bookmark_count'):
-                existing.bookmark_count = detail['bookmark_count']
+            existing.bookmark_count = detail.get('bookmark_count', existing.bookmark_count)
             if detail.get('original_urls'):
                 existing.original_urls_list = detail['original_urls']
             if detail.get('description') and not existing.description:
