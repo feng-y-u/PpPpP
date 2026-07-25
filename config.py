@@ -79,6 +79,12 @@ SSL_VERIFY = False           # 生产环境建议设为 True，需安装 CA 证�
 # 可通过环境变量 SETTINGS_PASSWORD 或 settings.json 的 settings_password 设置
 SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
 
+# 全局访问密码（留空 = 免认证，本机使用无需设置；公网部署必须设置）
+ACCESS_PASSWORD = os.environ.get('ACCESS_PASSWORD', '')
+
+# Session Cookie 仅 HTTPS 传输（公网反代 HTTPS 时应为 True；本地 HTTP 调试可设 false）
+COOKIE_SECURE = os.environ.get('COOKIE_SECURE', 'true').lower() != 'false'
+
 # ── ⚠ 从 settings.json 覆盖配置（运行时通过设置页面修改） ──────────
 # 注意：这里在模块 import 时修改全局常量。因为运行在 import 时，
 # settings.json 必须在模块首次被 import 前存在。import 之后修改
@@ -92,6 +98,8 @@ if os.path.exists(_settings_path):
         _key_map = {
             'proxy': 'PROXY',
             'settings_password': 'SETTINGS_PASSWORD',
+            'access_password': 'ACCESS_PASSWORD',
+            'cookie_secure': 'COOKIE_SECURE',
             'download_max_workers': 'DOWNLOAD_MAX_WORKERS',
             'per_page': 'PER_PAGE',
             'search_pages': 'SEARCH_PAGES',

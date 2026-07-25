@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import requests
 import urllib3
 from flask import (
     Flask, jsonify, render_template, request, session,
-    send_file, abort, Response,
+    send_file, abort, Response, redirect, url_for,
 )
 from sqlalchemy import text
 
@@ -29,7 +30,7 @@ from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     MEDIUM_IMAGE_SIZE,
-    SETTINGS_PASSWORD,
+    SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
     ITEMS_PER_PAGE,
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
@@ -59,6 +60,14 @@ else:
     with open(_secret_path, 'w') as f:
         f.write(app.config['SECRET_KEY'])
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 最大上传 1MB
+
+# ── Session 安全加固（公网部署基线）──
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=COOKIE_SECURE,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'image_cache')
@@ -393,6 +402,55 @@ def _csrf_required(f: Callable) -> Callable:
             return jsonify({'error': 'CSRF校验失败'}), 403
         return f(*args, **kwargs)
     return decorated
+
+
+# ── 全局认证 ──
+_AUTH_EXEMPT_PATHS = {'/login', '/favicon.ico', '/csrf-token'}
+_AUTH_EXEMPT_PREFIXES = ('/static',)
+
+
+def _is_authed() -> bool:
+    return not ACCESS_PASSWORD or bool(session.get('authed'))
+
+
+@app.before_request
+def _require_login():
+    if _is_authed():
+        return None
+    path = request.path
+    if path in _AUTH_EXEMPT_PATHS or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
+        return None
+    if path.startswith('/api/') or path == '/search' or request.method != 'GET':
+        return jsonify({'error': '未登录', 'error_code': 'AUTH_REQUIRED'}), 401
+    return redirect(url_for('login_page', next=path))
+
+
+def _safe_next(url: str) -> str:
+    """防开放重定向：只允许站内相对路径。"""
+    if not url or not url.startswith('/') or url.startswith('//'):
+        return '/'
+    return url
+
+
+@app.route('/login', methods=['GET'])
+def login_page():
+    if _is_authed():
+        return redirect(_safe_next(request.args.get('next', '')))
+    return render_template('login.html', csrf_token=_get_csrf_token())
+
+
+@app.route('/login', methods=['POST'])
+@_rate_limit(max_attempts=5, window=60)
+@_csrf_required
+def login_submit():
+    body = request.get_json(silent=True) or {}
+    password = str(body.get('password', ''))
+    if ACCESS_PASSWORD and hmac.compare_digest(password.encode(), ACCESS_PASSWORD.encode()):
+        session['authed'] = True
+        session.permanent = True
+        return jsonify({'ok': True, 'next': _safe_next(str(body.get('next', '')))})
+    time.sleep(1)  # 失败延迟，减缓爆破
+    return jsonify({'error': '密码错误'}), 403
 
 
 def _original_to_resized(url: str) -> str:

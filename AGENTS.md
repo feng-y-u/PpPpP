@@ -32,7 +32,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 | `fetcher.py` | Pixiv API 封装：Cookie/OAuth 认证、搜索、作品详情 |
 | `models.py` | SQLAlchemy ORM：Illust、BlockedTag、DownloadLog、Collection、CollectionItem |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
-| `templates/*.html` | 7 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁） |
+| `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁、登录） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（cron 磁盘清理，30 天 / 收藏 < 100） |
 
@@ -55,6 +55,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 ### 认证
 - **Cookie 认证**：手动创建 `cookies.txt`，存放 `PHPSESSID=xxxxx` 或纯 token。过期会静默返回空结果。
 - **Linux 上优先读 `/etc/pixiv-viewer/cookies.txt`**，否则读项目根目录。
+- **全局访问密码**：`ACCESS_PASSWORD`（环境变量或 settings.json 的 `access_password`）非空时启用全站登录墙 —— `before_request` 钩子拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 免认证**（本机默认）。登录态存 session（`authed`），7 天有效；`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒。`COOKIE_SECURE` 控制 Session Cookie 仅 HTTPS 传输（默认 true，本地 HTTP 调试需设 `COOKIE_SECURE=false`）。
 
 ### API 行为
 - **`popular_d` 排序需 Pixiv Premium**：非 Premium 账号静默返回空结果。`/search` 路由默认排序为 `date_d`（`app.py:427`），空查询回退到 `browse_discovery()` 时也使用该默认值。

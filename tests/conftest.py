@@ -21,7 +21,7 @@ from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Co
 @pytest.fixture(scope='session')
 def app():
     from app import app as flask_app
-    flask_app.config.update({'TESTING': True})
+    flask_app.config.update({'TESTING': True, 'SESSION_COOKIE_SECURE': False})
     yield flask_app
     # Windows 上需先释放引擎持有的文件句柄，否则 unlink 报 WinError 32
     import models
