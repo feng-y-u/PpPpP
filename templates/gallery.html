@@ -476,33 +476,20 @@ function renderCard(r) {
     try {
       let resp;
       if (activeCollectionId) {
-        // 在收藏夹视图下，操作当前收藏夹
-        const colResp = await fetch(`/api/illust/${pid}/collections`);
-        const colIds = await colResp.json();
-        const inThis = colIds.includes(parseInt(activeCollectionId));
-        if (inThis) {
-          resp = await fetch(`/api/collections/${activeCollectionId}/items/${pid}`, {
-            method: 'DELETE',
-            headers: { 'X-CSRF-Token': csrfToken },
-          });
-        } else {
-          resp = await fetch(`/api/collections/${activeCollectionId}/items`, {
-            method: 'POST',
-            headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pixiv_id: pid }),
-          });
-        }
+        // 收藏夹视图下：此处的作品已在收藏夹中，直接移除
+        resp = await fetch(`/api/collections/${activeCollectionId}/items/${pid}`, {
+          method: 'DELETE',
+          headers: { 'X-CSRF-Token': csrfToken },
+        });
       } else {
-        // 全部作品视图下，操作默认"我的收藏"
+        // 全部作品视图下：操作默认"我的收藏"
         resp = await fetch(`/api/favorite/${pid}`, {
           method: 'POST',
           headers: { 'X-CSRF-Token': csrfToken },
         });
       }
       if (resp.ok) {
-        const card = btn.closest('.gallery-card');
         if (activeCollectionId) {
-          // 收藏夹视图下切换后刷新整页以更新列表
           loadGallery(galleryCurrentPage);
         } else {
           const data = await resp.json();
@@ -510,7 +497,7 @@ function renderCard(r) {
           btn.classList.toggle('favorited', isFav);
           btn.innerHTML = isFav ? '❤' : '♡';
           btn.title = isFav ? '取消收藏' : '收藏';
-          const titleEl = card && card.querySelector('.card-title');
+          const titleEl = btn.closest('.gallery-card')?.querySelector('.card-title');
           if (titleEl) {
             titleEl.innerHTML = isFav ? '❤ ' + escHtml(r.title) : escHtml(r.title);
           }
