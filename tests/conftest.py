@@ -5,6 +5,14 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ── ⚠ 必须在 import models/app 之前覆盖数据库路径 ──
+# models.py 在 import 时即 create_engine(DATABASE_PATH)，事后覆盖无效，
+# 会导致测试直连并清空生产数据库（2026-07-25 审查 P0-1）。
+import config
+_TEST_DB_PATH = os.path.join(tempfile.gettempdir(), f'pixiv_test_{os.getpid()}.db')
+config.DATABASE_PATH = _TEST_DB_PATH
+config.AUTO_FOLLOW_INTERVAL = 0
+
 import pytest
 
 from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Collection, CollectionItem
@@ -12,19 +20,16 @@ from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Co
 
 @pytest.fixture(scope='session')
 def app():
-    import config
-    config.DATABASE_PATH = os.path.join(
-        tempfile.gettempdir(), f'pixiv_test_{os.getpid()}.db'
-    )
-    config.AUTO_FOLLOW_INTERVAL = 0
-
     from app import app as flask_app
     flask_app.config.update({'TESTING': True})
     yield flask_app
-
-    db_path = config.DATABASE_PATH
-    if os.path.exists(db_path):
-        os.unlink(db_path)
+    # Windows 上需先释放引擎持有的文件句柄，否则 unlink 报 WinError 32
+    import models
+    models.engine.dispose()
+    for suffix in ('', '-wal', '-shm'):
+        p = _TEST_DB_PATH + suffix
+        if os.path.exists(p):
+            os.unlink(p)
 
 
 @pytest.fixture

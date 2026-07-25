@@ -171,3 +171,10 @@ class TestRoutes:
     def test_bulk_page(self, client):
         resp = client.get('/bulk')
         assert resp.status_code == 200
+
+
+class TestDbIsolation:
+    def test_engine_uses_temp_db(self):
+        """P0-1 回归测试：测试 engine 必须指向临时库，而非生产 instance/pixiv.db。"""
+        import models
+        assert 'pixiv_test_' in str(models.engine.url)
