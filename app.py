@@ -1003,12 +1003,13 @@ def api_gallery() -> Response:
             results.append(d)
             seen_pids.add(i.pixiv_id)
 
-        # 补充不在 DB 的本地文件
-        local_pid_set = set(local_pids)
-        orphan_pids = sorted(local_pid_set - seen_pids, reverse=True)
-        orphan_results = _build_orphan_dicts(orphan_pids, local_items)
-        total += len(orphan_results)
-        results.extend(orphan_results[:max(0, limit - len(results))])
+        # 补充不在 DB 的本地文件（收藏夹/收藏筛选时不补孤儿，因其不在任何收藏夹中）
+        if not collection_id and not favorites_only:
+            local_pid_set = set(local_pids)
+            orphan_pids = sorted(local_pid_set - seen_pids, reverse=True)
+            orphan_results = _build_orphan_dicts(orphan_pids, local_items)
+            total += len(orphan_results)
+            results.extend(orphan_results[:max(0, limit - len(results))])
 
         safe_commit(db)
 
