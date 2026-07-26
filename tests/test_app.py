@@ -388,3 +388,57 @@ class TestCollectionItemMove:
             ).order_by(models.CollectionItem.position).all()
         assert [it.pixiv_id for it in items] == [70001, 70003, 70002]
         assert [it.position for it in items] == [1000.0, 1500.0, 2000.0]
+
+
+class TestFavoriteMembershipContract:
+    def _default_coll(self, clean_db):
+        import models
+        c = models.Collection(name='我的收藏')
+        clean_db.add(c); clean_db.commit()
+        return c.id
+
+    def test_gallery_favorites_only_returns_membership(self, client, clean_db):
+        import models
+        default_id = self._default_coll(clean_db)
+        for pid in [90001, 90002, 90003]:
+            clean_db.add(models.Illust(pixiv_id=pid, title=f'p{pid}', download_status='done'))
+        clean_db.commit()
+        clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90002, position=1000.0))
+        clean_db.commit()
+        r = client.get('/api/gallery?favorites=true&limit=10')
+        assert r.status_code == 200
+        data = r.get_json()
+        returned = {item['pixiv_id'] for item in data['data']}
+        assert 90002 in returned
+        assert 90001 not in returned
+        assert 90003 not in returned
+        assert data['favorite_total'] > 0
+
+    def test_favorite_get_returns_membership(self, client, clean_db):
+        import models
+        default_id = self._default_coll(clean_db)
+        clean_db.add(models.Illust(pixiv_id=90050, title='t', download_status='done'))
+        clean_db.commit()
+        r = client.get('/api/favorite/90050')
+        assert r.status_code == 200
+        assert r.get_json()['is_favorite'] is False
+        clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90050, position=1000.0))
+        clean_db.commit()
+        r2 = client.get('/api/favorite/90050')
+        assert r2.get_json()['is_favorite'] is True
+
+    def test_favorite_post_toggles_membership(self, client, clean_db):
+        import models
+        self._default_coll(clean_db)
+        token = client.get('/csrf-token').get_json()['token']
+        clean_db.add(models.Illust(pixiv_id=90080, title='t', download_status='done'))
+        clean_db.commit()
+        r = client.post('/api/favorite/90080',
+                        data='{}', content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200
+        assert r.get_json()['is_favorite'] is True
+        r2 = client.post('/api/favorite/90080',
+                         data='{}', content_type='application/json',
+                         headers={'X-CSRF-Token': token})
+        assert r2.get_json()['is_favorite'] is False

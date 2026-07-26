@@ -944,6 +944,17 @@ def api_gallery() -> Response:
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
 
+        default_cid = None
+        default_fav_set: set[int] = set()
+        if not collection_id:
+            dc = db.query(Collection).filter(Collection.name == '我的收藏').first()
+            if dc:
+                default_cid = dc.id
+                pids = db.query(CollectionItem.pixiv_id).filter(
+                    CollectionItem.collection_id == dc.id
+                ).all()
+                default_fav_set = {p[0] for p in pids}
+
         if local_pids:
             pid_phs = ','.join(f':local_pid_{i}' for i in range(len(local_pids)))
             wheres = [f"(illusts.download_status = 'done' OR illusts.pixiv_id IN ({pid_phs}))"]
@@ -961,7 +972,11 @@ def api_gallery() -> Response:
             wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value = :tag_filter)')
             params['tag_filter'] = tag_filter
         if favorites_only:
-            wheres.append('is_favorite = 1')
+            if default_cid is not None:
+                wheres.append('illusts.pixiv_id IN (SELECT pixiv_id FROM collection_items WHERE collection_id = :default_cid)')
+                params['default_cid'] = default_cid
+            else:
+                wheres.append('0 = 1')
 
         where_clause = ' AND '.join(wheres)
 
@@ -987,11 +1002,11 @@ def api_gallery() -> Response:
             ).scalars().all()
         else:
             row = db.execute(
-                text(f'SELECT COUNT(*) AS total, SUM(CASE WHEN is_favorite=1 THEN 1 ELSE 0 END) AS fav_total FROM illusts WHERE {where_clause}'),
+                text(f'SELECT COUNT(*) AS total FROM illusts WHERE {where_clause}'),
                 params
             ).one()
             total = row[0] or 0
-            fav_total = row[1] or 0
+            fav_total = 0
             order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
             pk_ids = db.execute(
                 text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
@@ -1011,7 +1026,7 @@ def api_gallery() -> Response:
                 total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
                 if total_size:
                     i.file_size = total_size
-            d = i.to_dict()
+            d = i.to_dict(favorite=(i.pixiv_id in default_fav_set))
             d['local_paths'] = paths
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
@@ -1026,6 +1041,8 @@ def api_gallery() -> Response:
             orphan_results = _build_orphan_dicts(orphan_pids, local_items)
             total += len(orphan_results)
             results.extend(orphan_results[:max(0, limit - len(results))])
+
+        fav_total = total if favorites_only else sum(1 for r in results if r.get('pixiv_id') in default_fav_set)
 
         safe_commit(db)
 
@@ -1788,14 +1805,20 @@ def api_open_dir() -> Response:
 @app.route('/api/favorite/<int:pixiv_id>', methods=['GET'])
 def api_favorite_get(pixiv_id: int) -> Response:
     with get_session() as db:
-        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-        return jsonify({'is_favorite': illust.is_favorite if illust else False})
+        default = db.query(Collection).filter(Collection.name == '我的收藏').first()
+        if not default:
+            return jsonify({'is_favorite': False})
+        exists = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == default.id,
+            CollectionItem.pixiv_id == pixiv_id,
+        ).first() is not None
+        return jsonify({'is_favorite': exists})
 
 
 @app.route('/api/favorite/<int:pixiv_id>', methods=['POST'])
 @_csrf_required
 def api_favorite_post(pixiv_id: int) -> Response:
-    """切换'我的收藏'收藏夹中的归属（向后兼容）。"""
+    """切换'我的收藏'收藏夹中的归属。"""
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
@@ -1810,14 +1833,15 @@ def api_favorite_post(pixiv_id: int) -> Response:
         if existing:
             db.delete(existing)
             safe_commit(db)
-            _sync_is_favorite(pixiv_id)
+            return jsonify({'is_favorite': False})
         else:
-            db.add(CollectionItem(collection_id=default.id, pixiv_id=pixiv_id))
+            max_row = db.query(CollectionItem).filter(
+                CollectionItem.collection_id == default.id
+            ).order_by(CollectionItem.position.desc()).first()
+            next_pos = (max_row.position + 1000.0) if max_row else 1000.0
+            db.add(CollectionItem(collection_id=default.id, pixiv_id=pixiv_id, position=next_pos))
             safe_commit(db)
-            _sync_is_favorite(pixiv_id)
-        # 重新读取以获取更新后的状态
-        db.refresh(illust)
-        return jsonify({'is_favorite': illust.is_favorite})
+            return jsonify({'is_favorite': True})
 
 
 if __name__ == '__main__':

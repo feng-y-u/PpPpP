@@ -63,7 +63,7 @@ class TestIllustToDict:
             'id', 'pixiv_id', 'title', 'user_id', 'user_name', 'tags',
             'page_count', 'bookmark_count', 'upload_date', 'thumb_url',
             'description', 'original_urls', 'local_paths', 'download_status',
-            'downloaded_at', 'file_size', 'is_favorite', 'favorited_at', 'created_at',
+            'downloaded_at', 'file_size', 'is_favorite', 'created_at',
         }
         assert set(d.keys()) == expected_keys
 
@@ -145,3 +145,14 @@ class TestPositionMigration:
         with m.get_session() as s:
             it = s.query(m.CollectionItem).filter(m.CollectionItem.pixiv_id == 20000).one()
         assert it.position == 42.0
+
+
+class TestIllustToDictFavoriteOverride:
+    def test_to_dict_uses_provided_favorite(self, clean_db):
+        from models import Illust
+        il = Illust(pixiv_id=808, title='t')
+        clean_db.add(il); clean_db.commit()
+        d = il.to_dict(favorite=True)
+        assert d['is_favorite'] is True
+        d2 = il.to_dict(favorite=False)
+        assert d2['is_favorite'] is False

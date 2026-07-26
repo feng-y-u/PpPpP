@@ -110,7 +110,7 @@ class Illust(Base):
         else:
             self.local_paths = json.dumps(value, ensure_ascii=False)
 
-    def to_dict(self) -> dict:
+    def to_dict(self, favorite: bool = False) -> dict:
         return {
             'id': self.id,
             'pixiv_id': self.pixiv_id,
@@ -128,8 +128,7 @@ class Illust(Base):
             'download_status': self.download_status,
             'downloaded_at': self.downloaded_at.isoformat() if self.downloaded_at else None,
             'file_size': self.file_size,
-            'is_favorite': self.is_favorite,
-            'favorited_at': self.favorited_at.isoformat() if self.favorited_at else None,
+            'is_favorite': favorite,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
