@@ -236,7 +236,8 @@ def init_db() -> None:
             conn.execute(text('ALTER TABLE collection_items ADD COLUMN position REAL NOT NULL DEFAULT 0.0'))
             conn.commit()
 
-    user_version = engine.connect().exec_driver_sql('PRAGMA user_version').scalar() or 0
+    with engine.connect() as conn:
+        user_version = conn.exec_driver_sql('PRAGMA user_version').scalar() or 0
     if user_version < 1:
         with engine.begin() as conn:
             rows = conn.execute(text(
