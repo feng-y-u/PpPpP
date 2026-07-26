@@ -201,3 +201,52 @@ class TestSessionFactory:
         assert s.headers['Referer'].startswith('https://')
         assert 'Mozilla' in s.headers['User-Agent']
         assert 'PHPSESSID=test' in s.headers['Cookie']
+
+
+class TestCollectionItemPositionAssignment:
+    def _token(self, client):
+        return client.get('/csrf-token').get_json()['token']
+
+    def _create_coll(self, client):
+        token = self._token(client)
+        r = client.post('/api/collections',
+                        data=json.dumps({'name': 'pos-test'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        return r.get_json()['id'], token
+
+    def test_first_item_gets_1000(self, client, clean_db):
+        cid, token = self._create_coll(client)
+        r = client.post(f'/api/collections/{cid}/items',
+                        data=json.dumps({'pixiv_id': 70001}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 201
+        assert r.get_json()['position'] == 1000.0
+
+    def test_second_item_gets_2000(self, client, clean_db):
+        cid, token = self._create_coll(client)
+        client.post(f'/api/collections/{cid}/items',
+                    data=json.dumps({'pixiv_id': 70001}),
+                    content_type='application/json',
+                    headers={'X-CSRF-Token': token})
+        r = client.post(f'/api/collections/{cid}/items',
+                        data=json.dumps({'pixiv_id': 70002}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 201
+        assert r.get_json()['position'] == 2000.0
+
+    def test_batch_add_increments(self, client, clean_db):
+        cid, token = self._create_coll(client)
+        r = client.post(f'/api/collections/{cid}/items/batch',
+                        data=json.dumps({'pixiv_ids': [70010, 70011, 70012]}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200
+        import models
+        with models.get_session() as s:
+            items = s.query(models.CollectionItem).filter(
+                models.CollectionItem.collection_id == cid
+            ).order_by(models.CollectionItem.pixiv_id).all()
+        assert sorted(it.position for it in items) == [1000.0, 2000.0, 3000.0]

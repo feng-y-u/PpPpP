@@ -1569,7 +1569,11 @@ def add_collection_item(collection_id: int) -> Response:
         ).first()
         if existing:
             return jsonify({'error': '作品已在收藏夹中'}), 409
-        item = CollectionItem(collection_id=collection_id, pixiv_id=pixiv_id)
+        max_row = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id
+        ).order_by(CollectionItem.position.desc()).first()
+        next_pos = (max_row.position + 1000.0) if max_row else 1000.0
+        item = CollectionItem(collection_id=collection_id, pixiv_id=pixiv_id, position=next_pos)
         db.add(item)
         safe_commit(db)
         data = item.to_dict()
@@ -1613,6 +1617,10 @@ def batch_add_collection_items(collection_id: int) -> Response:
     with get_session() as db:
         if not db.query(Collection).filter(Collection.id == collection_id).first():
             return jsonify({'error': '收藏夹不存在'}), 404
+        max_row = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id
+        ).order_by(CollectionItem.position.desc()).first()
+        next_pos = (max_row.position + 1000.0) if max_row else 1000.0
         added = 0
         for pid in pixiv_ids:
             existing = db.query(CollectionItem).filter(
@@ -1620,7 +1628,8 @@ def batch_add_collection_items(collection_id: int) -> Response:
                 CollectionItem.pixiv_id == pid,
             ).first()
             if not existing:
-                db.add(CollectionItem(collection_id=collection_id, pixiv_id=pid))
+                db.add(CollectionItem(collection_id=collection_id, pixiv_id=pid, position=next_pos))
+                next_pos += 1000.0
                 added += 1
         safe_commit(db)
         for pid in pixiv_ids:
