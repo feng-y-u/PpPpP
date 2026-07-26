@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import create_engine, event, Boolean, Integer, String, Text, DateTime, Index, ForeignKey, UniqueConstraint, text
+from sqlalchemy import create_engine, event, Boolean, Float, Integer, String, Text, DateTime, Index, ForeignKey, UniqueConstraint, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -189,6 +189,7 @@ class CollectionItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     collection_id: Mapped[int] = mapped_column(Integer, ForeignKey('collections.id'), nullable=False)
     pixiv_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    position: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
@@ -196,6 +197,7 @@ class CollectionItem(Base):
             'id': self.id,
             'collection_id': self.collection_id,
             'pixiv_id': self.pixiv_id,
+            'position': self.position,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -226,6 +228,32 @@ def init_db() -> None:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN downloaded_at DATETIME'))
             conn.commit()
+
+    # ── collection_items.position 列与 user_version 迁移 ──
+    ci_cols = [c['name'] for c in inspector.get_columns('collection_items')]
+    if 'position' not in ci_cols:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE collection_items ADD COLUMN position REAL NOT NULL DEFAULT 0.0'))
+            conn.commit()
+
+    user_version = engine.connect().exec_driver_sql('PRAGMA user_version').scalar() or 0
+    if user_version < 1:
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                'SELECT id, collection_id FROM collection_items ORDER BY collection_id ASC, created_at ASC, id ASC'
+            )).fetchall()
+            last_cid = None
+            counter = 0
+            for row in rows:
+                cid = row[1]
+                if cid != last_cid:
+                    last_cid = cid
+                    counter = 0
+                counter += 1
+                conn.execute(text(
+                    'UPDATE collection_items SET position = :p WHERE id = :id'
+                ), {'p': counter * 1000.0, 'id': row[0]})
+            conn.execute(text('PRAGMA user_version = 1'))
 
     # 收藏夹表迁移：创建默认"我的收藏"并迁移现有收藏
     # Base.metadata.create_all above created the tables, so they always exist now
