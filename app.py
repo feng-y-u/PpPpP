@@ -1674,6 +1674,93 @@ def batch_remove_collection_items(collection_id: int) -> Response:
     return jsonify({'removed': removed})
 
 
+def _compute_move_position(items: list, idx: int, direction: str):
+    """返回 (new_pos, needs_rebalance, error_code)。
+    items 是 [(id, position), ...] 元组列表，按 position ASC 排序。
+    error_code 为 None（成功）或 400（边界）。"""
+    n = len(items)
+    if direction == 'up':
+        if idx == 0:
+            return None, False, 400
+        prev = items[idx - 1]
+        prev_pos = prev[1]
+        if idx == 1:
+            return prev_pos - 1000.0, False, None
+        prev_of_prev = items[idx - 2]
+        pop_pos = prev_of_prev[1]
+        if prev_pos - pop_pos < 1.0:
+            return None, True, None
+        return (pop_pos + prev_pos) / 2.0, False, None
+    else:  # down
+        if idx == n - 1:
+            return None, False, 400
+        nxt = items[idx + 1]
+        nxt_pos = nxt[1]
+        if idx + 1 == n - 1:
+            return nxt_pos + 1000.0, False, None
+        next_of_next = items[idx + 2]
+        non_pos = next_of_next[1]
+        if non_pos - nxt_pos < 1.0:
+            return None, True, None
+        return (nxt_pos + non_pos) / 2.0, False, None
+
+
+@app.route('/api/collections/<int:collection_id>/items/<int:pixiv_id>/move', methods=['POST'])
+@_csrf_required
+def move_collection_item(collection_id: int, pixiv_id: int) -> Response:
+    body = request.get_json(silent=True) or {}
+    direction = body.get('direction')
+    if direction not in ('up', 'down'):
+        return jsonify({'error': 'direction 必须是 up 或 down'}), 400
+
+    with get_session() as db:
+        if not db.query(Collection).filter(Collection.id == collection_id).first():
+            return jsonify({'error': '收藏夹不存在'}), 404
+        current = db.query(CollectionItem).filter(
+            CollectionItem.collection_id == collection_id,
+            CollectionItem.pixiv_id == pixiv_id,
+        ).first()
+        if not current:
+            return jsonify({'error': '作品不在收藏夹中'}), 404
+
+        rows = db.execute(text(
+            'SELECT id, position FROM collection_items WHERE collection_id = :cid ORDER BY position ASC, id ASC'
+        ), {'cid': collection_id}).fetchall()
+        items = [(r[0], r[1]) for r in rows]
+        idx = next((i for i, it in enumerate(items) if it[0] == current.id), None)
+        if idx is None:
+            return jsonify({'error': '作品不在收藏夹中'}), 404
+
+        new_pos, needs_rebalance, err = _compute_move_position(items, idx, direction)
+        if err == 400:
+            return jsonify({'error': '已在边界位置'}), 400
+
+        rebalanced = False
+        if needs_rebalance:
+            rebalanced = True
+            for i, it_tuple in enumerate(items):
+                db.execute(text('UPDATE collection_items SET position=:p WHERE id=:id'),
+                           {'p': (i + 1) * 1000.0, 'id': it_tuple[0]})
+            safe_commit(db)
+            rows = db.execute(text(
+                'SELECT id, position FROM collection_items WHERE collection_id = :cid ORDER BY position ASC, id ASC'
+            ), {'cid': collection_id}).fetchall()
+            items = [(r[0], r[1]) for r in rows]
+            idx = next((i for i, it in enumerate(items) if it[0] == current.id), None)
+            new_pos, _, _ = _compute_move_position(items, idx, direction)
+
+        old_pos = current.position
+        result = db.execute(text(
+            'UPDATE collection_items SET position=:np '
+            'WHERE collection_id=:cid AND pixiv_id=:pid AND position=:op'
+        ), {'np': new_pos, 'cid': collection_id, 'pid': pixiv_id, 'op': old_pos})
+        if result.rowcount == 0:
+            db.rollback()
+            return jsonify({'error': '位置已被修改，请刷新后重试'}), 409
+        safe_commit(db)
+        return jsonify({'position': new_pos, 'rebalanced': rebalanced})
+
+
 # ── 收藏 ──
 
 

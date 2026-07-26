@@ -1,6 +1,8 @@
 import json
 from unittest.mock import patch
 
+from sqlalchemy import text
+
 import models
 
 
@@ -283,3 +285,106 @@ class TestGalleryPositionOrder:
         data = r.get_json()
         returned_pids = [item['pixiv_id'] for item in data['data'] if item.get('pixiv_id') in pids]
         assert returned_pids == [40002, 40003, 40001]
+
+
+class TestCollectionItemMove:
+    def _token(self, client):
+        return client.get('/csrf-token').get_json()['token']
+
+    def _setup(self, client, clean_db, n=3):
+        import models
+        coll = models.Collection(name='move-test')
+        clean_db.add(coll); clean_db.commit()
+        token = self._token(client)
+        for i in range(n):
+            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=50000 + i,
+                                               position=(i + 1) * 1000.0))
+        clean_db.commit()
+        return coll.id, token
+
+    def test_move_up_inserts_midpoint(self, client, clean_db):
+        cid, token = self._setup(client, clean_db)  # [50000@1000, 50001@2000, 50002@3000]
+        r = client.post(f'/api/collections/{cid}/items/50002/move',
+                        data=json.dumps({'direction': 'up'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200
+        assert r.get_json()['position'] == 1500.0
+        assert r.get_json()['rebalanced'] is False
+        import models
+        with models.get_session() as s:
+            order = [it.pixiv_id for it in s.query(models.CollectionItem)
+                     .filter(models.CollectionItem.collection_id == cid)
+                     .order_by(models.CollectionItem.position).all()]
+        assert order == [50000, 50002, 50001]
+
+    def test_move_up_to_top_when_second(self, client, clean_db):
+        cid, token = self._setup(client, clean_db, n=2)
+        r = client.post(f'/api/collections/{cid}/items/50001/move',
+                        data=json.dumps({'direction': 'up'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200
+        assert r.get_json()['position'] == 0.0
+
+    def test_move_up_on_first_returns_400(self, client, clean_db):
+        cid, token = self._setup(client, clean_db)
+        r = client.post(f'/api/collections/{cid}/items/50000/move',
+                        data=json.dumps({'direction': 'up'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 400
+
+    def test_move_down_on_last_returns_400(self, client, clean_db):
+        cid, token = self._setup(client, clean_db)
+        r = client.post(f'/api/collections/{cid}/items/50002/move',
+                        data=json.dumps({'direction': 'down'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 400
+
+    def test_move_down_two_items(self, client, clean_db):
+        cid, token = self._setup(client, clean_db, n=2)
+        r = client.post(f'/api/collections/{cid}/items/50000/move',
+                        data=json.dumps({'direction': 'down'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200
+        assert r.get_json()['position'] == 3000.0
+
+    def test_optimistic_lock_valid(self, client, clean_db):
+        cid, token = self._setup(client, clean_db)
+        import models
+        with models.engine.connect() as conn:
+            r = conn.execute(text(
+                'UPDATE collection_items SET position=:np WHERE collection_id=:c AND pixiv_id=:p AND position=:op'
+            ), {'np': 555.0, 'c': cid, 'p': 50002, 'op': 3000.0})
+            conn.commit()
+            assert r.rowcount == 1
+        with models.engine.connect() as conn:
+            r = conn.execute(text(
+                'UPDATE collection_items SET position=:np WHERE collection_id=:c AND pixiv_id=:p AND position=:op'
+            ), {'np': 555.0, 'c': cid, 'p': 50002, 'op': 9999.0})
+            conn.commit()
+            assert r.rowcount == 0
+
+    def test_move_triggers_rebalance_when_gap_too_small(self, client, clean_db):
+        import models
+        coll = models.Collection(name='reb-test')
+        clean_db.add(coll); clean_db.commit()
+        for pid, pos in [(70001, 1000.0), (70002, 1000.4), (70003, 3000.0)]:
+            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
+        clean_db.commit()
+        token = self._token(client)
+        r = client.post(f'/api/collections/{coll.id}/items/70003/move',
+                        data=json.dumps({'direction': 'up'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200
+        assert r.get_json()['rebalanced'] is True
+        with models.get_session() as s:
+            items = s.query(models.CollectionItem).filter(
+                models.CollectionItem.collection_id == coll.id
+            ).order_by(models.CollectionItem.position).all()
+        assert [it.pixiv_id for it in items] == [70001, 70003, 70002]
+        assert [it.position for it in items] == [1000.0, 1500.0, 2000.0]
