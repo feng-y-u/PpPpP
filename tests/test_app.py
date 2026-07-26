@@ -250,3 +250,36 @@ class TestCollectionItemPositionAssignment:
                 models.CollectionItem.collection_id == cid
             ).order_by(models.CollectionItem.pixiv_id).all()
         assert sorted(it.position for it in items) == [1000.0, 2000.0, 3000.0]
+
+    def test_list_returns_by_position(self, client, clean_db):
+        import models
+        coll = models.Collection(name='list-order-test')
+        clean_db.add(coll); clean_db.commit()
+        for pid, pos in [(30100, 3000.0), (30101, 1000.0), (30102, 2000.0)]:
+            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
+        clean_db.commit()
+        r = client.get(f'/api/collections/{coll.id}/items?limit=10')
+        assert r.status_code == 200
+        data = r.get_json()
+        assert [d['pixiv_id'] for d in data['data']] == [30101, 30102, 30100]
+
+
+class TestGalleryPositionOrder:
+    def test_gallery_orders_by_position_when_collection(self, client, clean_db):
+        import models
+        coll = models.Collection(name='gallery-pos')
+        clean_db.add(coll); clean_db.commit()
+        pids = [40001, 40002, 40003]
+        for pid in pids:
+            il = models.Illust(pixiv_id=pid, title=f'p{pid}', download_status='done')
+            clean_db.add(il)
+        clean_db.commit()
+        positions = {40001: 3000.0, 40002: 1000.0, 40003: 2000.0}
+        for pid, pos in positions.items():
+            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
+        clean_db.commit()
+        r = client.get(f'/api/gallery?collection_id={coll.id}&limit=10')
+        assert r.status_code == 200
+        data = r.get_json()
+        returned_pids = [item['pixiv_id'] for item in data['data'] if item.get('pixiv_id') in pids]
+        assert returned_pids == [40002, 40003, 40001]

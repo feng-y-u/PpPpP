@@ -935,6 +935,8 @@ def api_gallery() -> Response:
     limit = max(1, min(200, limit))
     offset = max(0, offset)
 
+    is_collection_view = collection_id is not None
+
     # 扫描本地 downloads 目录
     local_items = _scan_local_downloads()
     local_pids = sorted(local_items.keys(), reverse=True)
@@ -958,29 +960,43 @@ def api_gallery() -> Response:
         if tag_filter:
             wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value = :tag_filter)')
             params['tag_filter'] = tag_filter
-        if collection_id:
-            wheres.append('illusts.pixiv_id IN (SELECT pixiv_id FROM collection_items WHERE collection_id = :collection_id)')
-            params['collection_id'] = collection_id
         if favorites_only:
             wheres.append('is_favorite = 1')
 
         where_clause = ' AND '.join(wheres)
 
-        # 合计总数 + 收藏数
-        row = db.execute(
-            text(f'SELECT COUNT(*) AS total, SUM(CASE WHEN is_favorite=1 THEN 1 ELSE 0 END) AS fav_total FROM illusts WHERE {where_clause}'),
-            params
-        ).one()
-        total = row[0] or 0
-        fav_total = row[1] or 0
-
-        # 分页查询 ID
-        order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
         page_params = {**params, 'lim': limit, 'off': offset}
-        pk_ids = db.execute(
-            text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
-            page_params
-        ).scalars().all()
+        if is_collection_view:
+            params['collection_id'] = collection_id
+            page_params['collection_id'] = collection_id
+            row = db.execute(
+                text(f'SELECT COUNT(*) FROM illusts '
+                     f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
+                     f'WHERE collection_items.collection_id = :collection_id AND {where_clause}'),
+                params
+            ).one()
+            total = row[0] or 0
+            fav_total = 0
+            pk_ids = db.execute(
+                text(f'SELECT illusts.id FROM illusts '
+                     f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
+                     f'WHERE collection_items.collection_id = :collection_id AND {where_clause} '
+                     f'ORDER BY collection_items.position ASC '
+                     f'LIMIT :lim OFFSET :off'),
+                page_params
+            ).scalars().all()
+        else:
+            row = db.execute(
+                text(f'SELECT COUNT(*) AS total, SUM(CASE WHEN is_favorite=1 THEN 1 ELSE 0 END) AS fav_total FROM illusts WHERE {where_clause}'),
+                params
+            ).one()
+            total = row[0] or 0
+            fav_total = row[1] or 0
+            order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
+            pk_ids = db.execute(
+                text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
+                page_params
+            ).scalars().all()
 
         # 获取完整 ORM 对象并保持排序
         illusts = db.query(Illust).filter(Illust.id.in_(pk_ids)).all()
@@ -1545,7 +1561,7 @@ def list_collection_items(collection_id: int) -> Response:
         total = db.query(CollectionItem).filter(CollectionItem.collection_id == collection_id).count()
         items = db.query(CollectionItem).filter(
             CollectionItem.collection_id == collection_id
-        ).order_by(CollectionItem.created_at.desc()).offset(offset).limit(limit).all()
+        ).order_by(CollectionItem.position.asc()).offset(offset).limit(limit).all()
         return jsonify({
             'data': [item.to_dict() for item in items],
             'total': total,
