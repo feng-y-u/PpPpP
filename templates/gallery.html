@@ -103,6 +103,11 @@
 .card-fav-btn.favorited { color: var(--accent); }
 .card-fav-btn.loading { pointer-events: none; opacity: 0.5; }
 
+.card-move-btn { border: none; background: transparent; color: var(--text-muted); cursor: pointer; padding: 0 4px; font-size: 0.78rem; line-height: 1; }
+.card-move-btn:hover { color: var(--accent); }
+.card-move-btn[hidden] { display: none !important; }
+.card-move-btn.loading { opacity: 0.5; pointer-events: none; }
+
 /* ── Batch Float Bar ── */
 .batch-float-bar {
   position: fixed;
@@ -434,6 +439,28 @@ function loadTags() {
     });
 }
 
+async function moveCard(pid, direction, btn) {
+  btn.classList.add('loading');
+  try {
+    const resp = await fetch(`/api/collections/${activeCollectionId}/items/${pid}/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ direction })
+    });
+    if (resp.ok) {
+      loadGallery(galleryCurrentPage);
+    } else if (resp.status === 400) {
+      showToast('已在边界位置', true);
+    } else if (resp.status === 409) {
+      showToast('位置已被修改，正在刷新', true);
+      loadGallery(galleryCurrentPage);
+    } else {
+      showToast('移动失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+  finally { btn.classList.remove('loading'); }
+}
+
 function renderCard(r) {
   const tags = (r.tags || []).slice(0, 6).map(t =>
     `<span class="badge tag-badge">${escHtml(t)}</span>`
@@ -456,6 +483,7 @@ function renderCard(r) {
         <div class="card-info">#${r.pixiv_id} · ${escHtml(r.user_name)} · ${r.file_count || 1} 文件</div>
         <div class="tags-wrap">${tags}</div>
         <div class="d-flex gap-1 mt-1">
+          ${activeCollectionId ? `<button class="card-move-btn move-up-btn" data-pid="${r.pixiv_id}" title="上移">▲</button><button class="card-move-btn move-down-btn" data-pid="${r.pixiv_id}" title="下移">▼</button>` : ''}
           <button class="btn btn-outline-danger btn-sm flex-fill delete-btn" data-pid="${r.pixiv_id}">删除</button>
           <a href="/download_file/${r.pixiv_id}" class="btn btn-soft btn-sm dl-file-btn" onclick="event.stopPropagation()">下载</a>
         </div>
@@ -464,7 +492,7 @@ function renderCard(r) {
   $('#cardGrid').appendChild(col);
 
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
-    if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a') || e.target.closest('.card-fav-btn')) return;
+    if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a') || e.target.closest('.card-fav-btn') || e.target.closest('.card-move-btn')) return;
     window.location.href = `/detail/${r.pixiv_id}`;
   });
 
@@ -508,6 +536,19 @@ function renderCard(r) {
     } catch { showToast('网络错误', true); }
     finally { btn.classList.remove('loading'); }
   });
+
+  if (activeCollectionId) {
+    const upBtn = col.querySelector('.move-up-btn');
+    const downBtn = col.querySelector('.move-down-btn');
+    if (upBtn) upBtn.addEventListener('click', async function(e) {
+      e.stopPropagation();
+      await moveCard(r.pixiv_id, 'up', this);
+    });
+    if (downBtn) downBtn.addEventListener('click', async function(e) {
+      e.stopPropagation();
+      await moveCard(r.pixiv_id, 'down', this);
+    });
+  }
 
   col.querySelector('.delete-btn').addEventListener('click', function() {
     deleteTarget = r.pixiv_id;
