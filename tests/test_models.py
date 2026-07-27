@@ -156,3 +156,23 @@ class TestIllustToDictFavoriteOverride:
         assert d['is_favorite'] is True
         d2 = il.to_dict(favorite=False)
         assert d2['is_favorite'] is False
+
+
+class TestIsRemoved:
+    def test_illusts_no_is_favorite_column(self, clean_db):
+        import models
+        with models.engine.connect() as conn:
+            cols = [r[1] for r in conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()]
+        assert 'is_favorite' not in cols
+        assert 'favorited_at' not in cols
+
+    def test_no_sync_is_favorite_symbol(self):
+        import app
+        assert not hasattr(app, '_sync_is_favorite')
+
+    def test_illust_model_has_no_is_favorite_attr(self, clean_db):
+        from models import Illust
+        il = Illust(pixiv_id=99999, title='t')
+        clean_db.add(il); clean_db.commit()
+        assert not hasattr(il, 'is_favorite')
+        assert not hasattr(il, 'favorited_at')

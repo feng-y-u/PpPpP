@@ -135,7 +135,6 @@ def _build_orphan_dicts(pixiv_ids: list[int], local_items: dict[int, list[str]])
             'downloaded_at': None,
             'file_size': total_size,
             'is_favorite': False,
-            'favorited_at': None,
             'created_at': None,
         })
     return results
@@ -1490,18 +1489,6 @@ def api_settings_post() -> Response:
 # ── 收藏夹 ──
 
 
-def _sync_is_favorite(pixiv_id: int) -> None:
-    """根据收藏夹归属重新计算 is_favorite。"""
-    with get_session() as db:
-        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-        if not illust:
-            return
-        count = db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).count()
-        illust.is_favorite = count > 0
-        illust.favorited_at = datetime.now(timezone.utc) if count > 0 else None
-        safe_commit(db)
-
-
 @app.route('/api/collections', methods=['GET'])
 def list_collections() -> Response:
     with get_session() as db:
@@ -1552,17 +1539,14 @@ def update_collection(collection_id: int) -> Response:
 
 @app.route('/api/collections/<int:collection_id>', methods=['DELETE'])
 @_csrf_required
-def delete_collection(collection_id: int) -> Response:
+def         delete_collection(collection_id: int) -> Response:
     with get_session() as db:
         c = db.query(Collection).filter(Collection.id == collection_id).first()
         if not c:
             return jsonify({'error': '收藏夹不存在'}), 404
-        affected = [item.pixiv_id for item in db.query(CollectionItem).filter(CollectionItem.collection_id == collection_id).all()]
         db.query(CollectionItem).filter(CollectionItem.collection_id == collection_id).delete()
         db.delete(c)
         safe_commit(db)
-        for pid in affected:
-            _sync_is_favorite(pid)
         return jsonify({'status': 'deleted'})
 
 
@@ -1610,7 +1594,6 @@ def add_collection_item(collection_id: int) -> Response:
         db.add(item)
         safe_commit(db)
         data = item.to_dict()
-    _sync_is_favorite(pixiv_id)
     return jsonify(data), 201
 
 
@@ -1628,7 +1611,6 @@ def remove_collection_item(collection_id: int, pixiv_id: int) -> Response:
             return jsonify({'error': '作品不在收藏夹中'}), 404
         db.delete(item)
         safe_commit(db)
-    _sync_is_favorite(pixiv_id)
     return jsonify({'status': 'deleted'})
 
 
@@ -1665,8 +1647,6 @@ def batch_add_collection_items(collection_id: int) -> Response:
                 next_pos += 1000.0
                 added += 1
         safe_commit(db)
-        for pid in pixiv_ids:
-            _sync_is_favorite(pid)
     return jsonify({'added': added, 'total': len(pixiv_ids)})
 
 
@@ -1686,8 +1666,6 @@ def batch_remove_collection_items(collection_id: int) -> Response:
             CollectionItem.pixiv_id.in_(pixiv_ids),
         ).delete(synchronize_session='fetch')
         safe_commit(db)
-        for pid in pixiv_ids:
-            _sync_is_favorite(pid)
     return jsonify({'removed': removed})
 
 

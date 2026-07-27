@@ -68,8 +68,6 @@ class Illust(Base):
     download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
-    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
-    favorited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -218,11 +216,6 @@ def init_db() -> None:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN description TEXT DEFAULT ""'))
             conn.commit()
-    if 'is_favorite' not in columns:
-        with engine.connect() as conn:
-            conn.execute(text('ALTER TABLE illusts ADD COLUMN is_favorite BOOLEAN DEFAULT 0'))
-            conn.execute(text('ALTER TABLE illusts ADD COLUMN favorited_at DATETIME'))
-            conn.commit()
     if 'downloaded_at' not in columns:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN downloaded_at DATETIME'))
@@ -255,29 +248,32 @@ def init_db() -> None:
                 ), {'p': counter * 1000.0, 'id': row[0]})
             conn.execute(text('PRAGMA user_version = 1'))
 
-    # 收藏夹表迁移：创建默认"我的收藏"并迁移现有收藏
-    # Base.metadata.create_all above created the tables, so they always exist now
-    from sqlalchemy import select
-    sel = select(Collection).where(Collection.name == '我的收藏')
-    with Session(engine) as sess:
-        default = sess.execute(sel).scalar_one_or_none()
-        if not default:
-            default = Collection(name='我的收藏', description='默认收藏夹')
-            sess.add(default)
-            sess.commit()
-        # 迁移尚未在默认收藏夹中的 is_favorite=True 记录
-        sel2 = select(CollectionItem.pixiv_id).where(CollectionItem.collection_id == default.id)
-        existing_ids = {row[0] for row in sess.execute(sel2).fetchall()}
-        to_migrate = sess.execute(
-            select(Illust).where(Illust.is_favorite == True)
-        ).scalars().all()
-        new_items = []
-        for i in to_migrate:
-            if i.pixiv_id not in existing_ids:
-                new_items.append(CollectionItem(collection_id=default.id, pixiv_id=i.pixiv_id))
-        if new_items:
-            sess.add_all(new_items)
-            sess.commit()
+    # ── 清理已废弃的 is_favorite / favorited_at 列 ──
+    illusts_cols = [c['name'] for c in inspector.get_columns('illusts')]
+    has_is_fav = any(c == 'is_favorite' for c in illusts_cols)
+    has_fav_at = any(c == 'favorited_at' for c in illusts_cols)
+    if has_is_fav or has_fav_at:
+        import sqlite3 as _sqlite3
+        ver = tuple(int(x) for x in _sqlite3.sqlite_version.split('.'))
+        if ver >= (3, 35, 0):
+            with engine.connect() as conn:
+                if has_is_fav:
+                    conn.execute(text('ALTER TABLE illusts DROP COLUMN is_favorite'))
+                if has_fav_at:
+                    conn.execute(text('ALTER TABLE illusts DROP COLUMN favorited_at'))
+                conn.commit()
+        else:
+            with engine.connect() as conn:
+                info_rows = conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()
+                keep = [r[1] for r in info_rows if r[1] not in ('is_favorite', 'favorited_at')]
+                col_list = ', '.join(f'"{c}"' for c in keep)
+                conn.execute(text(f'CREATE TABLE _illusts_new AS SELECT {col_list} FROM illusts'))
+                conn.execute(text('DROP TABLE illusts'))
+                conn.execute(text('ALTER TABLE _illusts_new RENAME TO illusts'))
+                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
+                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
+                conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_illusts_pixiv_id ON illusts(pixiv_id)'))
+                conn.commit()
 
 
 def get_session() -> Session:
