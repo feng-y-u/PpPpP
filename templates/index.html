@@ -544,6 +544,10 @@ async function loadNextPage() {
   if (!nextCursor) return;
   $('#nextPageBtn').disabled = true;
   $('#nextPageBtn').textContent = '加载中...';
+  const restoreBtn = () => {
+    $('#nextPageBtn').disabled = !hasMore;
+    $('#nextPageBtn').textContent = '下一页';
+  };
 
   try {
     const params = new URLSearchParams();
@@ -561,24 +565,24 @@ async function loadNextPage() {
       return;
     }
     const data = await resp.json();
-    if (!data.results.length) {
-      hasMore = data.has_more || false;
+    // 异步任务：按钮状态由轮询回调恢复（done 时 renderPaginationBar，
+    // 失败/404 时 restoreBtn），避免用旧 hasMore 提前恢复导致重复翻页
+    pollSearch(data.task_id, (res) => {
+      if (!res.results.length) {
+        hasMore = res.has_more || false;
+        renderPaginationBar();
+        return;
+      }
+      loadedPages.push(res.results);
+      nextCursor = res.cursor || null;
+      hasMore = res.has_more || false;
+      currentPage = loadedPages.length;
+      renderPage(currentPage);
       renderPaginationBar();
-      return;
-    }
-    loadedPages.push(data.results);
-    nextCursor = data.cursor || null;
-    hasMore = data.has_more || false;
-    currentPage = loadedPages.length;
-    renderPage(currentPage);
-    renderPaginationBar();
-    saveSearchState();
-    maybeToastFetchStats(data.fetch_stats);
-  } catch { showToast('网络错误', true); }
-  finally {
-    $('#nextPageBtn').disabled = !hasMore;
-    $('#nextPageBtn').textContent = '下一页';
-  }
+      saveSearchState();
+      maybeToastFetchStats(res.fetch_stats);
+    }, restoreBtn);
+  } catch { showToast('网络错误', true); restoreBtn(); }
 }
 
 async function doSearch() {
@@ -608,6 +612,7 @@ async function doSearch() {
       if (resp.status === 401) {
         showToast('Cookie 已过期，请更新 cookies.txt', true);
         $('#authErrorState').style.display = 'block';
+        showLoading(false);
         return;
       }
       const err = await resp.json().catch(() => ({}));
@@ -616,24 +621,64 @@ async function doSearch() {
         return doSearch();
       }
       showToast(resp.status === 429 ? '请求过于频繁' : (err.error || '搜索失败'), true);
+      showLoading(false);
       return;
     }
     const data = await resp.json();
-    if (!data.results.length) {
-      $('#emptyState').style.display = 'block';
+    if (type === 'following') {
+      finishSearch(data);
       return;
     }
-    loadedPages = [data.results];
-    nextCursor = data.cursor || null;
-    hasMore = data.has_more || false;
-    currentPage = 1;
-    data.results.forEach(r => renderCard(r));
-    renderPaginationBar();
-    lazyLoad();
-    saveSearchState();
-    maybeToastFetchStats(data.fetch_stats);
-  } catch { showToast('网络错误', true); }
-  finally { showLoading(false); }
+    pollSearch(data.task_id, finishSearch);
+  } catch { showToast('网络错误', true); showLoading(false); }
+}
+
+function finishSearch(data) {
+  if (!data.results.length) {
+    $('#emptyState').style.display = 'block';
+    showLoading(false);
+    return;
+  }
+  loadedPages = [data.results];
+  nextCursor = data.cursor || null;
+  hasMore = data.has_more || false;
+  currentPage = 1;
+  data.results.forEach(r => renderCard(r));
+  renderPaginationBar();
+  lazyLoad();
+  saveSearchState();
+  maybeToastFetchStats(data.fetch_stats);
+  showLoading(false);
+}
+
+function pollSearch(taskId, onDone, onFail) {
+  fetch(`/api/search/status/${taskId}`)
+    .then(async resp => {
+      if (resp.status === 404) {
+        showToast('搜索任务已失效，请重新搜索', true);
+        showLoading(false);
+        if (onFail) onFail();
+        return;
+      }
+      const data = await resp.json();
+      if (data.status === 'running') {
+        setTimeout(() => pollSearch(taskId, onDone, onFail), 2000);
+        return;
+      }
+      if (data.status === 'error') {
+        if (resp.status === 401) {
+          showToast('Cookie 已过期，请更新 cookies.txt', true);
+          $('#authErrorState').style.display = 'block';
+        } else {
+          showToast(data.error || '搜索失败', true);
+        }
+        showLoading(false);
+        if (onFail) onFail();
+        return;
+      }
+      onDone(data);
+    })
+    .catch(() => { showToast('网络错误', true); showLoading(false); if (onFail) onFail(); });
 }
 
 // ── UI Toggle ──

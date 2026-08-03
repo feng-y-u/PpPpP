@@ -509,9 +509,76 @@ def index() -> str:
     return render_template('index.html', csrf_token=_get_csrf_token(), max_bookmarks_default=MAX_BOOKMARKS_DEFAULT)
 
 
+# ── 异步搜索任务 ──
+# 搜索（含限速拉取详情）在后台线程执行，/search 立即返回 task_id，
+# 前端轮询 /api/search/status/<id>。gunicorn -w 1 下搜索不再阻塞其他请求。
+
+_search_tasks: dict[str, dict] = {}
+_search_tasks_lock = threading.Lock()
+SEARCH_TASK_TTL = 600.0  # 完成 10 分钟后清理
+
+
+def _cleanup_search_tasks() -> None:
+    now = time.time()
+    with _search_tasks_lock:
+        for tid in [t for t, v in _search_tasks.items()
+                    if v['status'] in ('done', 'error')
+                    and v.get('finished_at') and now - v['finished_at'] > SEARCH_TASK_TTL]:
+            del _search_tasks[tid]
+
+
+def _submit_search_task(fn) -> str:
+    """提交搜索任务到后台线程，返回 task_id。fn: () -> (results, cursor, has_more)"""
+    _cleanup_search_tasks()
+    task_id = secrets.token_hex(8)
+    task: dict = {
+        'status': 'running',
+        'results': [],
+        'cursor': None,
+        'has_more': False,
+        'error': None,
+        'fetch_stats': {},
+        'created_at': time.time(),
+        'finished_at': None,
+    }
+    with _search_tasks_lock:
+        _search_tasks[task_id] = task
+
+    def _run() -> None:
+        try:
+            results, next_cursor, has_more = fn()
+            task['results'] = results
+            task['cursor'] = next_cursor
+            task['has_more'] = has_more
+            task['fetch_stats'] = fetcher.get_last_fetch_stats()
+            task['status'] = 'done'
+            logger.info(
+                f'[search] 完成 task={task_id} results={len(results)} has_more={has_more} '
+                f'details={task["fetch_stats"].get("detail_fetched", 0)} '
+                f'failed={task["fetch_stats"].get("detail_failed", 0)} '
+                f'seconds={(time.time() - task["created_at"]):.1f}'
+            )
+        except PixivAuthError:
+            logger.warning(f'搜索任务 {task_id} 认证失败')
+            task['status'] = 'error'
+            task['error'] = 'auth'
+        except FileNotFoundError as e:
+            logger.error(f'搜索任务 {task_id} 文件缺失：{e}')
+            task['status'] = 'error'
+            task['error'] = f'缺少文件: {e}'
+        except Exception as e:
+            logger.error(f'搜索任务 {task_id} 失败：{e}', exc_info=True)
+            task['status'] = 'error'
+            task['error'] = '搜索服务暂时不可用，请稍后重试'
+        finally:
+            task['finished_at'] = time.time()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return task_id
+
+
 @app.route('/search')
 def search() -> Response:
-    _req_start = time.time()
     search_type = request.args.get('type', 'tag')
     query = request.args.get('query', '').strip()
     min_bookmarks = request.args.get('min_bookmarks', MAX_BOOKMARKS_DEFAULT)
@@ -537,7 +604,7 @@ def search() -> Response:
     if r18_mode not in ('all', 'safe'):
         r18_mode = 'all'
 
-    # 解析游标
+    # 解析游标（同步快速校验）
     cursor_data = None
     if cursor_str:
         cursor_data = decode_cursor(cursor_str)
@@ -554,8 +621,6 @@ def search() -> Response:
         r18_mode = cursor_data.get('r18_mode', r18_mode)
         min_bookmarks = cursor_data.get('min_bookmarks', min_bookmarks)
 
-    logger.info(f'搜索：type={search_type}, query={query!r}, min={min_bookmarks}, sort={sort_order}, tag_mode={tag_mode}')
-
     query_params = {
         'type': search_type,
         'query': query,
@@ -565,53 +630,66 @@ def search() -> Response:
         'min_bookmarks': min_bookmarks,
     }
 
-    try:
-        if search_type == 'tag':
-            if len(query) > 200:
-                return jsonify({'error': '搜索关键词过长'}), 400
-            if not query:
-                def _browse_fn(page, remaining=None):
-                    return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode,
-                                            max_results=remaining or ITEMS_PER_PAGE)
-                results, next_cursor, has_more = paginated_search(_browse_fn, query_params, ITEMS_PER_PAGE, cursor_data)
-            else:
-                def _tag_fn(page, remaining=None):
-                    return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode,
-                                         max_results=remaining or ITEMS_PER_PAGE)
-                results, next_cursor, has_more = paginated_search(_tag_fn, query_params, ITEMS_PER_PAGE, cursor_data)
+    # 组装后台执行闭包
+    if search_type == 'tag':
+        if len(query) > 200:
+            return jsonify({'error': '搜索关键词过长'}), 400
+        if not query:
+            def _browse_fn(page, remaining=None):
+                return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode,
+                                        max_results=remaining or ITEMS_PER_PAGE)
+
+            def _fn():
+                return paginated_search(_browse_fn, query_params, ITEMS_PER_PAGE, cursor_data)
         else:
-            if not cursor_str and not query.isdigit():
-                return jsonify({'error': '画师ID必须为数字'}), 400
-            def _user_fn(page, remaining=None):
-                return search_by_user(query, min_bookmarks, page, hide_r18=(r18_mode == 'safe'),
-                                      max_results=remaining or ITEMS_PER_PAGE)
-            results, next_cursor, has_more = paginated_search(_user_fn, query_params, ITEMS_PER_PAGE, cursor_data)
-    except PixivAuthError as e:
-        logger.warning(f'搜索认证失败：{e}')
-        return jsonify({'error': 'Cookie 已过期，请更新 cookies.txt 后重试'}), 401
-    except FileNotFoundError as e:
-        logger.error(f'搜索失败 - 文件未找到：{e}')
-        return jsonify({'error': f'缺少文件: {e}'}), 500
-    except Exception as e:
-        logger.error(f'搜索失败：{e}', exc_info=True)
-        return jsonify({'error': '搜索服务暂时不可用，请稍后重试'}), 502
+            def _tag_fn(page, remaining=None):
+                return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode,
+                                     max_results=remaining or ITEMS_PER_PAGE)
 
-    stats = fetcher.get_last_fetch_stats()
+            def _fn():
+                return paginated_search(_tag_fn, query_params, ITEMS_PER_PAGE, cursor_data)
+    else:
+        if not cursor_str and not query.isdigit():
+            return jsonify({'error': '画师ID必须为数字'}), 400
+
+        def _user_fn(page, remaining=None):
+            return search_by_user(query, min_bookmarks, page, hide_r18=(r18_mode == 'safe'),
+                                  max_results=remaining or ITEMS_PER_PAGE)
+
+        def _fn():
+            return paginated_search(_user_fn, query_params, ITEMS_PER_PAGE, cursor_data)
+
+    task_id = _submit_search_task(_fn)
     logger.info(
-        f'[search] type={search_type} query={query!r} min={min_bookmarks} sort={sort_order} '
-        f'tag_mode={tag_mode} r18={r18_mode} cursor={"yes" if cursor_str else "no"} '
-        f'results={len(results)} has_more={has_more} '
-        f'details_fetched={stats["detail_fetched"]} details_failed={stats["detail_failed"]} '
-        f'search_ms={(time.time() - _req_start) * 1000:.0f} '
-        f'fetch_seconds={stats["seconds"]:.1f}'
+        f'[search] 已提交 task={task_id} type={search_type} query={query!r} min={min_bookmarks} '
+        f'sort={sort_order} tag_mode={tag_mode} r18={r18_mode} cursor={"yes" if cursor_str else "no"}'
     )
+    return jsonify({'task_id': task_id, 'status': 'running'})
 
-    return jsonify({
-        'results': results,
-        'cursor': next_cursor,
-        'has_more': has_more,
-        'fetch_stats': stats,
-    })
+
+@app.route('/api/search/status/<task_id>')
+def search_status(task_id: str) -> Response:
+    # 访问即清理过期任务（无需依赖下次提交），控制内存上限
+    _cleanup_search_tasks()
+    # 无锁读取：CPython 下 dict 读取原子，且写入方最后才置 status，
+    # 读到 done/error 时其余字段必已写入完成，视图一致
+    task = _search_tasks.get(task_id)
+    if not task:
+        return jsonify({'error': '搜索任务不存在或已过期，请重新搜索',
+                        'error_code': 'TASK_LOST'}), 404
+    resp = {
+        'status': task['status'],
+        'results': task['results'],
+        'cursor': task['cursor'],
+        'has_more': task['has_more'],
+        'fetch_stats': task['fetch_stats'],
+    }
+    if task['status'] == 'error':
+        resp['error'] = task['error']
+        if task['error'] == 'auth':
+            return jsonify(resp), 401
+        return jsonify(resp), 502
+    return jsonify(resp)
 
 
 @app.route('/api/following')

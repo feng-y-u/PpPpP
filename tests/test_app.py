@@ -102,12 +102,27 @@ class TestBlockedTags:
 
 
 class TestSearch:
+    def _poll(self, client, task_id, timeout=50):
+        """轮询异步搜索任务直到终态（done 200 / error 401·502 / 丢失 404）。"""
+        import time
+        for _ in range(timeout):
+            r = client.get(f'/api/search/status/{task_id}')
+            if r.status_code == 404:
+                return r
+            data = r.get_json()
+            if data and data.get('status') != 'running':
+                return r
+            time.sleep(0.05)
+        raise AssertionError(f'搜索任务 {task_id} 超时未完成')
+
     @patch('app.browse_discovery')
     def test_empty_query_calls_discovery(self, mock_discovery, client):
         mock_discovery.return_value = ([], False)
         resp = client.get('/search')
-        data = resp.get_json()
         assert resp.status_code == 200
+        task_id = resp.get_json()['task_id']
+        final = self._poll(client, task_id)
+        assert final.get_json()['status'] == 'done'
         mock_discovery.assert_called_once()
 
     @patch('app.search_by_tag')
@@ -115,6 +130,8 @@ class TestSearch:
         mock_search.return_value = ([], False)
         resp = client.get('/search?type=tag&query=初音ミク')
         assert resp.status_code == 200
+        task_id = resp.get_json()['task_id']
+        self._poll(client, task_id)
         mock_search.assert_called_once()
         args, kwargs = mock_search.call_args
         assert '初音ミク' in args
@@ -124,6 +141,8 @@ class TestSearch:
         mock_search.return_value = ([], False)
         resp = client.get('/search?type=user&query=12345')
         assert resp.status_code == 200
+        task_id = resp.get_json()['task_id']
+        self._poll(client, task_id)
         mock_search.assert_called_once()
 
     def test_search_user_non_digit_returns_400(self, client):
@@ -142,7 +161,10 @@ class TestSearch:
             '&page=2&sort=date_d&tag_mode=and&r18_mode=safe'
         )
         assert resp.status_code == 200
-        data = resp.get_json()
+        task_id = resp.get_json()['task_id']
+        final = self._poll(client, task_id)
+        data = final.get_json()
+        assert data['status'] == 'done'
         assert data['has_more'] is True
         assert data['cursor'] == 'cursor_abc'
         assert len(data['results']) == 1
@@ -152,8 +174,43 @@ class TestSearch:
         mock_discovery.return_value = ([], False)
         resp = client.get('/search?sort=invalid')
         assert resp.status_code == 200
+        task_id = resp.get_json()['task_id']
+        self._poll(client, task_id)
         args, kwargs = mock_discovery.call_args
         assert args[1] == 'date_d'
+
+    @patch('app.paginated_search', side_effect=RuntimeError('boom'))
+    def test_task_error_returns_502(self, mock_paginated, client):
+        resp = client.get('/search?type=tag&query=test')
+        assert resp.status_code == 200
+        task_id = resp.get_json()['task_id']
+        final = self._poll(client, task_id)
+        assert final.status_code == 502
+        assert final.get_json()['error']
+
+    def test_task_auth_error_returns_401(self, client):
+        from fetcher import PixivAuthError
+        with patch('app.search_by_tag', side_effect=PixivAuthError('auth')):
+            resp = client.get('/search?type=tag&query=test')
+            task_id = resp.get_json()['task_id']
+            final = self._poll(client, task_id)
+            assert final.status_code == 401
+
+    def test_task_not_found_returns_404(self, client):
+        resp = client.get('/api/search/status/no-such-task')
+        assert resp.status_code == 404
+
+    def test_task_cleanup_after_ttl(self, client, monkeypatch):
+        import app
+        with patch('app.search_by_tag', return_value=([], False)):
+            resp = client.get('/search?type=tag&query=test')
+            task_id = resp.get_json()['task_id']
+            self._poll(client, task_id)
+        # 缩短 TTL 并强制清理
+        monkeypatch.setattr('app.SEARCH_TASK_TTL', -1)
+        app._cleanup_search_tasks()
+        r = client.get(f'/api/search/status/{task_id}')
+        assert r.status_code == 404
 
 
 class TestRoutes:
