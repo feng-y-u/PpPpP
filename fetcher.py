@@ -305,10 +305,13 @@ class _TokenBucket:
 
 # Pixiv 详情 API 限流保守速率（并发 3 时实测仍会 403，必须全局限速）。
 # 前台同步拉取（搜索过滤）独占高速桶；后台补全走独立低速桶，避免抢占搜索带宽。
+# 两个桶之上再设总速率闸，防止双桶并发时峰值超限重新触发 403。
 DETAIL_RATE_PER_MINUTE = 45
 FILL_RATE_PER_MINUTE = 20
+TOTAL_RATE_PER_MINUTE = 60
 _detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
 _fill_limiter = _TokenBucket(FILL_RATE_PER_MINUTE)
+_total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
 
 # 最近一次搜索的详情拉取统计（供前端展示"为什么慢"）
 _last_fetch_stats: dict = {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0}
@@ -322,6 +325,7 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                        limiter: _TokenBucket | None = None) -> dict | None:
     url = f'{PIXIV_BASE_URL}/ajax/illust/{pixiv_id}'
     (limiter or _detail_limiter).wait()
+    _total_limiter.wait()
     for attempt in range(DETAIL_MAX_RETRIES + 1):
         try:
             resp = session.get(url, timeout=DETAIL_TIMEOUT)
@@ -355,17 +359,21 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
 
 def _fetch_details_parallel(pixiv_ids: list[int],
                             early_stop: Callable[[dict | None], bool] | None = None,
-                            limiter: _TokenBucket | None = None) -> dict[int, dict]:
+                            limiter: _TokenBucket | None = None) -> tuple[dict[int, dict], int]:
     """并行拉取详情，支持提前终止。
 
     early_stop: 每完成一个详情后调用（参数为该详情或 None），返回 True 时
     取消未启动的拉取并立即返回（已启动的请求让其在后台自然结束，不阻塞调用方）。
     用于搜索流式过滤：凑够一页就停止，避免拉取整页 60 条详情。
     limiter: 请求限速器；不传时用前台高速桶（搜索），后台补全应传 _fill_limiter。
+
+    Returns: (成功详情 dict, 实际发起的请求数)。early_stop 取消的未启动请求
+    不计入 attempted，避免统计把"未尝试"误报为"失败"。
     """
     if not pixiv_ids:
-        return {}
+        return {}, 0
     results = {}
+    attempted = 0
 
     def _worker(pid: int) -> tuple[int, dict | None]:
         session = _build_session()
@@ -375,6 +383,7 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     try:
         futures = {executor.submit(_worker, pid): pid for pid in pixiv_ids}
         for future in as_completed(futures):
+            attempted += 1
             try:
                 pid, detail = future.result()
                 if detail is not None:
@@ -389,7 +398,7 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
-    return results
+    return results, attempted
 
 
 # ── 后台详情补全 ──
@@ -421,7 +430,7 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
             _fill_last_attempt[pid] = now
         _filling_ids.update(new_ids)
     try:
-        details = _fetch_details_parallel(new_ids, limiter=_fill_limiter)
+        details, _ = _fetch_details_parallel(new_ids, limiter=_fill_limiter)
         if not details:
             return
         with get_session() as db:
@@ -559,9 +568,9 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
     # 处理需要重新拉取详情的已有记录
     if to_refetch:
-        details = _fetch_details_parallel(to_refetch)
+        details, attempted = _fetch_details_parallel(to_refetch)
         fetch_stats['detail_fetched'] += len(details)
-        fetch_stats['detail_failed'] += len(to_refetch) - len(details)
+        fetch_stats['detail_failed'] += attempted - len(details)
         for pixiv_id in to_refetch:
             detail = details.get(pixiv_id)
             if detail is None:
@@ -607,10 +616,10 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             passed[0] += 1
             return passed[0] >= max_results
 
-        details = _fetch_details_parallel(
+        details, attempted = _fetch_details_parallel(
             to_fetch, early_stop=_early_stop if max_results > 0 else None)
         fetch_stats['detail_fetched'] += len(details)
-        fetch_stats['detail_failed'] += len(to_fetch) - len(details)
+        fetch_stats['detail_failed'] += attempted - len(details)
         for pixiv_id in to_fetch:
             detail = details.get(pixiv_id)
             if detail is None:
@@ -694,6 +703,8 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
     cache_key = f'tag|q={keyword}|p={page}|s={sort_order}|tm={tag_mode}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
     cached = _cache_get(cache_key)
     if cached is not None:
+        # 缓存命中：本次未拉取详情，清零统计避免把上次搜索的耗时/失败归属到本次
+        _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
         return cached
 
     tags = _split_tags(keyword)
@@ -769,6 +780,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
     cache_key = f'disc|p={page}|s={sort_order}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
     cached = _cache_get(cache_key)
     if cached is not None:
+        _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
         return cached
 
     session = _build_session()

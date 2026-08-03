@@ -1,4 +1,4 @@
-from unittest.mock import patch
+﻿from unittest.mock import patch
 
 import time
 import threading
@@ -70,7 +70,7 @@ class TestProcessItemsBookmarkFill:
         记录应排入后台补全队列，而不是被永久静默丢弃。"""
         clean_db.add(Illust(pixiv_id=1002, title='old', bookmark_count=0))
         clean_db.commit()
-        mock_fetch.return_value = {}
+        mock_fetch.return_value = ({}, 1)
 
         results = fetcher._process_items(
             clean_db, [_item(1002)],
@@ -91,13 +91,13 @@ class TestProcessItemsBookmarkFill:
         """min>0 + 条目无 bookmarkCount：详情拉取成功时更新 DB 并显示真实值。"""
         clean_db.add(Illust(pixiv_id=1003, title='old', bookmark_count=0))
         clean_db.commit()
-        mock_fetch.return_value = {1003: {
+        mock_fetch.return_value = ({1003: {
             'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
             'bookmark_count': 900, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
             'original_urls': ['https://i.pximg.net/1003_p0.jpg'],
             'tags': ['a'], 'description': '',
-        }}
+        }}, 1)
 
         results = fetcher._process_items(
             clean_db, [_item(1003)],
@@ -142,7 +142,7 @@ class TestProcessItemsBookmarkFill:
                 'original_urls': ['https://i.pximg.net/2001_p0.jpg'],
                 'tags': ['a'], 'description': ''}
         d300 = {**d500, 'bookmark_count': 300}
-        mock_fetch.return_value = {2001: d500, 2002: d300, 2003: d500, 2004: d500}
+        mock_fetch.return_value = ({2001: d500, 2002: d300, 2003: d500, 2004: d500}, 4)
 
         items = [_item(2001), _item(2002), _item(2003), _item(2004)]
         results = fetcher._process_items(
@@ -167,7 +167,7 @@ class TestProcessItemsBookmarkFill:
     @patch('fetcher._fetch_details_parallel')
     def test_max_results_zero_does_not_pass_early_stop(self, mock_fetch, clean_db):
         """max_results=0（默认，批量下载）时不传 early_stop，全量拉取。"""
-        mock_fetch.return_value = {}
+        mock_fetch.return_value = ({}, 0)
         fetcher._process_items(
             clean_db, [_item(3001, 500)],
             id_extractor=lambda item: int(item['id']),
@@ -182,7 +182,7 @@ class TestProcessItemsBookmarkFill:
         """early_stop 返回 True 后，_fetch_details_parallel 应取消剩余拉取并立即返回。"""
         with patch('fetcher._get_illust_detail', return_value=None), \
              patch('fetcher._build_session', side_effect=RuntimeError('no net')):
-            results = fetcher._fetch_details_parallel(
+            results, attempted = fetcher._fetch_details_parallel(
                 [4001, 4002, 4003, 4004],
                 early_stop=lambda detail: True,
             )
@@ -190,6 +190,38 @@ class TestProcessItemsBookmarkFill:
             # 恢复前结束，避免其调用真实 _get_illust_detail 联网
             time.sleep(0.5)
         assert results == {}
+        assert attempted >= 1  # 至少处理了第一个完成的请求
+
+    def test_fetch_stats_accurate_failure_count(self, clean_db):
+        """统计准确性：早停取消的请求不计入失败；仅实际发起的请求统计失败数。"""
+        def _fake_detail(session, pid, limiter=None):
+            if pid in (6002, 6003):  # 两个失败
+                return None
+            return {
+                'title': f't{pid}', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+                'bookmark_count': 500, 'thumb_url': 'https://x.jpg',
+                'upload_date': '2026-01-01T00:00:00+09:00',
+                'original_urls': [f'https://i.pximg.net/{pid}_p0.jpg'],
+                'tags': ['a'], 'description': '',
+            }
+
+        with patch('fetcher._get_illust_detail', side_effect=_fake_detail):
+            results = fetcher._process_items(
+                clean_db,
+                [_item(6001, 500), _item(6002, 300), _item(6003, 300),
+                 _item(6004, 500), _item(6005, 500)],
+                id_extractor=lambda item: int(item['id']),
+                illust_factory=fetcher._illust_from_item,
+                blocked=set(),
+                min_bookmarks=400,
+                defer_details=False,
+                max_results=3,
+            )
+            time.sleep(0.5)
+        stats = fetcher.get_last_fetch_stats()
+        assert stats['detail_fetched'] >= 3
+        assert stats['detail_failed'] == 2
+        assert len(results) == 3
 
     def test_early_stop_fires_after_enough_passed(self, clean_db):
         """流式过滤端到端：真实 _fetch_details_parallel 下，凑够 max_results 条
@@ -218,3 +250,4 @@ class TestProcessItemsBookmarkFill:
             time.sleep(0.5)
         assert len(results) == 2
         assert all(r['bookmark_count'] == 500 for r in results)
+

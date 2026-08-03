@@ -826,13 +826,17 @@ function lazyLoad() {
   }, { rootMargin: '200px' });
   $$('img[data-src]').forEach(img => observer.observe(img));
 }
+let loadingHintTimer = null;
 function showLoading(on) {
   $('#loadingIndicator').style.display = on ? 'block' : 'none';
   $('#searchBtn').disabled = on;
   const hint = $('#loadingHint');
+  if (loadingHintTimer) { clearTimeout(loadingHintTimer); loadingHintTimer = null; }
   if (on) {
     hint.style.display = 'none';
-    setTimeout(() => { if ($('#loadingIndicator').style.display !== 'none') hint.style.display = 'block'; }, 5000);
+    loadingHintTimer = setTimeout(() => {
+      if ($('#loadingIndicator').style.display !== 'none') hint.style.display = 'block';
+    }, 5000);
   } else {
     hint.style.display = 'none';
   }
