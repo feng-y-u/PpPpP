@@ -362,3 +362,65 @@ class TestBookmarkStaleness:
             updated = updated.replace(tzinfo=timezone.utc)
         assert (datetime.now(timezone.utc) - updated).total_seconds() < 60
 
+    @patch('fetcher._fetch_details_parallel')
+    def test_non_defer_new_record_stamps_timestamp(self, mock_fetch, clean_db):
+        """非 defer 插入（同步拉详情成功）：新记录应带 bookmark_updated_at，
+        否则 7 天 TTL 刷新永远不会作用于它。"""
+        mock_fetch.return_value = ({8001: {
+            'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+            'bookmark_count': 900, 'thumb_url': 'https://x.jpg',
+            'upload_date': '2026-01-01T00:00:00+09:00',
+            'original_urls': ['https://i.pximg.net/8001_p0.jpg'],
+            'tags': ['a'], 'description': '',
+        }}, 1)
+
+        results = fetcher._process_items(
+            clean_db, [_item(8001)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=0,
+            defer_details=False,
+        )
+
+        assert len(results) == 1
+        row = clean_db.query(Illust).filter(Illust.pixiv_id == 8001).first()
+        assert row.bookmark_updated_at is not None
+
+    @patch('fetcher._kick_background_fill')
+    def test_user_search_stale_record_gets_background_refresh(self, mock_fill, clean_db):
+        """search_by_user 场景（非 defer + min=0）：收藏数过期的记录应排入后台补全。"""
+        self._old_illust(clean_db, 8002, 500, days_ago=8)
+
+        results = fetcher._process_items(
+            clean_db, [_item(8002)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=0,
+            defer_details=False,
+        )
+
+        assert len(results) == 1
+        mock_fill.assert_called_once_with([8002])
+
+    @patch('fetcher._kick_background_fill')
+    @patch('fetcher._fetch_details_parallel')
+    def test_non_defer_refetch_failure_still_background_filled(self, mock_fetch, mock_fill, clean_db):
+        """非 defer（批量下载等 min>0 场景）：同步拉详情失败的记录仍应排入后台补全，
+        不再静默丢弃。"""
+        self._old_illust(clean_db, 8003, 0, days_ago=0)
+        mock_fetch.return_value = ({}, 1)  # 拉取失败
+
+        results = fetcher._process_items(
+            clean_db, [_item(8003)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=500,
+            defer_details=False,
+        )
+
+        assert results == []
+        mock_fill.assert_called_once_with([8003])
+

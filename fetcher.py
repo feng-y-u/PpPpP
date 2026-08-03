@@ -576,7 +576,10 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                and existing.bookmark_count >= min_bookmarks \
                and not (hide_r18 and _is_r18(existing.tags_list)):
                 results.append(existing.to_dict())
-                if defer_details and (not existing.original_urls_list or stale):
+                # 缺原图或收藏数过期 → 后台补全刷新（非 defer 且设了最低收藏的批量
+                # 路径除外，避免干扰其同步过滤语义；该路径失败记录另行兜底）
+                if (not existing.original_urls_list or stale) \
+                   and (defer_details or min_bookmarks == 0):
                     to_fill.append(pixiv_id)
             continue
 
@@ -622,9 +625,9 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         for illust in new_illusts:
             results.append(illust.to_dict())
 
+    if to_fill:
+        _kick_background_fill(to_fill)
     if defer_details:
-        if to_fill:
-            _kick_background_fill(to_fill)
         if max_results > 0:
             _last_fetch_stats.update(fetch_stats)
         return results
@@ -661,6 +664,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                 continue
 
             illust = illust_factory(item, detail)
+            illust.bookmark_updated_at = now_utc  # 详情同步拉取成功，收藏数为当前值
             db.add(illust)
             db.flush()
             results.append(illust.to_dict())
@@ -902,6 +906,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
 
 _USER_PROFILE_CACHE: dict[str, tuple[float, list[int]]] = {}
 _USER_PROFILE_TTL = 600.0  # 10 分钟
+_USER_PROFILE_CACHE_MAX = 64
 _user_profile_lock = threading.Lock()
 
 
@@ -937,6 +942,9 @@ def _get_user_profile_ids(session: requests.Session, user_id: str) -> list[int]:
 
     with _user_profile_lock:
         _USER_PROFILE_CACHE[user_id] = (time.time(), all_ids)
+        while len(_USER_PROFILE_CACHE) > _USER_PROFILE_CACHE_MAX:
+            oldest = min(_USER_PROFILE_CACHE, key=lambda k: _USER_PROFILE_CACHE[k][0])
+            del _USER_PROFILE_CACHE[oldest]
     return all_ids
 
 
