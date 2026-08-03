@@ -194,7 +194,7 @@ class TestProcessItemsBookmarkFill:
     def test_early_stop_fires_after_enough_passed(self, clean_db):
         """流式过滤端到端：真实 _fetch_details_parallel 下，凑够 max_results 条
         通过过滤的结果后立即终止，未处理的详情不进入结果。"""
-        def _fake_detail(session, pid):
+        def _fake_detail(session, pid, limiter=None):
             return {
                 'title': f't{pid}', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
                 'bookmark_count': 500, 'thumb_url': 'https://x.jpg',

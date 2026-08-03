@@ -542,7 +542,8 @@ def search() -> Response:
         cursor_data = decode_cursor(cursor_str)
         if cursor_data is None:
             return jsonify({'error': '游标无效', 'error_code': 'CURSOR_INVALID'}), 400
-        if time.time() - cursor_data.get('created_at', 0) > 305:
+        # 游标 15 分钟过期（搜索本身受详情限速影响可能耗时 1 分钟+，305s 太短）
+        if time.time() - cursor_data.get('created_at', 0) > 900:
             return jsonify({'error': '搜索已过期，请重新搜索', 'error_code': 'CURSOR_EXPIRED'}), 400
         # 从游标恢复搜索参数
         search_type = cursor_data.get('type', search_type)
@@ -598,6 +599,7 @@ def search() -> Response:
         'results': results,
         'cursor': next_cursor,
         'has_more': has_more,
+        'fetch_stats': fetcher.get_last_fetch_stats(),
     })
 
 

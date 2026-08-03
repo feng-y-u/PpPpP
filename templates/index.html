@@ -387,6 +387,7 @@
 <div id="loadingIndicator" class="search-loading" style="display:none;">
   <div class="spinner"></div>
   <div>搜索中...</div>
+  <div id="loadingHint" class="loading-hint" style="display:none;">正在拉取作品收藏数（受 Pixiv 限速影响，首次搜索可能需要 1 分钟）...</div>
 </div>
 
 <!-- Toast -->
@@ -572,6 +573,7 @@ async function loadNextPage() {
     renderPage(currentPage);
     renderPaginationBar();
     saveSearchState();
+    maybeToastFetchStats(data.fetch_stats);
   } catch { showToast('网络错误', true); }
   finally {
     $('#nextPageBtn').disabled = !hasMore;
@@ -629,6 +631,7 @@ async function doSearch() {
     renderPaginationBar();
     lazyLoad();
     saveSearchState();
+    maybeToastFetchStats(data.fetch_stats);
   } catch { showToast('网络错误', true); }
   finally { showLoading(false); }
 }
@@ -823,7 +826,23 @@ function lazyLoad() {
   }, { rootMargin: '200px' });
   $$('img[data-src]').forEach(img => observer.observe(img));
 }
-function showLoading(on) { $('#loadingIndicator').style.display = on ? 'block' : 'none'; $('#searchBtn').disabled = on; }
+function showLoading(on) {
+  $('#loadingIndicator').style.display = on ? 'block' : 'none';
+  $('#searchBtn').disabled = on;
+  const hint = $('#loadingHint');
+  if (on) {
+    hint.style.display = 'none';
+    setTimeout(() => { if ($('#loadingIndicator').style.display !== 'none') hint.style.display = 'block'; }, 5000);
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
+function maybeToastFetchStats(st) {
+  if (st && st.detail_fetched > 0 && st.seconds > 5) {
+    showToast(`已拉取 ${st.detail_fetched} 条详情（失败 ${st.detail_failed}），用时 ${Math.round(st.seconds)}s`);
+  }
+}
 
 function loadR18Mode() {
   try {
