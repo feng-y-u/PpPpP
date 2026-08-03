@@ -511,6 +511,7 @@ def index() -> str:
 
 @app.route('/search')
 def search() -> Response:
+    _req_start = time.time()
     search_type = request.args.get('type', 'tag')
     query = request.args.get('query', '').strip()
     min_bookmarks = request.args.get('min_bookmarks', MAX_BOOKMARKS_DEFAULT)
@@ -595,11 +596,21 @@ def search() -> Response:
         logger.error(f'搜索失败：{e}', exc_info=True)
         return jsonify({'error': '搜索服务暂时不可用，请稍后重试'}), 502
 
+    stats = fetcher.get_last_fetch_stats()
+    logger.info(
+        f'[search] type={search_type} query={query!r} min={min_bookmarks} sort={sort_order} '
+        f'tag_mode={tag_mode} r18={r18_mode} cursor={"yes" if cursor_str else "no"} '
+        f'results={len(results)} has_more={has_more} '
+        f'details_fetched={stats["detail_fetched"]} details_failed={stats["detail_failed"]} '
+        f'search_ms={(time.time() - _req_start) * 1000:.0f} '
+        f'fetch_seconds={stats["seconds"]:.1f}'
+    )
+
     return jsonify({
         'results': results,
         'cursor': next_cursor,
         'has_more': has_more,
-        'fetch_stats': fetcher.get_last_fetch_stats(),
+        'fetch_stats': stats,
     })
 
 
@@ -1177,7 +1188,8 @@ def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, ma
         task['current_page'] = page
         task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索第 {page} 页...'))
         try:
-            results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or', r18_mode=r18_mode)
+            results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or',
+                                              r18_mode=r18_mode, limiter=fetcher._bulk_limiter)
         except Exception as e:
             task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索失败: {e}'))
             break

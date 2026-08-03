@@ -328,9 +328,11 @@ class _TokenBucket:
 # 两个桶之上再设总速率闸，防止双桶并发时峰值超限重新触发 403。
 DETAIL_RATE_PER_MINUTE = 45
 FILL_RATE_PER_MINUTE = 20
+BULK_RATE_PER_MINUTE = 15
 TOTAL_RATE_PER_MINUTE = 60
 _detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
 _fill_limiter = _TokenBucket(FILL_RATE_PER_MINUTE)
+_bulk_limiter = _TokenBucket(BULK_RATE_PER_MINUTE)
 _total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
 
 # 最近一次搜索的详情拉取统计（供前端展示"为什么慢"）
@@ -520,7 +522,7 @@ def clear_search_cache() -> None:
 
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
                    min_bookmarks: int = 0, hide_r18: bool = False, defer_details: bool = False,
-                   max_results: int = 0) -> list[dict]:
+                   max_results: int = 0, limiter: _TokenBucket | None = None) -> list[dict]:
     """去重 → 过滤 → 并行拉取详情 → 存储。
 
     Args:
@@ -536,6 +538,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             仅适用于 illust_factory 接受 detail=None 的工厂（如 _illust_from_item）。
         max_results: 收集到该数量的通过结果后提前停止拉取详情（0 = 不限制）。
             用于搜索流式过滤，凑够一页就停，避免拉取整页详情拖慢搜索。
+        limiter: 详情请求限速器；不传用前台高速桶（搜索）。批量下载应传
+            _bulk_limiter，避免大任务抢占交互搜索带宽。
 
     Returns: 可直接用于 API 响应的 illust 字典列表
     """
@@ -587,8 +591,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             item_tags = _parse_tags(item.get('tags', [])) if isinstance(item, dict) else []
             if _is_blocked(item_tags, blocked) or (hide_r18 and _is_r18(item_tags)):
                 continue
-            if isinstance(item, dict) and item.get('bookmarkCount', 0) < min_bookmarks:
-                continue
+            # 注意：defer 仅在 min_bookmarks==0 或显式 defer 时进入，此时无需收藏数过滤；
+            # 列表接口不带 bookmarkCount，收藏数由后台补全写入，故此处无过滤分支
             illust = illust_factory(item, None)
             new_illusts.append(illust)
             to_fill.append(pixiv_id)
@@ -597,7 +601,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
     # 处理需要重新拉取详情的已有记录
     if to_refetch:
-        details, attempted = _fetch_details_parallel(to_refetch)
+        details, attempted = _fetch_details_parallel(to_refetch, limiter=limiter)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
         for pixiv_id in to_refetch:
@@ -647,7 +651,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             return passed[0] >= max_results
 
         details, attempted = _fetch_details_parallel(
-            to_fetch, early_stop=_early_stop if max_results > 0 else None)
+            to_fetch, early_stop=_early_stop if max_results > 0 else None,
+            limiter=limiter)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
         for pixiv_id in to_fetch:
@@ -689,7 +694,9 @@ def _illust_from_item(item: dict, detail: dict | None = None) -> Illust:
         user_id=int(item.get('userId', 0)),
         user_name=item.get('userName', ''),
         page_count=item.get('pageCount', 1),
-        bookmark_count=detail.get('bookmark_count', 0) if detail else item.get('bookmarkCount', 0),
+        # 列表接口不返回 bookmarkCount（实测字段恒缺失），defer 写入时只能为 0，
+        # 真实收藏数由后台补全任务写入
+        bookmark_count=detail.get('bookmark_count', 0) if detail else 0,
         thumb_url=item.get('url', ''),
         upload_date=_parse_date(item.get('updateDate')),
         description=detail.get('description', '') if detail else '',
@@ -723,10 +730,12 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
                   sort_order: str = 'popular_d', max_pages: int = 10,
                   tag_mode: str = 'or', r18_mode: str = 'all',
                   defer_details: bool = False,
-                  max_results: int = 0) -> tuple[list[dict], bool]:
+                  max_results: int = 0,
+                  limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
     """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。
 
     max_results: 流式过滤目标数量，凑够即提前停止拉取详情（0 = 不限制）。
+    limiter: 详情请求限速器；批量下载传 _bulk_limiter 隔离带宽。
     """
     if page > max_pages:
         return [], False
@@ -794,6 +803,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
             min_bookmarks=min_bookmarks,
             defer_details=defer,
             max_results=max_results,
+            limiter=limiter,
         )
         safe_commit(db)
 
@@ -806,7 +816,8 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
                      min_bookmarks: int = 0, r18_mode: str = 'all',
                      defer_details: bool = False,
-                     max_results: int = 0) -> tuple[list[dict], bool]:
+                     max_results: int = 0,
+                     limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
     """浏览 Pixiv 发现页（全部作品），无需指定标签。"""
     cache_key = f'disc|p={page}|s={sort_order}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
     cached = _cache_get(cache_key)
@@ -860,6 +871,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
             min_bookmarks=min_bookmarks,
             defer_details=defer,
             max_results=max_results,
+            limiter=limiter,
         )
         safe_commit(db)
 
@@ -869,7 +881,8 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
 
 def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
                    hide_r18: bool = False,
-                   max_results: int = 0) -> tuple[list[dict], bool]:
+                   max_results: int = 0,
+                   limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
     """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。"""
     session = _build_session()
     all_ids = _get_user_profile_ids(session, user_id)
@@ -894,6 +907,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
             min_bookmarks=min_bookmarks,
             hide_r18=hide_r18,
             max_results=max_results,
+            limiter=limiter,
         )
         safe_commit(db)
 

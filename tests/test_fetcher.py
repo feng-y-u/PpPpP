@@ -116,9 +116,9 @@ class TestProcessItemsBookmarkFill:
 
     @patch('fetcher._kick_background_fill')
     @patch('fetcher._fetch_details_parallel')
-    def test_new_item_bookmark_written_from_item(self, mock_fetch, mock_fill, clean_db):
-        """defer 路径：新记录写入条目自带 bookmarkCount，不写 0。"""
-        mock_fetch.return_value = {}
+    def test_new_item_defer_writes_zero_and_background_fills(self, mock_fetch, mock_fill, clean_db):
+        """defer 路径：新记录列表接口无 bookmarkCount（恒缺失），写入 0 并排入后台补全。"""
+        mock_fetch.return_value = ({}, 0)
 
         results = fetcher._process_items(
             clean_db, [_item(1004, 1200)],
@@ -130,9 +130,10 @@ class TestProcessItemsBookmarkFill:
         )
 
         assert len(results) == 1
-        assert results[0]['bookmark_count'] == 1200
+        assert results[0]['bookmark_count'] == 0
+        mock_fill.assert_called_once_with([1004])
         row = clean_db.query(Illust).filter(Illust.pixiv_id == 1004).first()
-        assert row.bookmark_count == 1200
+        assert row.bookmark_count == 0
 
     @patch('fetcher._fetch_details_parallel')
     def test_max_results_stops_after_enough_passed(self, mock_fetch, clean_db):
