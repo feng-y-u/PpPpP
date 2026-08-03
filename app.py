@@ -1019,6 +1019,7 @@ def api_gallery() -> Response:
 
         results = []
         seen_pids = set()
+        fill_ids: list[int] = []
         for i in illusts:
             paths = local_items.get(i.pixiv_id) or i.local_paths_list or []
             if not i.file_size and paths:
@@ -1032,6 +1033,11 @@ def api_gallery() -> Response:
             d['local_dir'] = os.path.abspath(_get_download_dir(i.pixiv_id)) if paths else None
             results.append(d)
             seen_pids.add(i.pixiv_id)
+            if i.bookmark_count == 0 and not i.original_urls_list:
+                fill_ids.append(i.pixiv_id)
+
+        if fill_ids:
+            fetcher._kick_background_fill(fill_ids)
 
         # 补充不在 DB 的本地文件（收藏夹/收藏筛选时不补孤儿，因其不在任何收藏夹中）
         if not collection_id and not favorites_only:

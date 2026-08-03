@@ -442,3 +442,36 @@ class TestFavoriteMembershipContract:
                          data='{}', content_type='application/json',
                          headers={'X-CSRF-Token': token})
         assert r2.get_json()['is_favorite'] is False
+
+
+class TestGalleryTriggersBookmarkFill:
+    def test_gallery_kicks_fill_for_zero_bookmark_records(self, client, clean_db, monkeypatch):
+        """图库页返回收藏数=0 且未补全原图的记录时，应触发后台详情补全。"""
+        import fetcher
+        called = []
+        monkeypatch.setattr(fetcher, '_kick_background_fill', lambda ids: called.append(list(ids)))
+        clean_db.add(models.Illust(pixiv_id=91001, title='a', bookmark_count=0,
+                                   download_status='done'))
+        clean_db.add(models.Illust(pixiv_id=91002, title='b', bookmark_count=1500,
+                                   download_status='done'))
+        clean_db.commit()
+
+        r = client.get('/api/gallery?limit=10')
+        assert r.status_code == 200
+        assert called and 91001 in called[0]
+        assert 91002 not in called[0]
+
+    def test_gallery_skips_fill_for_filled_records(self, client, clean_db, monkeypatch):
+        """已补全（有原图 URL）的 0 收藏记录不应重复触发补全。"""
+        import fetcher
+        called = []
+        monkeypatch.setattr(fetcher, '_kick_background_fill', lambda ids: called.append(list(ids)))
+        illust = models.Illust(pixiv_id=91003, title='c', bookmark_count=0,
+                               download_status='done')
+        illust.original_urls_list = ['https://i.pximg.net/91003_p0.jpg']
+        clean_db.add(illust)
+        clean_db.commit()
+
+        r = client.get('/api/gallery?limit=10')
+        assert r.status_code == 200
+        assert called == [] or 91003 not in [x for sub in called for x in sub]

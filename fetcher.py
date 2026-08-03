@@ -341,19 +341,29 @@ def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
 
 _fill_lock = threading.Lock()
 _filling_ids: set[int] = set()
+_fill_last_attempt: dict[int, float] = {}
+_FILL_ATTEMPT_INTERVAL = 300.0  # 同一作品两次补全尝试的最小间隔（秒），防 429 限流
 
 
 def _background_fill_details(pixiv_ids: list[int]) -> None:
     """后台补拉详情并写入 DB（bookmark_count / original_urls / description）。
 
     使用 _filling_ids 集合去重，避免同一 pixiv_id 同时被多个补全任务拉取。
+    同一作品距上次补全尝试不足 _FILL_ATTEMPT_INTERVAL 时跳过，防止反复失败刷限流。
     """
     if not pixiv_ids:
         return
+    now = time.time()
     with _fill_lock:
-        new_ids = [pid for pid in pixiv_ids if pid not in _filling_ids]
+        new_ids = [
+            pid for pid in pixiv_ids
+            if pid not in _filling_ids
+            and now - _fill_last_attempt.get(pid, 0) >= _FILL_ATTEMPT_INTERVAL
+        ]
         if not new_ids:
             return
+        for pid in new_ids:
+            _fill_last_attempt[pid] = now
         _filling_ids.update(new_ids)
     try:
         details = _fetch_details_parallel(new_ids)
@@ -457,12 +467,13 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         pixiv_id = id_extractor(item)
         existing = existing_map.get(pixiv_id)
         if existing:
-            # 已有记录但 bookmark_count 未补全 + 用户设了最低收藏 → 同步重新拉取
-            if existing.bookmark_count == 0 and min_bookmarks > 0:
+            # 已有记录但 bookmark_count 未补全（0）：优先用列表接口自带的 bookmarkCount 修正
+            if existing.bookmark_count == 0:
                 # defer 路径：API 返回数据自带 bookmarkCount，直接更新跳过补全
                 if defer_details and isinstance(item, dict) and item.get('bookmarkCount', 0) > 0:
                     existing.bookmark_count = item['bookmarkCount']
-                else:
+                elif min_bookmarks > 0:
+                    # 用户设了最低收藏但条目无收藏数 → 同步重新拉详情判断
                     to_refetch.append(pixiv_id)
                     continue
             if not _is_blocked(existing.tags_list, blocked) \
@@ -491,6 +502,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         for pixiv_id in to_refetch:
             detail = details.get(pixiv_id)
             if detail is None:
+                # 详情拉取失败：不静默丢弃，排入后台补全，下次命中时再判断
+                to_fill.append(pixiv_id)
                 continue
             if _is_blocked(detail.get('tags', []), blocked) \
                or detail.get('bookmark_count', 0) < min_bookmarks \
