@@ -342,7 +342,14 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
     return None
 
 
-def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
+def _fetch_details_parallel(pixiv_ids: list[int],
+                            early_stop: Callable[[dict | None], bool] | None = None) -> dict[int, dict]:
+    """并行拉取详情，支持提前终止。
+
+    early_stop: 每完成一个详情后调用（参数为该详情或 None），返回 True 时
+    取消未启动的拉取并立即返回（已启动的请求让其在后台自然结束，不阻塞调用方）。
+    用于搜索流式过滤：凑够一页就停止，避免拉取整页 60 条详情。
+    """
     if not pixiv_ids:
         return {}
     results = {}
@@ -351,7 +358,8 @@ def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
         session = _build_session()
         return pid, _get_illust_detail(session, pid)
 
-    with ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS) as executor:
+    executor = ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS)
+    try:
         futures = {executor.submit(_worker, pid): pid for pid in pixiv_ids}
         for future in as_completed(futures):
             try:
@@ -360,6 +368,13 @@ def _fetch_details_parallel(pixiv_ids: list[int]) -> dict[int, dict]:
                     results[pid] = detail
             except Exception as e:
                 logger.error(f'Parallel fetch failed for {futures[future]}: {e}')
+                detail = None
+            if early_stop is not None and early_stop(detail):
+                for f in futures:
+                    f.cancel()
+                break
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     return results
 
@@ -460,7 +475,8 @@ def clear_search_cache() -> None:
 # ── 公共流水线 ──
 
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
-                   min_bookmarks: int = 0, hide_r18: bool = False, defer_details: bool = False) -> list[dict]:
+                   min_bookmarks: int = 0, hide_r18: bool = False, defer_details: bool = False,
+                   max_results: int = 0) -> list[dict]:
     """去重 → 过滤 → 并行拉取详情 → 存储。
 
     Args:
@@ -474,6 +490,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         defer_details: 若为 True 且 min_bookmarks=0，则用搜索条目自带的 tags/thumb
             立即返回列表（bookmark_count/original_urls 留空），后台异步补全详情。
             仅适用于 illust_factory 接受 detail=None 的工厂（如 _illust_from_item）。
+        max_results: 收集到该数量的通过结果后提前停止拉取详情（0 = 不限制）。
+            用于搜索流式过滤，凑够一页就停，避免拉取整页详情拖慢搜索。
 
     Returns: 可直接用于 API 响应的 illust 字典列表
     """
@@ -556,7 +574,21 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         return results
 
     if to_fetch:
-        details = _fetch_details_parallel(to_fetch)
+        # 流式过滤：拉取过程中直接判定过滤条件，凑够 max_results 条即提前终止
+        passed = [0]
+
+        def _early_stop(detail: dict | None) -> bool:
+            if max_results <= 0 or detail is None:
+                return False
+            if _is_blocked(detail.get('tags', []), blocked) \
+               or detail.get('bookmark_count', 0) < min_bookmarks \
+               or (hide_r18 and _is_r18(detail.get('tags', []))):
+                return False
+            passed[0] += 1
+            return passed[0] >= max_results
+
+        details = _fetch_details_parallel(
+            to_fetch, early_stop=_early_stop if max_results > 0 else None)
         for pixiv_id in to_fetch:
             detail = details.get(pixiv_id)
             if detail is None:
@@ -624,12 +656,16 @@ def _illust_from_detail(item: int, detail: dict) -> Illust:
 def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
                   sort_order: str = 'popular_d', max_pages: int = 10,
                   tag_mode: str = 'or', r18_mode: str = 'all',
-                  defer_details: bool = False) -> tuple[list[dict], bool]:
-    """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。"""
+                  defer_details: bool = False,
+                  max_results: int = 0) -> tuple[list[dict], bool]:
+    """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。
+
+    max_results: 流式过滤目标数量，凑够即提前停止拉取详情（0 = 不限制）。
+    """
     if page > max_pages:
         return [], False
 
-    cache_key = f'tag|q={keyword}|p={page}|s={sort_order}|tm={tag_mode}|r={r18_mode}|mb={min_bookmarks}'
+    cache_key = f'tag|q={keyword}|p={page}|s={sort_order}|tm={tag_mode}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -689,6 +725,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
             blocked=blocked,
             min_bookmarks=min_bookmarks,
             defer_details=defer,
+            max_results=max_results,
         )
         safe_commit(db)
 
@@ -700,9 +737,10 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
 def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
                      min_bookmarks: int = 0, r18_mode: str = 'all',
-                     defer_details: bool = False) -> tuple[list[dict], bool]:
+                     defer_details: bool = False,
+                     max_results: int = 0) -> tuple[list[dict], bool]:
     """浏览 Pixiv 发现页（全部作品），无需指定标签。"""
-    cache_key = f'disc|p={page}|s={sort_order}|r={r18_mode}|mb={min_bookmarks}'
+    cache_key = f'disc|p={page}|s={sort_order}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -752,6 +790,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
             blocked=blocked,
             min_bookmarks=min_bookmarks,
             defer_details=defer,
+            max_results=max_results,
         )
         safe_commit(db)
 
@@ -760,7 +799,8 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
 
 
 def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
-                   hide_r18: bool = False) -> tuple[list[dict], bool]:
+                   hide_r18: bool = False,
+                   max_results: int = 0) -> tuple[list[dict], bool]:
     """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。"""
     session = _build_session()
     profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
@@ -804,6 +844,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
             blocked=blocked,
             min_bookmarks=min_bookmarks,
             hide_r18=hide_r18,
+            max_results=max_results,
         )
         safe_commit(db)
 

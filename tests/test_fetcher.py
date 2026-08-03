@@ -132,3 +132,89 @@ class TestProcessItemsBookmarkFill:
         assert results[0]['bookmark_count'] == 1200
         row = clean_db.query(Illust).filter(Illust.pixiv_id == 1004).first()
         assert row.bookmark_count == 1200
+
+    @patch('fetcher._fetch_details_parallel')
+    def test_max_results_stops_after_enough_passed(self, mock_fetch, clean_db):
+        """max_results>0 时，_process_items 传入的 early_stop 应按过滤条件计数。"""
+        d500 = {'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+                'bookmark_count': 500, 'thumb_url': 'https://x.jpg',
+                'upload_date': '2026-01-01T00:00:00+09:00',
+                'original_urls': ['https://i.pximg.net/2001_p0.jpg'],
+                'tags': ['a'], 'description': ''}
+        d300 = {**d500, 'bookmark_count': 300}
+        mock_fetch.return_value = {2001: d500, 2002: d300, 2003: d500, 2004: d500}
+
+        items = [_item(2001), _item(2002), _item(2003), _item(2004)]
+        results = fetcher._process_items(
+            clean_db, items,
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=400,
+            defer_details=False,
+            max_results=2,
+        )
+
+        early_stop = mock_fetch.call_args.kwargs.get('early_stop')
+        assert early_stop is not None
+        # 通过过滤的详情才计数：2 个通过后返回 True（提前终止）
+        assert early_stop(d500) is False
+        assert early_stop(d300) is False   # 不过滤（收藏 300 < 400）不计入
+        assert early_stop(d500) is True
+        # mock 不做早停，过滤后 3 条照常处理
+        assert len(results) == 3
+
+    @patch('fetcher._fetch_details_parallel')
+    def test_max_results_zero_does_not_pass_early_stop(self, mock_fetch, clean_db):
+        """max_results=0（默认，批量下载）时不传 early_stop，全量拉取。"""
+        mock_fetch.return_value = {}
+        fetcher._process_items(
+            clean_db, [_item(3001, 500)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=0,
+            defer_details=False,
+        )
+        assert mock_fetch.call_args.kwargs.get('early_stop') is None
+
+    def test_early_stop_returns_immediately(self):
+        """early_stop 返回 True 后，_fetch_details_parallel 应取消剩余拉取并立即返回。"""
+        with patch('fetcher._get_illust_detail', return_value=None), \
+             patch('fetcher._build_session', side_effect=RuntimeError('no net')):
+            results = fetcher._fetch_details_parallel(
+                [4001, 4002, 4003, 4004],
+                early_stop=lambda detail: True,
+            )
+            # shutdown(wait=False) 不等待后台线程；sleep 让残留线程在 patch
+            # 恢复前结束，避免其调用真实 _get_illust_detail 联网
+            time.sleep(0.5)
+        assert results == {}
+
+    def test_early_stop_fires_after_enough_passed(self, clean_db):
+        """流式过滤端到端：真实 _fetch_details_parallel 下，凑够 max_results 条
+        通过过滤的结果后立即终止，未处理的详情不进入结果。"""
+        def _fake_detail(session, pid):
+            return {
+                'title': f't{pid}', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+                'bookmark_count': 500, 'thumb_url': 'https://x.jpg',
+                'upload_date': '2026-01-01T00:00:00+09:00',
+                'original_urls': [f'https://i.pximg.net/{pid}_p0.jpg'],
+                'tags': ['a'], 'description': '',
+            }
+
+        with patch('fetcher._get_illust_detail', side_effect=_fake_detail):
+            results = fetcher._process_items(
+                clean_db,
+                [_item(5001, 500), _item(5002, 300), _item(5003, 500), _item(5004, 500)],
+                id_extractor=lambda item: int(item['id']),
+                illust_factory=fetcher._illust_from_item,
+                blocked=set(),
+                min_bookmarks=400,
+                defer_details=False,
+                max_results=2,
+            )
+            # 等后台线程在 patch 恢复前结束
+            time.sleep(0.5)
+        assert len(results) == 2
+        assert all(r['bookmark_count'] == 500 for r in results)

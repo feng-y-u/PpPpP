@@ -569,17 +569,20 @@ def search() -> Response:
                 return jsonify({'error': '搜索关键词过长'}), 400
             if not query:
                 def _browse_fn(page):
-                    return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode)
+                    return browse_discovery(page, sort_order, min_bookmarks, r18_mode=r18_mode,
+                                            max_results=ITEMS_PER_PAGE)
                 results, next_cursor, has_more = paginated_search(_browse_fn, query_params, ITEMS_PER_PAGE, cursor_data)
             else:
                 def _tag_fn(page):
-                    return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode)
+                    return search_by_tag(query, min_bookmarks, page, sort_order, 9999, tag_mode, r18_mode=r18_mode,
+                                         max_results=ITEMS_PER_PAGE)
                 results, next_cursor, has_more = paginated_search(_tag_fn, query_params, ITEMS_PER_PAGE, cursor_data)
         else:
             if not cursor_str and not query.isdigit():
                 return jsonify({'error': '画师ID必须为数字'}), 400
             def _user_fn(page):
-                return search_by_user(query, min_bookmarks, page, hide_r18=(r18_mode == 'safe'))
+                return search_by_user(query, min_bookmarks, page, hide_r18=(r18_mode == 'safe'),
+                                      max_results=ITEMS_PER_PAGE)
             results, next_cursor, has_more = paginated_search(_user_fn, query_params, ITEMS_PER_PAGE, cursor_data)
     except PixivAuthError as e:
         logger.warning(f'搜索认证失败：{e}')
