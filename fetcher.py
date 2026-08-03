@@ -310,9 +310,9 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
         except requests.RequestException as e:
             logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
             if attempt < DETAIL_MAX_RETRIES:
-                is_429 = getattr(getattr(e, 'response', None), 'status_code', None) == 429
-                # 429 递增退避（3s/9s），Pixiv 限流通常持续 30s+
-                time.sleep((3 * (3 ** attempt)) if is_429 else 1)
+                status = getattr(getattr(e, 'response', None), 'status_code', None)
+                # 429/403 均为 Pixiv 限流（并发过高时返回 403），递增退避（3s/9s）
+                time.sleep((3 * (3 ** attempt)) if status in (403, 429) else 1)
     return None
 
 
