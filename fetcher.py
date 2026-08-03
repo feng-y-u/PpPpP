@@ -282,9 +282,35 @@ def _extract_original_urls(detail_body: dict) -> list[str]:
     return urls
 
 
+class _TokenBucket:
+    """全局请求限速器：所有并发 worker 共享，从根上防止触发 Pixiv 403/429 限流。
+
+    rate_per_minute: 每分钟允许的请求数。限速器保证任意时刻全局请求间隔
+    不小于 60/rate 秒，多 worker 并发时整体速率仍被压住。
+    """
+
+    def __init__(self, rate_per_minute: float):
+        self._lock = threading.Lock()
+        self._interval = 60.0 / rate_per_minute
+        self._last = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.time()
+            delay = self._last + self._interval - now
+            if delay > 0:
+                time.sleep(delay)
+            self._last = time.time()
+
+
+# Pixiv 详情 API 限流保守速率（并发 3 时实测仍会 403，必须全局限速）
+DETAIL_RATE_PER_MINUTE = 45
+_detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
+
+
 def _get_illust_detail(session: requests.Session, pixiv_id: int) -> dict | None:
     url = f'{PIXIV_BASE_URL}/ajax/illust/{pixiv_id}'
-    time.sleep(random.uniform(0.3, 1.0))
+    _detail_limiter.wait()
     for attempt in range(DETAIL_MAX_RETRIES + 1):
         try:
             resp = session.get(url, timeout=DETAIL_TIMEOUT)

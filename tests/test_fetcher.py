@@ -1,7 +1,24 @@
 from unittest.mock import patch
 
+import time
+import threading
+
 import fetcher
 from models import Illust
+
+
+class TestDetailRateLimiter:
+    def test_global_rate_limit_across_threads(self):
+        """3 个并发线程共享限速器时，整体速率被压到配置值。"""
+        limiter = fetcher._TokenBucket(rate_per_minute=120)  # 0.5s 间隔
+        start = time.time()
+        threads = [threading.Thread(target=limiter.wait) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        elapsed = time.time() - start
+        assert elapsed >= 0.9, f'3 次请求应被限速到约 1.0s，实际 {elapsed:.2f}s'
 
 
 def _item(pid: int, bookmark_count=None, tags=('a', 'b')):
