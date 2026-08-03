@@ -2,6 +2,7 @@
 
 import time
 import threading
+from datetime import datetime, timezone, timedelta
 
 import fetcher
 from models import Illust
@@ -250,4 +251,114 @@ class TestProcessItemsBookmarkFill:
             time.sleep(0.5)
         assert len(results) == 2
         assert all(r['bookmark_count'] == 500 for r in results)
+
+
+class TestPaginatedSearchRemaining:
+    def test_remaining_decreases_across_pages(self):
+        """跨页累计：paginated_search 每页把"还需收集的条数"传给 search_fn。"""
+        calls = []
+
+        def fake_fn(page, remaining=None):
+            calls.append((page, remaining))
+            return ([{'id': str(1000 + page), 'bookmarkCount': 999}], True)
+
+        results, cursor, has_more = fetcher.paginated_search(
+            fake_fn, {'type': 'tag'}, items_per_page=3, cursor_data=None)
+
+        assert len(results) == 3
+        assert calls == [(1, 3), (2, 2), (3, 1)]
+        assert has_more is True
+
+
+class TestUserProfileCache:
+    def test_second_call_hits_cache(self):
+        """同一画师两次搜索：profile 只拉一次，翻页直接切片。"""
+        from unittest.mock import Mock
+        fetcher._USER_PROFILE_CACHE.clear()
+        try:
+            mock_session = Mock()
+            resp = Mock()
+            resp.raise_for_status = lambda: None
+            resp.json.return_value = {'error': False,
+                                      'body': {'illusts': {'1': {}, '2': {}, '3': {}}}}
+            mock_session.get.return_value = resp
+
+            ids1 = fetcher._get_user_profile_ids(mock_session, '12345')
+            ids2 = fetcher._get_user_profile_ids(mock_session, '12345')
+            assert ids1 == ids2 == [3, 2, 1]
+            assert mock_session.get.call_count == 1
+        finally:
+            fetcher._USER_PROFILE_CACHE.clear()
+
+
+class TestBookmarkStaleness:
+    def _old_illust(self, clean_db, pid, bookmark_count, days_ago):
+        illust = Illust(pixiv_id=pid, title='old', bookmark_count=bookmark_count)
+        illust.bookmark_updated_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        clean_db.add(illust)
+        clean_db.commit()
+        return illust
+
+    def test_null_updated_at_not_stale(self):
+        illust = Illust(bookmark_count=500)
+        assert fetcher._is_bookmark_stale(illust) is False
+
+    def test_recent_updated_at_not_stale(self):
+        illust = Illust(bookmark_count=500)
+        illust.bookmark_updated_at = datetime.now(timezone.utc)
+        assert fetcher._is_bookmark_stale(illust) is False
+
+    def test_old_updated_at_stale(self):
+        illust = Illust(bookmark_count=500)
+        illust.bookmark_updated_at = datetime.now(timezone.utc) - timedelta(days=8)
+        assert fetcher._is_bookmark_stale(illust) is True
+
+    @patch('fetcher._kick_background_fill')
+    def test_stale_record_enqueued_for_background_refresh(self, mock_fill, clean_db):
+        """defer 路径：收藏数过期的记录应排入后台补全刷新。"""
+        self._old_illust(clean_db, 7001, 500, days_ago=8)
+
+        results = fetcher._process_items(
+            clean_db, [_item(7001)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=0,
+            defer_details=True,
+        )
+
+        assert len(results) == 1
+        assert results[0]['bookmark_count'] == 500
+        mock_fill.assert_called_once_with([7001])
+
+    @patch('fetcher._fetch_details_parallel')
+    def test_stale_record_sync_refetch_and_timestamp_update(self, mock_fetch, clean_db):
+        """min>0：收藏数过期的记录同步拉详情刷新，并更新时间戳。"""
+        self._old_illust(clean_db, 7002, 500, days_ago=8)
+        mock_fetch.return_value = ({7002: {
+            'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+            'bookmark_count': 800, 'thumb_url': 'https://x.jpg',
+            'upload_date': '2026-01-01T00:00:00+09:00',
+            'original_urls': ['https://i.pximg.net/7002_p0.jpg'],
+            'tags': ['a'], 'description': '',
+        }}, 1)
+
+        results = fetcher._process_items(
+            clean_db, [_item(7002)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=600,
+            defer_details=True,
+        )
+
+        assert len(results) == 1
+        assert results[0]['bookmark_count'] == 800
+        row = clean_db.query(Illust).filter(Illust.pixiv_id == 7002).first()
+        assert row.bookmark_count == 800
+        assert row.bookmark_updated_at is not None
+        updated = row.bookmark_updated_at
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        assert (datetime.now(timezone.utc) - updated).total_seconds() < 60
 

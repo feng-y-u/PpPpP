@@ -12,7 +12,7 @@ from base64 import urlsafe_b64encode, urlsafe_b64decode
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -81,7 +81,8 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
     """游标驱动的分页搜索。
 
     Args:
-        search_fn: 搜索函数，签名为 (page: int) -> tuple[list[dict], bool]
+        search_fn: 搜索函数，签名为 (page: int, remaining: int) -> tuple[list[dict], bool]。
+            remaining 为本页还需收集的条数，供流式过滤跨页累计提前终止。
         query_params: {type, query, sort, tag_mode, r18_mode, min_bookmarks}
         items_per_page: 每页件数
         cursor_data: 解码后的游标，None 表示新搜索
@@ -99,7 +100,8 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
 
     while len(collected) < items_per_page and pages_scanned < _MAX_SCAN_PAGES:
         try:
-            results, has_more = search_fn(page=pixiv_page)
+            remaining = items_per_page - len(collected)
+            results, has_more = search_fn(page=pixiv_page, remaining=remaining)
         except PixivAuthError:
             raise
         except Exception as e:
@@ -224,6 +226,24 @@ def _split_tags(keyword: str) -> list[str]:
 
 def _get_blocked_tags(db: Any) -> set[str]:
     return {t.tag for t in db.query(BlockedTag).all()}
+
+
+# 收藏数刷新周期：距上次成功补全超过该天数的记录在搜索命中时重新拉取
+BOOKMARK_STALE_DAYS = 7
+
+
+def _is_bookmark_stale(illust: Illust) -> bool:
+    """收藏数是否过期需要刷新。
+
+    仅对"曾成功补全过"（bookmark_updated_at 非空）的记录生效——
+    存量老数据该列为空，不触发批量刷新，避免首次部署时刷爆限流。
+    """
+    if not illust.bookmark_updated_at:
+        return False
+    updated = illust.bookmark_updated_at
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated).days >= BOOKMARK_STALE_DAYS
 
 
 def _is_blocked(tags: list[str], blocked: set[str]) -> bool:
@@ -434,6 +454,7 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
         if not details:
             return
         with get_session() as db:
+            now_utc = datetime.now(timezone.utc)
             for pid, detail in details.items():
                 existing = db.query(Illust).filter(Illust.pixiv_id == pid).first()
                 if not existing:
@@ -441,6 +462,7 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
                 if detail.get('original_urls'):
                     existing.original_urls_list = detail['original_urls']
                 existing.bookmark_count = detail.get('bookmark_count', existing.bookmark_count)
+                existing.bookmark_updated_at = now_utc
                 if detail.get('description') and not existing.description:
                     existing.description = detail['description']
             safe_commit(db)
@@ -529,19 +551,23 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
     existing_map = {i.pixiv_id: i for i in existing_list}
 
     to_fetch: list[int] = []           # 同步拉详情（非 defer 路径）
-    to_fill: list[int] = []            # 后台补全（defer 路径新写入 + 已有但缺原图）
-    to_refetch: list[int] = []         # 已有记录但 bookmark_count=0，需同步补全后重新判断过滤
+    to_fill: list[int] = []            # 后台补全（defer 路径新写入 + 已有但缺原图/收藏数过期）
+    to_refetch: list[int] = []         # 已有记录但 bookmark_count=0 或收藏数过期，需同步补全后重新判断过滤
     new_illusts: list[Illust] = []     # defer 路径批量写入
+
+    now_utc = datetime.now(timezone.utc)
 
     for item in items:
         pixiv_id = id_extractor(item)
         existing = existing_map.get(pixiv_id)
         if existing:
-            # 已有记录但 bookmark_count 未补全（0）：优先用列表接口自带的 bookmarkCount 修正
-            if existing.bookmark_count == 0:
+            stale = _is_bookmark_stale(existing)
+            # bookmark_count 未补全（0）或收藏数过期：优先用列表接口自带的 bookmarkCount 修正
+            if existing.bookmark_count == 0 or stale:
                 # defer 路径：API 返回数据自带 bookmarkCount，直接更新跳过补全
                 if defer_details and isinstance(item, dict) and item.get('bookmarkCount', 0) > 0:
                     existing.bookmark_count = item['bookmarkCount']
+                    existing.bookmark_updated_at = now_utc
                 elif min_bookmarks > 0:
                     # 用户设了最低收藏但条目无收藏数 → 同步重新拉详情判断
                     to_refetch.append(pixiv_id)
@@ -550,7 +576,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                and existing.bookmark_count >= min_bookmarks \
                and not (hide_r18 and _is_r18(existing.tags_list)):
                 results.append(existing.to_dict())
-                if defer_details and not existing.original_urls_list:
+                if defer_details and (not existing.original_urls_list or stale):
                     to_fill.append(pixiv_id)
             continue
 
@@ -583,6 +609,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                 continue
             existing = existing_map[pixiv_id]
             existing.bookmark_count = detail.get('bookmark_count', existing.bookmark_count)
+            existing.bookmark_updated_at = now_utc
             if detail.get('original_urls'):
                 existing.original_urls_list = detail['original_urls']
             if detail.get('description') and not existing.description:
@@ -841,30 +868,10 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
                    max_results: int = 0) -> tuple[list[dict], bool]:
     """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。"""
     session = _build_session()
-    profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
-    try:
-        resp = session.get(profile_url, timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        profile_data = resp.json()
-    except requests.RequestException as e:
-        logger.error(f'User profile API failed: {e}')
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status in (401, 403):
-            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
+    all_ids = _get_user_profile_ids(session, user_id)
+    if not all_ids:
         return [], False
 
-    if profile_data.get('error'):
-        msg = str(profile_data.get('message', ''))
-        logger.error(f'User profile API error: {msg}')
-        if _is_auth_error(msg):
-            raise PixivAuthError(msg)
-        return [], False
-
-    all_illusts = profile_data.get('body', {}).get('illusts', {})
-    if not all_illusts:
-        return [], False
-
-    all_ids = sorted([int(iid) for iid in all_illusts.keys()], reverse=True)
     total = len(all_ids)
     start = (page - 1) * PER_PAGE
     end = min(start + PER_PAGE, total)
@@ -889,6 +896,48 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
     max_pages = (total + PER_PAGE - 1) // PER_PAGE
     has_more = page < max_pages
     return results, has_more
+
+
+# ── 用户 profile 缓存（避免大画师每次翻页重拉全量作品列表）──
+
+_USER_PROFILE_CACHE: dict[str, tuple[float, list[int]]] = {}
+_USER_PROFILE_TTL = 600.0  # 10 分钟
+_user_profile_lock = threading.Lock()
+
+
+def _get_user_profile_ids(session: requests.Session, user_id: str) -> list[int]:
+    with _user_profile_lock:
+        hit = _USER_PROFILE_CACHE.get(user_id)
+        if hit and time.time() - hit[0] < _USER_PROFILE_TTL:
+            return hit[1]
+
+    profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
+    try:
+        resp = session.get(profile_url, timeout=DETAIL_TIMEOUT)
+        resp.raise_for_status()
+        profile_data = resp.json()
+    except requests.RequestException as e:
+        logger.error(f'User profile API failed: {e}')
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (401, 403):
+            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
+        return []
+
+    if profile_data.get('error'):
+        msg = str(profile_data.get('message', ''))
+        logger.error(f'User profile API error: {msg}')
+        if _is_auth_error(msg):
+            raise PixivAuthError(msg)
+        return []
+
+    all_illusts = profile_data.get('body', {}).get('illusts', {})
+    all_ids = sorted([int(iid) for iid in all_illusts.keys()], reverse=True)
+    if not all_ids:
+        return []
+
+    with _user_profile_lock:
+        _USER_PROFILE_CACHE[user_id] = (time.time(), all_ids)
+    return all_ids
 
 
 def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], bool]:

@@ -60,6 +60,7 @@ class Illust(Base):
     tags: Mapped[str] = mapped_column(Text, default='[]')
     page_count: Mapped[int] = mapped_column(Integer, default=1)
     bookmark_count: Mapped[int] = mapped_column(Integer, default=0)
+    bookmark_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     upload_date: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     thumb_url: Mapped[str] = mapped_column(String, default='')
     description: Mapped[str] = mapped_column(Text, default='')
@@ -219,6 +220,10 @@ def init_db() -> None:
     if 'downloaded_at' not in columns:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN downloaded_at DATETIME'))
+            conn.commit()
+    if 'bookmark_updated_at' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN bookmark_updated_at DATETIME'))
             conn.commit()
 
     # ── collection_items.position 列与 user_version 迁移 ──
