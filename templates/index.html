@@ -412,6 +412,45 @@ let hasMore = false;
 let currentSearchType = null;
 
 const R18_STATE_KEY = 'pixiv_r18_mode';
+const SEARCH_STATE_KEY = 'pv_search_state';
+const SEARCH_CACHE_TTL = 30 * 60 * 1000; // 搜索结果前端缓存 30 分钟
+
+function saveSearchState() {
+  try {
+    pvCache.set(SEARCH_STATE_KEY, {
+      type: $('#searchType').value,
+      query: $('#searchQuery').value,
+      min_bookmarks: $('#minBookmarks').value,
+      sort: $('#sortOrder').value,
+      tag_mode: $('#tagMode').value,
+      r18_mode: $('#r18Mode').value,
+      loadedPages,
+      nextCursor,
+      hasMore,
+    });
+  } catch {}
+}
+
+function restoreSearchState() {
+  const st = pvCache.get(SEARCH_STATE_KEY, SEARCH_CACHE_TTL);
+  if (!st || !Array.isArray(st.loadedPages) || !st.loadedPages.length) return false;
+  $('#searchType').value = st.type || 'tag';
+  $('#searchQuery').value = st.query || '';
+  $('#minBookmarks').value = st.min_bookmarks || 0;
+  if (st.sort) $('#sortOrder').value = st.sort;
+  if (st.tag_mode) $('#tagMode').value = st.tag_mode;
+  if (st.r18_mode) $('#r18Mode').value = st.r18_mode;
+  updateSearchUI();
+  loadedPages = st.loadedPages;
+  nextCursor = st.nextCursor || null;
+  hasMore = !!st.hasMore;
+  currentPage = 1;
+  currentSearchType = st.type || null;
+  renderPage(1);
+  renderPaginationBar();
+  lazyLoad();
+  return true;
+}
 
 function resetPagination() {
   loadedPages = [];
@@ -492,6 +531,7 @@ async function loadNextPage() {
       currentPage = loadedPages.length;
       renderPage(currentPage);
       renderPaginationBar();
+      saveSearchState();
     } catch { showToast('网络错误', true); }
     finally {
       $('#nextPageBtn').disabled = !hasMore;
@@ -531,6 +571,7 @@ async function loadNextPage() {
     currentPage = loadedPages.length;
     renderPage(currentPage);
     renderPaginationBar();
+    saveSearchState();
   } catch { showToast('网络错误', true); }
   finally {
     $('#nextPageBtn').disabled = !hasMore;
@@ -587,6 +628,7 @@ async function doSearch() {
     data.results.forEach(r => renderCard(r));
     renderPaginationBar();
     lazyLoad();
+    saveSearchState();
   } catch { showToast('网络错误', true); }
   finally { showLoading(false); }
 }
@@ -804,6 +846,8 @@ if (urlParams.has('query')) {
   if (urlParams.has('type')) $('#searchType').value = urlParams.get('type');
   updateSearchUI();
   doSearch();
+} else {
+  restoreSearchState();
 }
 </script>
 </div>

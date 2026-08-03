@@ -286,6 +286,11 @@ let allTags = [];
 let activeCollectionId = '';
 let sortOrder = 'created';
 const PAGE_SIZE = 50;
+const GALLERY_CACHE_TTL = 30 * 60 * 1000; // 图库分页前端缓存 30 分钟
+
+function invalidateGalleryCache() {
+  pvCache.clearPrefix('pv_gallery_');
+}
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
 // Read ?tag= and ?collection_id from URL on load
@@ -341,6 +346,12 @@ $('#tagFilterActive')?.addEventListener('click', function(e) {
 
 function loadGallery(pageNum) {
   const offset = (pageNum - 1) * PAGE_SIZE;
+  const cacheKey = `pv_gallery_${activeTag || ''}_${activeCollectionId || ''}_${sortOrder}_${pageNum}`;
+  const cached = pvCache.get(cacheKey, GALLERY_CACHE_TTL);
+  if (cached) {
+    renderGalleryData(cached, pageNum);
+    return;
+  }
   const params = new URLSearchParams();
   if (activeTag) params.set('tag', activeTag);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
@@ -350,44 +361,50 @@ function loadGallery(pageNum) {
   fetch('/api/gallery?' + params.toString())
     .then(r => r.json())
     .then(data => {
-      $('#cardGrid').innerHTML = '';
-      selectedPids.clear();
-      updateFloatBar();
-
-      if (data.data.length === 0) {
-        $('#emptyState').style.display = 'block';
-        $('#stats').style.display = 'none';
-        $('#paginationBar').style.display = 'none';
-        if (activeCollectionId) {
-          $('#emptyTitle').textContent = '暂无收藏作品';
-          $('#emptyDesc').textContent = '在作品详情页点击 ♥ 收藏添加到此处';
-        } else {
-          $('#emptyTitle').textContent = '暂无已下载作品';
-          $('#emptyDesc').textContent = '搜索作品并下载后在此查看';
-        }
-        return;
-      }
-      $('#emptyState').style.display = 'none';
-      let totalSize = 0;
-      data.data.forEach(item => {
-        totalSize += item.file_size || 0;
-        renderCard(item);
-      });
-      updateFloatBar();
-      galleryCurrentPage = pageNum;
-      galleryTotal = data.total;
-      galleryTotalPages = Math.ceil(galleryTotal / PAGE_SIZE);
-      galleryFavTotal = data.favorite_total || 0;
-      $('#stats').style.display = 'block';
-      const start = offset + 1;
-      const end = Math.min(galleryTotal, offset + data.data.length);
-      let statsText = `${start}-${end} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
-      if (activeTag) statsText += ` · 标签: ${escHtml(activeTag)}`;
-      if (!activeCollectionId && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
-      $('#stats').textContent = statsText;
-      renderGalleryPagination();
+      pvCache.set(cacheKey, data);
+      renderGalleryData(data, pageNum);
     })
     .catch(() => showToast('加载图库失败', true));
+}
+
+function renderGalleryData(data, pageNum) {
+  const offset = (pageNum - 1) * PAGE_SIZE;
+  $('#cardGrid').innerHTML = '';
+  selectedPids.clear();
+  updateFloatBar();
+
+  if (data.data.length === 0) {
+    $('#emptyState').style.display = 'block';
+    $('#stats').style.display = 'none';
+    $('#paginationBar').style.display = 'none';
+    if (activeCollectionId) {
+      $('#emptyTitle').textContent = '暂无收藏作品';
+      $('#emptyDesc').textContent = '在作品详情页点击 ♥ 收藏添加到此处';
+    } else {
+      $('#emptyTitle').textContent = '暂无已下载作品';
+      $('#emptyDesc').textContent = '搜索作品并下载后在此查看';
+    }
+    return;
+  }
+  $('#emptyState').style.display = 'none';
+  let totalSize = 0;
+  data.data.forEach(item => {
+    totalSize += item.file_size || 0;
+    renderCard(item);
+  });
+  updateFloatBar();
+  galleryCurrentPage = pageNum;
+  galleryTotal = data.total;
+  galleryTotalPages = Math.ceil(galleryTotal / PAGE_SIZE);
+  galleryFavTotal = data.favorite_total || 0;
+  $('#stats').style.display = 'block';
+  const start = offset + 1;
+  const end = Math.min(galleryTotal, offset + data.data.length);
+  let statsText = `${start}-${end} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
+  if (activeTag) statsText += ` · 标签: ${escHtml(activeTag)}`;
+  if (!activeCollectionId && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
+  $('#stats').textContent = statsText;
+  renderGalleryPagination();
 }
 
 function renderGalleryPagination() {
@@ -448,11 +465,13 @@ async function moveCard(pid, direction, btn) {
       body: JSON.stringify({ direction })
     });
     if (resp.ok) {
+      invalidateGalleryCache();
       loadGallery(galleryCurrentPage);
     } else if (resp.status === 400) {
       showToast('已在边界位置', true);
     } else if (resp.status === 409) {
       showToast('位置已被修改，正在刷新', true);
+      invalidateGalleryCache();
       loadGallery(galleryCurrentPage);
     } else {
       showToast('移动失败', true);
@@ -517,6 +536,7 @@ function renderCard(r) {
         });
       }
       if (resp.ok) {
+        invalidateGalleryCache();
         if (activeCollectionId) {
           loadGallery(galleryCurrentPage);
         } else {
@@ -583,6 +603,7 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
       const data = await resp.json();
       if (resp.ok) {
         showToast(data.message);
+        invalidateGalleryCache();
         ids.forEach(pid => {
           document.querySelectorAll(`[data-pid="${pid}"].delete-btn`).forEach(btn => {
             btn.closest('.gallery-card')?.parentElement?.remove();
@@ -615,6 +636,7 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
     const data = await resp.json();
     if (resp.ok) {
       showToast(data.message);
+      invalidateGalleryCache();
       document.querySelectorAll(`[data-pid="${deleteTarget}"].delete-btn`).forEach(btn => {
         btn.closest('.gallery-card')?.parentElement?.remove();
       });
@@ -683,6 +705,7 @@ $('#batchCollectionSelect').addEventListener('change', async function() {
     if (resp.ok) {
       const data = await resp.json();
       showToast(`已添加 ${data.added} 个作品到收藏夹`);
+      invalidateGalleryCache();
       clearSelection();
       loadGallery(galleryCurrentPage);
     } else {
@@ -707,6 +730,7 @@ $('#btnFloatRemoveColl').addEventListener('click', async () => {
     if (resp.ok) {
       const data = await resp.json();
       showToast(`已移出 ${data.removed} 个作品`);
+      invalidateGalleryCache();
       clearSelection();
       loadGallery(galleryCurrentPage);
     } else {

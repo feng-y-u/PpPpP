@@ -39,6 +39,46 @@ function showToast(msg, isError) {
   bootstrap.Toast.getOrCreateInstance(toast).show();
 }
 
+// ── localStorage 缓存工具 ──
+// 用于搜索状态、图库分页等前端缓存；带 TTL，空间不足时降级重试。
+const pvCache = {
+  get(key, ttlMs) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const item = JSON.parse(raw);
+      if (!item || typeof item.ts !== 'number') return null;
+      if (Date.now() - item.ts > ttlMs) {
+        localStorage.removeItem(key);
+        return null;
+      }
+      return item.value;
+    } catch { return null; }
+  },
+  set(key, value) {
+    const payload = JSON.stringify({ ts: Date.now(), value });
+    try {
+      localStorage.setItem(key, payload);
+    } catch (e) {
+      // 空间不足：删掉该 key 重试一次
+      try { localStorage.removeItem(key); localStorage.setItem(key, payload); } catch {}
+    }
+  },
+  del(key) {
+    try { localStorage.removeItem(key); } catch {}
+  },
+  clearPrefix(prefix) {
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(prefix)) keys.push(k);
+      }
+      keys.forEach(k => localStorage.removeItem(k));
+    } catch {}
+  }
+};
+
 // ── 下载功能（首页和详情页共享）──
 
 async function triggerDownload(pixivId, btn) {

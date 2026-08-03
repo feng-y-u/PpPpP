@@ -162,6 +162,11 @@ class TestRoutes:
         assert resp.status_code == 200
         assert 'token' in resp.get_json()
 
+    def test_gallery_page(self, client):
+        resp = client.get('/gallery')
+        assert resp.status_code == 200
+        assert b'pvCache' in resp.data or b'loadGallery' in resp.data
+
     def test_settings_page(self, client):
         resp = client.get('/settings')
         assert resp.status_code == 200
