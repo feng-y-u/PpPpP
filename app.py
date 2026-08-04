@@ -610,8 +610,9 @@ def search() -> Response:
         cursor_data = decode_cursor(cursor_str)
         if cursor_data is None:
             return jsonify({'error': '游标无效', 'error_code': 'CURSOR_INVALID'}), 400
-        # 游标 15 分钟过期（搜索本身受详情限速影响可能耗时 1 分钟+，305s 太短）
-        if time.time() - cursor_data.get('created_at', 0) > 900:
+        # 游标 24 小时过期。Pixiv 的 p 参数翻页长期有效（无服务端会话），
+        # 过期保护只用于拦截极端陈旧参数；分页漂移由前端去重兜底
+        if time.time() - cursor_data.get('created_at', 0) > 86400:
             return jsonify({'error': '搜索已过期，请重新搜索', 'error_code': 'CURSOR_EXPIRED'}), 400
         # 从游标恢复搜索参数
         search_type = cursor_data.get('type', search_type)

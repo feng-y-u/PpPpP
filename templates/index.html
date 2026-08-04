@@ -428,6 +428,7 @@ function saveSearchState() {
       loadedPages,
       nextCursor,
       hasMore,
+      currentPage,
     });
   } catch {}
 }
@@ -445,9 +446,11 @@ function restoreSearchState() {
   loadedPages = st.loadedPages;
   nextCursor = st.nextCursor || null;
   hasMore = !!st.hasMore;
-  currentPage = 1;
   currentSearchType = st.type || null;
-  renderPage(1);
+  // 恢复到上次所在的页（可能因分页漂移去重而少于缓存页数，做边界钳制）
+  const restored = Math.max(1, Math.min(parseInt(st.currentPage) || 1, loadedPages.length));
+  currentPage = restored;
+  renderPage(restored);
   renderPaginationBar();
   lazyLoad();
   return true;
@@ -557,8 +560,12 @@ async function loadNextPage() {
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       if (err.error_code === 'CURSOR_EXPIRED') {
-        showToast('搜索已过期，自动重新搜索');
-        doSearch();
+        // 游标过期（24h 上限）：恢复已加载的缓存页，保留浏览进度，不从头重搜
+        if (restoreSearchState()) {
+          showToast('搜索游标已过期，已恢复已加载的页面（继续翻页请重新搜索）', true);
+        } else {
+          showToast('搜索已过期，请重新搜索', true);
+        }
         return;
       }
       showToast(err.error || '加载失败', true);
@@ -628,8 +635,9 @@ async function doSearch() {
       }
       const err = await resp.json().catch(() => ({}));
       if (err.error_code === 'CURSOR_EXPIRED') {
-        showToast('搜索已过期，自动重新搜索');
-        return doSearch();
+        showToast('搜索已过期，请重新搜索', true);
+        showLoading(false);
+        return;
       }
       showToast(resp.status === 429 ? '请求过于频繁' : (err.error || '搜索失败'), true);
       showLoading(false);
