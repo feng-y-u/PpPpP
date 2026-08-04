@@ -181,7 +181,8 @@ class TestProcessItemsBookmarkFill:
         assert mock_fetch.call_args.kwargs.get('early_stop') is None
 
     def test_early_stop_returns_immediately(self):
-        """early_stop 返回 True 后，_fetch_details_parallel 应取消剩余拉取并立即返回。"""
+        """early_stop 返回 True 后，_fetch_details_parallel 取消未启动的拉取；
+        已启动的请求仍处理完（不 break 丢弃），返回其全部结果。"""
         with patch('fetcher._get_illust_detail', return_value=None), \
              patch('fetcher._build_session', side_effect=RuntimeError('no net')):
             results, attempted = fetcher._fetch_details_parallel(
@@ -192,7 +193,7 @@ class TestProcessItemsBookmarkFill:
             # 恢复前结束，避免其调用真实 _get_illust_detail 联网
             time.sleep(0.5)
         assert results == {}
-        assert attempted >= 1  # 至少处理了第一个完成的请求
+        assert attempted >= 1  # 已启动的请求（全部失败）均被处理，未启动的已取消
 
     def test_fetch_stats_accurate_failure_count(self, clean_db):
         """统计准确性：早停取消的请求不计入失败；仅实际发起的请求统计失败数。"""
@@ -227,7 +228,7 @@ class TestProcessItemsBookmarkFill:
 
     def test_early_stop_fires_after_enough_passed(self, clean_db):
         """流式过滤端到端：真实 _fetch_details_parallel 下，凑够 max_results 条
-        通过过滤的结果后立即终止，未处理的详情不进入结果。"""
+        通过过滤的结果后取消未启动的拉取，但已启动的照常返回（不丢弃）。"""
         def _fake_detail(session, pid, limiter=None):
             return {
                 'title': f't{pid}', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
@@ -250,7 +251,8 @@ class TestProcessItemsBookmarkFill:
             )
             # 等后台线程在 patch 恢复前结束
             time.sleep(0.5)
-        assert len(results) == 2
+        # 至少凑够 2 条；已启动的全部返回（4 个 worker 全部启动时为 4 条）
+        assert 2 <= len(results) <= 4
         assert all(r['bookmark_count'] == 500 for r in results)
 
 

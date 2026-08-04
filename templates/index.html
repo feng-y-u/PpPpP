@@ -488,6 +488,7 @@ function renderPaginationBar() {
 
   $('#prevPageBtn').disabled = currentPage <= 1;
   $('#nextPageBtn').disabled = !hasMore && currentPage >= loadedPages.length;
+  $('#nextPageBtn').textContent = '下一页';  // 恢复翻页按钮文本（异步加载时曾置为"加载中..."）
   $('#paginationStatus').textContent = `第 ${currentPage} 页 · 已缓 ${loadedPages.length} 页`;
 }
 
@@ -573,7 +574,14 @@ async function loadNextPage() {
         renderPaginationBar();
         return;
       }
-      loadedPages.push(res.results);
+      const dedup = dedupResults(res.results);
+      if (!dedup.length) {
+        // 本页全部与本会话已显示的作品重复（Pixiv 分页漂移）→ 跳过空页
+        hasMore = res.has_more || false;
+        renderPaginationBar();
+        return;
+      }
+      loadedPages.push(dedup);
       nextCursor = res.cursor || null;
       hasMore = res.has_more || false;
       currentPage = loadedPages.length;
@@ -639,16 +647,25 @@ function finishSearch(data) {
     showLoading(false);
     return;
   }
-  loadedPages = [data.results];
+  loadedPages = [dedupResults(data.results)];
   nextCursor = data.cursor || null;
   hasMore = data.has_more || false;
   currentPage = 1;
-  data.results.forEach(r => renderCard(r));
+  loadedPages[0].forEach(r => renderCard(r));
   renderPaginationBar();
   lazyLoad();
   saveSearchState();
   maybeToastFetchStats(data.fetch_stats);
   showLoading(false);
+}
+
+// 分页去重：Pixiv 搜索分页在 date_d 排序下会漂移（新作品插入导致页间重叠），
+// 后端已尽量消除（early_stop 不再丢弃已启动的拉取），此处显示层再兜底一层，
+// 跳过本会话已显示过的作品，保证同一作品不重复出现
+function dedupResults(items) {
+  if (!loadedPages.length) return items;
+  const seen = new Set(loadedPages.flat().map(r => r.pixiv_id));
+  return items.filter(r => !seen.has(r.pixiv_id));
 }
 
 function pollSearch(taskId, onDone, onFail) {

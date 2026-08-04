@@ -11,7 +11,7 @@ import json
 from base64 import urlsafe_b64encode, urlsafe_b64decode
 import threading
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -404,19 +404,27 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     executor = ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS)
     try:
         futures = {executor.submit(_worker, pid): pid for pid in pixiv_ids}
+        stop_requested = False
         for future in as_completed(futures):
-            attempted += 1
             try:
                 pid, detail = future.result()
-                if detail is not None:
-                    results[pid] = detail
+            except CancelledError:
+                continue  # 被 early_stop 取消的未发起请求：不计入 attempted/失败
             except Exception as e:
                 logger.error(f'Parallel fetch failed for {futures[future]}: {e}')
                 detail = None
+            attempted += 1
+            if detail is not None:
+                results[pid] = detail
             if early_stop is not None and early_stop(detail):
+                stop_requested = True
                 for f in futures:
                     f.cancel()
-                break
+            # 触发早停后不 break：已启动的请求照常处理完再返回。
+            # 若 break 丢弃已启动的结果，这些作品不会写入 DB，Pixiv 分页漂移后
+            # 会再次出现并被当作新作品 → 跨页重复（2026-08 bug 修复）。
+            if stop_requested:
+                continue
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
