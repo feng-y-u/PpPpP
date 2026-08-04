@@ -576,9 +576,12 @@ async function loadNextPage() {
       }
       const dedup = dedupResults(res.results);
       if (!dedup.length) {
-        // 本页全部与本会话已显示的作品重复（Pixiv 分页漂移）→ 跳过空页
+        // 本页全部与本会话已显示的作品重复（Pixiv 分页漂移）→ 跳过空页，
+        // 但必须推进游标，否则下次点击会重复请求同一页导致翻页卡死
+        nextCursor = res.cursor || null;
         hasMore = res.has_more || false;
         renderPaginationBar();
+        saveSearchState();
         return;
       }
       loadedPages.push(dedup);

@@ -385,8 +385,9 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     """并行拉取详情，支持提前终止。
 
     early_stop: 每完成一个详情后调用（参数为该详情或 None），返回 True 时
-    取消未启动的拉取并立即返回（已启动的请求让其在后台自然结束，不阻塞调用方）。
-    用于搜索流式过滤：凑够一页就停止，避免拉取整页 60 条详情。
+    取消未启动的拉取。**已启动的请求会全部处理完再返回**（不丢弃其结果，
+    避免作品未入库导致分页漂移后跨页重复）；调用方需等待最慢的在途请求，
+    代价受 DETAIL_TIMEOUT/退避上限约束。
     limiter: 请求限速器；不传时用前台高速桶（搜索），后台补全应传 _fill_limiter。
 
     Returns: (成功详情 dict, 实际发起的请求数)。early_stop 取消的未启动请求
@@ -404,7 +405,6 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     executor = ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS)
     try:
         futures = {executor.submit(_worker, pid): pid for pid in pixiv_ids}
-        stop_requested = False
         for future in as_completed(futures):
             try:
                 pid, detail = future.result()
@@ -417,14 +417,11 @@ def _fetch_details_parallel(pixiv_ids: list[int],
             if detail is not None:
                 results[pid] = detail
             if early_stop is not None and early_stop(detail):
-                stop_requested = True
+                # 触发早停：只取消未启动的请求；已启动的照常处理完再返回。
+                # 若丢弃已启动的结果，这些作品不会写入 DB，Pixiv 分页漂移后
+                # 会再次出现并被当作新作品 → 跨页重复（2026-08 bug 修复）。
                 for f in futures:
                     f.cancel()
-            # 触发早停后不 break：已启动的请求照常处理完再返回。
-            # 若 break 丢弃已启动的结果，这些作品不会写入 DB，Pixiv 分页漂移后
-            # 会再次出现并被当作新作品 → 跨页重复（2026-08 bug 修复）。
-            if stop_requested:
-                continue
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
