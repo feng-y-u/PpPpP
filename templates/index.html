@@ -414,7 +414,8 @@ let currentSearchType = null;
 
 const R18_STATE_KEY = 'pixiv_r18_mode';
 const SEARCH_STATE_KEY = 'pv_search_state';
-const SEARCH_CACHE_TTL = 30 * 60 * 1000; // 搜索结果前端缓存 30 分钟
+const SEARCH_CACHE_TTL = 30 * 60 * 1000;         // 搜索结果前端缓存 30 分钟（页面刷新快速恢复）
+const SEARCH_STATE_RESTORE_TTL = 24 * 60 * 60 * 1000;  // 游标过期兜底恢复用 24h（与游标 TTL 一致）
 
 function saveSearchState() {
   try {
@@ -433,9 +434,15 @@ function saveSearchState() {
   } catch {}
 }
 
-function restoreSearchState() {
-  const st = pvCache.get(SEARCH_STATE_KEY, SEARCH_CACHE_TTL);
+function restoreSearchState(ttlMs, verifyParams) {
+  const st = pvCache.get(SEARCH_STATE_KEY, ttlMs || SEARCH_CACHE_TTL);
   if (!st || !Array.isArray(st.loadedPages) || !st.loadedPages.length) return false;
+  // 多标签页共享 localStorage：仅在"过期恢复"场景校验搜索参数与当前表单一致，
+  // 避免恢复其他标签页的搜索结果（页面刷新恢复场景表单是默认值，不校验）
+  if (verifyParams) {
+    if (st.type !== $('#searchType').value) return false;
+    if ((st.query || '') !== $('#searchQuery').value.trim()) return false;
+  }
   $('#searchType').value = st.type || 'tag';
   $('#searchQuery').value = st.query || '';
   $('#minBookmarks').value = st.min_bookmarks || 0;
@@ -509,6 +516,7 @@ function jumpToPage(pageNum) {
   currentPage = pageNum;
   renderPage(currentPage);
   renderPaginationBar();
+  saveSearchState();  // 记录浏览位置，刷新/过期恢复时回到所在页
 }
 
 $('#prevPageBtn').addEventListener('click', () => jumpToPage(currentPage - 1));
@@ -560,8 +568,14 @@ async function loadNextPage() {
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       if (err.error_code === 'CURSOR_EXPIRED') {
-        // 游标过期（24h 上限）：恢复已加载的缓存页，保留浏览进度，不从头重搜
-        if (restoreSearchState()) {
+        // 游标过期（24h 上限）：恢复已加载的缓存页，保留浏览进度，不从头重搜。
+        // 用 24h TTL 读取缓存（游标与缓存同时写入，缓存必须比游标活得久才能恢复）
+        const restored = restoreSearchState(SEARCH_STATE_RESTORE_TTL, true);
+        // 死游标作废，禁止继续翻页（继续翻页需重新搜索）
+        nextCursor = null;
+        hasMore = false;
+        renderPaginationBar();
+        if (restored) {
           showToast('搜索游标已过期，已恢复已加载的页面（继续翻页请重新搜索）', true);
         } else {
           showToast('搜索已过期，请重新搜索', true);
