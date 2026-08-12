@@ -268,19 +268,19 @@ _auto_follow_thread.start()
 # ── 搜索预取后台任务 ──
 def _prefetch_one_tag(tag: str) -> None:
     """预取单个标签：搜索并缓存作品 ID，将 Illust 标记为预取来源。"""
-    with get_session() as db:
-        row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
-        if row is None:
-            row = SearchCache(tag=tag)
-            db.add(row)
-        if row.status == 'fetching':
-            return  # 正在取中，避免并发重复预取
-        row.status = 'fetching'
-        row.error = ''
-        safe_commit(db)
-
     all_ids: list[int] = []
     try:
+        with get_session() as db:
+            row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+            if row is None:
+                row = SearchCache(tag=tag)
+                db.add(row)
+            if row.status == 'fetching':
+                return  # 正在取中，避免并发重复预取
+            row.status = 'fetching'
+            row.error = ''
+            safe_commit(db)
+
         for page in range(1, _prefetch_state['pages'] + 1):
             results, has_more = search_by_tag(
                 tag, min_bookmarks=1, page=page,
@@ -289,11 +289,13 @@ def _prefetch_one_tag(tag: str) -> None:
             page_ids = [r.get('pixiv_id') for r in results if r.get('pixiv_id')]
             all_ids.extend(page_ids)
             if page_ids:
-                # search_by_tag 已写入 Illust 行，这里只翻转 prefetch_source 标记
+                # search_by_tag 已写入 Illust 行，这里只翻转 prefetch_source 标记；
+                # 已下载的作品不标记，避免计入容量却永远无法清理
                 with get_session() as db:
                     existing = db.query(Illust).filter(Illust.pixiv_id.in_(page_ids)).all()
                     for illust in existing:
-                        illust.prefetch_source = 1
+                        if not illust.download_status:
+                            illust.prefetch_source = 1
                     safe_commit(db)
             if not has_more:
                 break
@@ -326,7 +328,7 @@ def _prefetch_capacity_cleanup() -> None:
             return
         need_free = count - max_illusts
 
-        delete_list: list[int] = []
+        to_delete: list[int] = []
         old_tags = db.query(SearchCache).order_by(SearchCache.cached_at.asc()).all()
         for sc in old_tags:
             if need_free <= 0:
@@ -335,9 +337,11 @@ def _prefetch_capacity_cleanup() -> None:
                 ids = json.loads(sc.illust_ids) if sc.illust_ids else []
             except (json.JSONDecodeError, TypeError):
                 continue
-            kept = list(ids)
-            while kept and need_free > 0:
-                pid = kept.pop()
+            # 从尾部（最旧条目）找可删作品；受保护的作品保留在标签列表中
+            delete_from_tag: list[int] = []
+            for pid in reversed(ids):
+                if need_free <= 0:
+                    break
                 if not isinstance(pid, int):
                     continue
                 # 仍被其他 SearchCache 引用时跳过（防止破坏其他标签的缓存）
@@ -352,15 +356,20 @@ def _prefetch_capacity_cleanup() -> None:
                     continue
                 if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
                     continue
-                delete_list.append(pid)
+                delete_from_tag.append(pid)
                 need_free -= 1
-            sc.illust_ids = json.dumps(kept, ensure_ascii=False)
-            safe_commit(db)
 
-        if delete_list:
-            db.query(Illust).filter(Illust.pixiv_id.in_(delete_list)).delete(synchronize_session=False)
+            if delete_from_tag:
+                # 只移除真正删除的 pid，受保护的作品留在列表中
+                new_ids = [p for p in ids if p not in delete_from_tag]
+                sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
+                to_delete.extend(delete_from_tag)
+                safe_commit(db)
+
+        if to_delete:
+            db.query(Illust).filter(Illust.pixiv_id.in_(to_delete)).delete(synchronize_session=False)
             safe_commit(db)
-            logger.info(f'[prefetch] 容量清理: 删除 {len(delete_list)} 条最旧预取作品')
+            logger.info(f'[prefetch] 容量清理: 删除 {len(to_delete)} 条最旧预取作品')
 
 
 def _prefetch_loop() -> None:
@@ -372,10 +381,14 @@ def _prefetch_loop() -> None:
         if not tags:
             return
         logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
-        for tag in tags:
-            _prefetch_one_tag(tag)
-        _prefetch_capacity_cleanup()
-        _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
+        try:
+            for tag in tags:
+                _prefetch_one_tag(tag)
+            _prefetch_capacity_cleanup()
+            _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
+        except Exception as e:
+            # 单轮异常不退出线程，等待下个 interval 重试
+            logger.error(f'[prefetch] 循环异常: {e}')
     finally:
         _prefetch_state['running'] = False
 
@@ -391,6 +404,10 @@ def _start_prefetch_thread() -> None:
         time.sleep(5)  # 等 app 完全启动
         while True:
             _prefetch_loop()
+            # 每次迭代读取最新 interval，支持运行时通过 /api/prefetch/config 调整
+            interval = _prefetch_state.get('interval') or 0
+            if interval <= 0:
+                break
             time.sleep(interval)
 
     threading.Thread(target=_run, daemon=True).start()
