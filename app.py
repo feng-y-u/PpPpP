@@ -36,7 +36,7 @@ from config import (
 )
 from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
 import fetcher
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
+from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, _is_r18, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -420,10 +420,6 @@ def _start_prefetch_thread() -> None:
 
 
 _start_prefetch_thread()
-
-
-def _is_r18(tags: list[str]) -> bool:
-    return 'R-18' in tags or 'R-18G' in tags
 
 
 def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
@@ -864,7 +860,7 @@ def search() -> Response:
     if search_type == 'tag' and query and not cursor_str:
         with get_session() as db:
             sc = db.query(SearchCache).filter(
-                SearchCache.tag == query.strip(),
+                SearchCache.tag == query,
                 SearchCache.status == 'done',
             ).first()
             if sc:
@@ -872,14 +868,14 @@ def search() -> Response:
 
                 def _cache_fn():
                     results, has_more, next_offset = query_cached_tag(
-                        query.strip(), min_bookmarks, sort_order, tag_mode, r18_mode,
+                        query, min_bookmarks, sort_order, tag_mode, r18_mode,
                         offset=0, limit=ITEMS_PER_PAGE,
                     )
                     next_cursor = None
                     if has_more:
                         next_cursor = encode_cursor({
                             'type': 'tag',
-                            'query': query.strip(),
+                            'query': query,
                             'sort': sort_order,
                             'tag_mode': tag_mode,
                             'r18_mode': r18_mode,
