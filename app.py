@@ -1492,6 +1492,9 @@ _SETTINGS_DEFAULTS = {
     'fetch_detail_workers': 2,
     'medium_image_size': 600,
     'items_per_page': 24,
+    'prefetch_interval': 3600,
+    'prefetch_pages': 3,
+    'prefetch_max_illusts': 20000,
 }
 
 
@@ -1570,7 +1573,8 @@ def api_settings_post() -> Response:
             elif key in ('download_max_workers', 'per_page', 'search_pages',
                          'max_bookmarks_default', 'auto_follow_interval',
                          'fetch_detail_workers', 'medium_image_size',
-                         'items_per_page'):
+                         'items_per_page', 'prefetch_interval',
+                         'prefetch_pages', 'prefetch_max_illusts'):
                 try:
                     val = max(0, int(val))
                 except (ValueError, TypeError):

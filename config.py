@@ -52,6 +52,11 @@ DETAIL_TIMEOUT = (10, 30)   # 详情 API 超时（连接, 读取）
 DETAIL_MAX_RETRIES = 2     # 详情 API 最大重试次数
 FETCH_DETAIL_WORKERS = 5   # 详情 API 并行获取线程数
 
+# 搜索预取设置
+PREFETCH_INTERVAL = 3600        # 预取间隔（秒），0 禁用
+PREFETCH_PAGES = 3              # 每标签预取页数
+PREFETCH_MAX_ILLUSTS = 20000    # 预取来源作品最大数量
+
 # 显示设置
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下
 
@@ -109,6 +114,9 @@ if os.path.exists(_settings_path):
             'fetch_detail_workers': 'FETCH_DETAIL_WORKERS',
             'medium_image_size': 'MEDIUM_IMAGE_SIZE',
             'items_per_page': 'ITEMS_PER_PAGE',
+            'prefetch_interval': 'PREFETCH_INTERVAL',
+            'prefetch_pages': 'PREFETCH_PAGES',
+            'prefetch_max_illusts': 'PREFETCH_MAX_ILLUSTS',
         }
         for _json_key, _const_name in _key_map.items():
             if _json_key in _overrides and _overrides[_json_key] != '':

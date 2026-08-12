@@ -100,6 +100,27 @@
   </div>
 
   <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">搜索预取</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label class="form-label" for="prefetch_interval">预取间隔（秒）</label>
+        <input class="form-control form-control-sm" id="prefetch_interval" type="number" min="0" style="max-width:140px;">
+        <div class="form-text">定时预取常用标签的间隔（0 = 禁用），修改后需重启生效</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label" for="prefetch_pages">每标签预取页数</label>
+        <input class="form-control form-control-sm" id="prefetch_pages" type="number" min="1" max="20" style="max-width:140px;">
+        <div class="form-text">每标签每次预取抓取多少页（60 条/页），修改后需重启生效</div>
+      </div>
+      <div class="mb-0">
+        <label class="form-label" for="prefetch_max_illusts">最大缓存作品数</label>
+        <input class="form-control form-control-sm" id="prefetch_max_illusts" type="number" min="1000" step="1000" style="max-width:140px;">
+        <div class="form-text">预取来源作品总数上限，超限自动删除最旧未下载未收藏作品，修改后需重启生效</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
     <div class="card-header py-2 fw-semibold small">自动关注</div>
     <div class="card-body">
       <div class="mb-3">
@@ -170,6 +191,7 @@ const FIELD_MAP = [
   'proxy', 'download_max_workers', 'fetch_detail_workers', 'medium_image_size',
   'per_page', 'search_pages', 'items_per_page',
   'max_bookmarks_default', 'auto_follow_interval', 'auto_follow_download',
+  'prefetch_interval', 'prefetch_pages', 'prefetch_max_illusts',
 ];
 
 async function loadSettings() {
