@@ -64,7 +64,6 @@ def sample_illust(clean_db):
         bookmark_count=1500,
         thumb_url='https://i.pximg.net/c/250x250/img/test.jpg',
         upload_date=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-        description='テスト説明文',
     )
     illust.tags_list = ['test', 'sample', 'original']
     illust.original_urls_list = [

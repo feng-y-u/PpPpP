@@ -62,7 +62,7 @@ class TestIllustToDict:
         expected_keys = {
             'id', 'pixiv_id', 'title', 'user_id', 'user_name', 'tags',
             'page_count', 'bookmark_count', 'upload_date', 'thumb_url',
-            'description', 'original_urls', 'local_paths', 'download_status',
+            'original_urls', 'local_paths', 'download_status',
             'downloaded_at', 'file_size', 'is_favorite', 'created_at',
         }
         assert set(d.keys()) == expected_keys
@@ -176,3 +176,54 @@ class TestIsRemoved:
         clean_db.add(il); clean_db.commit()
         assert not hasattr(il, 'is_favorite')
         assert not hasattr(il, 'favorited_at')
+
+
+from models import SearchCache, safe_commit, get_session
+
+
+class TestSearchCache:
+    def test_create_and_query(self, clean_db):
+        sc = SearchCache(
+            tag='初音ミク',
+            illust_ids='[123, 456, 789]',
+            status='done',
+            total=3,
+        )
+        clean_db.add(sc)
+        safe_commit(clean_db)
+        fetched = clean_db.query(SearchCache).filter(SearchCache.tag == '初音ミク').first()
+        assert fetched is not None
+        assert fetched.tag == '初音ミク'
+        assert fetched.illust_ids == '[123, 456, 789]'
+        assert fetched.status == 'done'
+        assert fetched.total == 3
+
+    def test_primary_key_is_tag(self, clean_db):
+        clean_db.add(SearchCache(tag='tag1'))
+        safe_commit(clean_db)
+        import pytest
+        from sqlalchemy.exc import IntegrityError
+        clean_db.add(SearchCache(tag='tag1'))
+        with pytest.raises(IntegrityError):
+            safe_commit(clean_db)
+        clean_db.rollback()
+        clean_db.query(SearchCache).filter(SearchCache.tag == 'tag1').delete()
+        clean_db.commit()
+
+    def test_defaults(self, clean_db):
+        sc = SearchCache(tag='test')
+        clean_db.add(sc)
+        safe_commit(clean_db)
+        assert sc.illust_ids == '[]'
+        assert sc.status == 'idle'
+        assert sc.error == ''
+        assert sc.total == 0
+
+    def test_prefetch_source_column(self, clean_db, sample_illust):
+        sample_illust.prefetch_source = 1
+        safe_commit(clean_db)
+        clean_db.refresh(sample_illust)
+        assert sample_illust.prefetch_source == 1
+
+    def test_description_removed(self, clean_db, sample_illust):
+        assert not hasattr(sample_illust, 'description')

@@ -63,12 +63,12 @@ class Illust(Base):
     bookmark_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     upload_date: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     thumb_url: Mapped[str] = mapped_column(String, default='')
-    description: Mapped[str] = mapped_column(Text, default='')
     original_urls: Mapped[str] = mapped_column(Text, default='[]')
     local_paths: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
+    prefetch_source: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -121,7 +121,6 @@ class Illust(Base):
             'bookmark_count': self.bookmark_count,
             'upload_date': self.upload_date.isoformat() if self.upload_date else None,
             'thumb_url': self.thumb_url,
-            'description': self.description,
             'original_urls': self.original_urls_list,
             'local_paths': self.local_paths_list,
             'download_status': self.download_status,
@@ -157,6 +156,17 @@ class DownloadLog(Base):
             'message': self.message,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class SearchCache(Base):
+    __tablename__ = 'search_cache'
+
+    tag: Mapped[str] = mapped_column(String, primary_key=True)
+    illust_ids: Mapped[str] = mapped_column(Text, default='[]')
+    cached_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String, default='idle')
+    error: Mapped[str] = mapped_column(String, default='')
+    total: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Collection(Base):
@@ -271,6 +281,33 @@ def init_db() -> None:
             with engine.connect() as conn:
                 info_rows = conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()
                 keep = [r[1] for r in info_rows if r[1] not in ('is_favorite', 'favorited_at')]
+                col_list = ', '.join(f'"{c}"' for c in keep)
+                conn.execute(text(f'CREATE TABLE _illusts_new AS SELECT {col_list} FROM illusts'))
+                conn.execute(text('DROP TABLE illusts'))
+                conn.execute(text('ALTER TABLE _illusts_new RENAME TO illusts'))
+                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
+                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
+                conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_illusts_pixiv_id ON illusts(pixiv_id)'))
+                conn.commit()
+
+    # ── SearchCache 预取：新增 prefetch_source 列，移除已废弃的 description 列 ──
+    if 'prefetch_source' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN prefetch_source INTEGER DEFAULT 0'))
+            conn.commit()
+
+    has_desc = any(c == 'description' for c in columns)
+    if has_desc:
+        import sqlite3 as _sqlite3
+        ver = tuple(int(x) for x in _sqlite3.sqlite_version.split('.'))
+        if ver >= (3, 35, 0):
+            with engine.connect() as conn:
+                conn.execute(text('ALTER TABLE illusts DROP COLUMN description'))
+                conn.commit()
+        else:
+            with engine.connect() as conn:
+                info_rows = conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()
+                keep = [r[1] for r in info_rows if r[1] != 'description']
                 col_list = ', '.join(f'"{c}"' for c in keep)
                 conn.execute(text(f'CREATE TABLE _illusts_new AS SELECT {col_list} FROM illusts'))
                 conn.execute(text('DROP TABLE illusts'))
