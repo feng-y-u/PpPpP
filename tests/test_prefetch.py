@@ -167,3 +167,12 @@ class TestCapacityCleanup:
         # 容量清理异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
         app._prefetch_loop()
         assert app._prefetch_state['running'] is False
+
+    def test_prefetch_loop_survives_tags_query_error(self, clean_db, monkeypatch):
+        def _boom_session():
+            raise RuntimeError('database is locked')
+
+        monkeypatch.setattr(app, 'get_session', _boom_session)
+        # 标签列表查询异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
+        app._prefetch_loop()
+        assert app._prefetch_state['running'] is False

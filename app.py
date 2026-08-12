@@ -376,8 +376,13 @@ def _prefetch_loop() -> None:
     """后台预取循环：遍历所有 SearchCache 标签，串行预取。"""
     _prefetch_state['running'] = True
     try:
-        with get_session() as db:
-            tags = [t[0] for t in db.query(SearchCache.tag).all()]
+        try:
+            with get_session() as db:
+                tags = [t[0] for t in db.query(SearchCache.tag).all()]
+        except Exception as e:
+            # 标签列表查询失败不退出线程，等待下个 interval 重试
+            logger.error(f'[prefetch] 读取标签列表失败: {e}')
+            return
         if not tags:
             return
         logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
