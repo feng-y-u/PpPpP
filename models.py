@@ -223,10 +223,6 @@ def init_db() -> None:
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
             conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
             conn.commit()
-    if 'description' not in columns:
-        with engine.connect() as conn:
-            conn.execute(text('ALTER TABLE illusts ADD COLUMN description TEXT DEFAULT ""'))
-            conn.commit()
     if 'downloaded_at' not in columns:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN downloaded_at DATETIME'))
