@@ -117,6 +117,16 @@
         <input class="form-control form-control-sm" id="prefetch_max_illusts" type="number" min="1000" step="1000" style="max-width:140px;">
         <div class="form-text">预取来源作品总数上限，超限自动删除最旧未下载未收藏作品，修改后需重启生效</div>
       </div>
+      <hr>
+      <div class="mb-0">
+        <label class="form-label">预取标签清单</label>
+        <div id="prefetchTagList" class="mb-2" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+        <div class="input-group input-group-sm" style="max-width:320px;">
+          <input class="form-control form-control-sm" id="prefetchTagInput" type="text" placeholder="输入标签名（如 初音ミク）">
+          <button class="btn btn-primary btn-sm" id="addPrefetchTagBtn">添加</button>
+        </div>
+        <div class="form-text">添加后后台会定时预取该标签的新作品；搜索命中该标签时直接秒回缓存结果。点击标签可删除。</div>
+      </div>
     </div>
   </div>
 
@@ -252,6 +262,76 @@ $('#saveBtn').addEventListener('click', async () => {
 });
 
 loadSettings();
+
+// ── Prefetch Tag Management ──
+let prefetchTags = [];
+
+async function loadPrefetchTags() {
+  try {
+    prefetchTags = await fetch('/api/prefetch/tags').then(r => r.json());
+    renderPrefetchTags();
+  } catch {}
+}
+
+function renderPrefetchTags() {
+  const list = document.getElementById('prefetchTagList');
+  if (!list) return;
+  if (!prefetchTags.length) {
+    list.innerHTML = '<span style="color:var(--text-muted);font-size:0.8rem;">暂无预取标签</span>';
+    return;
+  }
+  list.innerHTML = prefetchTags.map(t => {
+    const statusColor = t.status === 'done' ? '#198754' : (t.status === 'error' ? '#dc3545' : '#6c757d');
+    return `<span class="badge" style="background:var(--accent);font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;" data-tag="${escAttr(t.tag)}" title="状态: ${t.status} · 条数: ${t.total || 0}">
+      ${escHtml(t.tag)}
+      <span style="opacity:.6;">&times;</span>
+    </span>`;
+  }).join('');
+  list.querySelectorAll('[data-tag]').forEach(el => {
+    el.addEventListener('click', () => removePrefetchTag(el.dataset.tag));
+  });
+}
+
+async function addPrefetchTag() {
+  const input = document.getElementById('prefetchTagInput');
+  const tag = (input.value || '').trim();
+  if (!tag) return;
+  const resp = await fetch('/api/prefetch/tags', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+    body: JSON.stringify({tag}),
+  });
+  const err = await resp.json().catch(() => ({}));
+  if (resp.ok) {
+    showToast('已添加预取标签', false);
+    input.value = '';
+    loadPrefetchTags();
+  } else {
+    showToast(err.error || '添加失败', true);
+  }
+}
+
+async function removePrefetchTag(tag) {
+  const resp = await fetch(`/api/prefetch/tags/${encodeURIComponent(tag)}`, {
+    method: 'DELETE',
+    headers: {'X-CSRF-Token': csrfToken},
+  });
+  if (resp.ok) {
+    showToast('已删除', false);
+    loadPrefetchTags();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    showToast(err.error || '删除失败', true);
+  }
+}
+
+document.getElementById('addPrefetchTagBtn')?.addEventListener('click', addPrefetchTag);
+document.getElementById('prefetchTagInput')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') addPrefetchTag();
+});
+
+// 页面加载时拉取清单
+loadPrefetchTags();
 
 // ── Collection Management ──
 let deleteCollectionId = null;
