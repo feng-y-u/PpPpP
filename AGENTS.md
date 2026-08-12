@@ -35,6 +35,8 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁、登录） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（cron 磁盘清理，30 天 / 收藏 < 100） |
+| `pixiv-api-http-main/` | 内置的第三方 Node.js Pixiv API 参考实现（含 `search/no-premium.js` 等），作为接口格式对照参考，不参与运行 |
+| `docs/superpowers/` | 近期变更的设计文档（plans/specs）：分页重设计、安全加固、收藏夹排序。改动前先读相关 spec |
 
 无 `__init__.py` — 模块直接导入。无 `setup.py`/`pyproject.toml`。
 
@@ -43,8 +45,8 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 ## 关键注意事项
 
 ### 进程与状态
-- **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_bulk_tasks`。多 worker 不共享。详见 `app.py:171-179` 注释。
-- **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。当前仅用于 `/api/settings/unlock`。
+- **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_bulk_tasks`、`_search_tasks`、`_rate_limit_store`。多 worker 不共享。详见 `app.py:170-181` 注释。
+- **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login`（`app.py:447`）和 `/api/settings/unlock`（`app.py:1529`）。
 
 ### 配置与重启
 - **settings.json 需重启服务器**：`config.py` 在导入时读取 `instance/settings.json`。通过 Web UI 修改后需重启进程生效。
@@ -58,25 +60,26 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - **全局访问密码**：`ACCESS_PASSWORD`（环境变量或 settings.json 的 `access_password`）非空时启用全站登录墙 —— `before_request` 钩子拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 免认证**（本机默认）。登录态存 session（`authed`），7 天有效；`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒。`COOKIE_SECURE` 控制 Session Cookie 仅 HTTPS 传输（默认 true，本地 HTTP 调试需设 `COOKIE_SECURE=false`）。
 
 ### API 行为
-- **`popular_d` 排序需 Pixiv Premium**：非 Premium 账号静默返回空结果。`/search` 路由默认排序为 `date_d`（`app.py:518`），空查询回退到 `browse_discovery()` 时也使用该默认值。
-- **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。缩略图代理 `/thumb/<base64_url>` 处理此问题。
-- **游标分页 305 秒过期**（`app.py:546`）：翻页游标包含时间戳，超时后客户端需重新搜索。
+- **`popular_d` 排序需 Pixiv Premium**：非 Premium 账号静默返回空结果。`/search` 路由默认排序为 `date_d`（`app.py:585`），空查询回退到 `browse_discovery()` 时也使用该默认值。
+- **搜索是异步的**：`GET /search` 立即返回 `task_id`，后台线程拉取，前端轮询 `/api/search/status/<task_id>`。任务在 `_search_tasks` 内存字典中，访问 status 时清理过期任务。
+- **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。缩略图代理 `/thumb/<base64_url>` 处理此问题（仅允许 `https://i.pximg.net/` 白名单 URL，磁盘缓存 7 天）。
+- **游标分页 24 小时过期**（`app.py:615`）：翻页游标包含时间戳，超时后客户端需重新搜索。空页去重 + 死游标作废由前端处理。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址（`config.py:48`）。
 
 ### 数据库
-- **没有迁移系统**：启动时 `SQLAlchemy create_all()` + `init_db()` 中的手动 `ALTER TABLE` 逻辑（`models.py:203`）处理五列：`file_size`、`description`、`is_favorite`、`favorited_at`、`downloaded_at`。其他 schema 变更需手动处理。
+- **没有迁移系统**：启动时 `SQLAlchemy create_all()` + `init_db()` 中的手动 `ALTER TABLE` 逻辑（`models.py:203`）负责全部 schema 变更。当前会补加 `file_size`、`description`、`downloaded_at`、`bookmark_updated_at` 列与 `collection_items.position`（拖拽排序），并通过 `PRAGMA user_version` 一次性回填 position 初值。**`is_favorite` / `favorited_at` 列已废弃，init_db 会将其 DROP**（SQLite < 3.35 时用建表重建）。其他 schema 变更需手动添加类似逻辑。
 - **写入必须用 `safe_commit()`**（`models.py:32`）而不是直接 `db.commit()`：它带重试处理 `database is locked`。
-- **获取 session 用 `get_session()`**（`models.py:255`），不要直接创建 `Session(engine)`，除非在 `init_db()` 等启动逻辑中。
-- **启动时重置卡死下载**：模块导入时 `_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件（`app.py:144-169`）。
-- **收藏夹基于 Collection 模型**：`Illust.is_favorite` 列存在但语义上由"我的收藏"收藏夹中的 CollectionItem 驱动。切换收藏会添加/移除该收藏夹。`init_db()` 迁移旧的 `is_favorite=True` 记录到默认收藏夹。
+- **获取 session 用 `get_session()`**（`models.py:284`），不要直接创建 `Session(engine)`，除非在 `init_db()` 等启动逻辑中。
+- **启动时重置卡死下载**：模块导入时 `_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件（`app.py:143`）。
+- **收藏语义完全由 Collection 驱动**：切换收藏会添加/移除"我的收藏"收藏夹中的 CollectionItem。`Illust.is_favorite` 列已废弃删除，不要再依赖。
 
 ### 请求与中间件
-- **所有 POST 接口需 CSRF**：`X-CSRF-Token` 请求头（从 `GET /csrf-token` 或页面内嵌获取）。缺失/错误返回 403。`_csrf_required` 装饰器实现（`app.py:400`）。
+- **所有 POST 接口需 CSRF**：`X-CSRF-Token` 请求头（从 `GET /csrf-token` 或页面内嵌获取）。缺失/错误返回 403。`_csrf_required` 装饰器实现（`app.py:399`）。
 - **上传限制 1MB**：`app.config['MAX_CONTENT_LENGTH']`（`app.py:66`）。
 - **Werkzeug 请求日志被设为 WARNING** 级别以防止 Cookie 泄露到日志（`app.py:47`）。
 
 ### 下载
-- **5 分钟清理批量任务**：完成的批量任务 300 秒后从 `_bulk_tasks` 移除（`threading.Timer`，`app.py:1210`）。
+- **5 分钟清理批量任务**：完成的批量任务 300 秒后从 `_bulk_tasks` 移除（`threading.Timer`，`app.py:1344`）。
 - **SSL 验证默认关闭**（`config.py` 中 `SSL_VERIFY = False`）。生产环境如已安装 CA 证书可设为 `True`。
 
 ### 目录
@@ -87,8 +90,9 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF）、`tests/test_auth.py`（认证）、`tests/test_models.py`（模型）
-- `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件并设 `AUTO_FOLLOW_INTERVAL=0`
+- 测试文件：`tests/test_app.py`（路由/API/CSRF）、`tests/test_auth.py`（认证）、`tests/test_models.py`（模型）、`tests/test_fetcher.py`（Pixiv API 封装）
+- `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件并设 `AUTO_FOLLOW_INTERVAL=0`（事后覆盖无效，会连到生产库）
+- session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）
 - 需要有效 `cookies.txt` 才能通过集成测试（涉及真实 Pixiv API 调用的测试）
 - `clean_db` fixture 在每次测试前清空所有表
 
