@@ -1559,6 +1559,145 @@ def auto_follow_config() -> Response:
     return jsonify(_auto_follow_state)
 
 
+# ── 搜索预取管理 ──
+
+_PREFETCH_SETTINGS_KEYS = {
+    'interval': 'prefetch_interval',
+    'pages': 'prefetch_pages',
+    'max_illusts': 'prefetch_max_illusts',
+}
+
+
+@app.route('/api/prefetch/config', methods=['GET'])
+def prefetch_config_get() -> Response:
+    return jsonify({
+        'interval': _prefetch_state['interval'],
+        'pages': _prefetch_state['pages'],
+        'max_illusts': _prefetch_state['max_illusts'],
+    })
+
+
+@app.route('/api/prefetch/config', methods=['POST'])
+@_csrf_required
+def prefetch_config_post() -> Response:
+    body = request.get_json(silent=True) or {}
+    for key in _PREFETCH_SETTINGS_KEYS:
+        if key in body:
+            try:
+                _prefetch_state[key] = max(0, int(body[key]))
+            except (ValueError, TypeError):
+                return jsonify({'error': f'{key} must be integer >= 0'}), 400
+
+    # 写配置：改内存立即生效 + 持久化 settings.json（重启后仍生效）
+    current = _load_settings()
+    for state_key, json_key in _PREFETCH_SETTINGS_KEYS.items():
+        current[json_key] = _prefetch_state[state_key]
+    try:
+        os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
+        with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
+            json.dump(current, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return jsonify({'error': f'保存失败: {e}'}), 500
+
+    return jsonify({
+        'interval': _prefetch_state['interval'],
+        'pages': _prefetch_state['pages'],
+        'max_illusts': _prefetch_state['max_illusts'],
+    })
+
+
+@app.route('/api/prefetch/tags', methods=['GET'])
+def prefetch_tags_get() -> Response:
+    with get_session() as db:
+        rows = db.query(SearchCache).order_by(SearchCache.cached_at.desc()).all()
+        return jsonify([{
+            'tag': r.tag,
+            'cached_at': r.cached_at.isoformat() if r.cached_at else None,
+            'status': r.status,
+            'total': r.total,
+            'error': r.error,
+        } for r in rows])
+
+
+@app.route('/api/prefetch/tags', methods=['POST'])
+@_csrf_required
+def prefetch_tags_post() -> Response:
+    tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '标签不能为空'}), 400
+    with get_session() as db:
+        if db.query(SearchCache).filter(SearchCache.tag == tag).first():
+            return jsonify({'error': '标签已存在'}), 409
+        db.add(SearchCache(tag=tag))
+        safe_commit(db)
+        return jsonify({'tag': tag}), 201
+
+
+@app.route('/api/prefetch/tags/<path:tag>', methods=['DELETE'])
+@_csrf_required
+def prefetch_tags_delete(tag: str) -> Response:
+    with get_session() as db:
+        row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+        if not row:
+            return jsonify({'error': '标签不存在'}), 404
+
+        try:
+            ids = json.loads(row.illust_ids) if row.illust_ids else []
+        except (json.JSONDecodeError, TypeError):
+            ids = []
+
+        deletable: list[int] = []
+        for pid in ids:
+            if not isinstance(pid, int):
+                continue
+            # 仍被其他 SearchCache 引用时保留
+            other_refs = db.query(SearchCache).filter(
+                SearchCache.tag != tag,
+                SearchCache.illust_ids.like(f'%{pid}%'),
+            ).first()
+            if other_refs:
+                continue
+            illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            if illust is None or not illust.prefetch_source:
+                continue
+            if illust.download_status == 'done' or illust.local_paths_list:
+                continue
+            if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
+                continue
+            deletable.append(pid)
+
+        if deletable:
+            db.query(Illust).filter(Illust.pixiv_id.in_(deletable)).delete(synchronize_session=False)
+        db.delete(row)
+        safe_commit(db)
+        return jsonify({'tag': tag})
+
+
+@app.route('/api/prefetch/status', methods=['GET'])
+def prefetch_status_get() -> Response:
+    return jsonify({
+        'running': _prefetch_state['running'],
+        'last_check': _prefetch_state['last_check'],
+        'interval': _prefetch_state['interval'],
+    })
+
+
+@app.route('/api/prefetch/refresh', methods=['POST'])
+@_csrf_required
+def prefetch_refresh_post() -> Response:
+    tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '标签不能为空'}), 400
+    with get_session() as db:
+        row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+        if not row:
+            return jsonify({'error': '标签不存在'}), 404
+        if row.status == 'fetching':
+            return jsonify({'error': '该标签正在刷新中'}), 409
+    threading.Thread(target=_prefetch_one_tag, args=(tag,), daemon=True).start()
+    return jsonify({'tag': tag, 'status': 'refreshing'})
+
+
 # ── 批量下载 ──
 
 _bulk_tasks: dict[str, dict] = {}
