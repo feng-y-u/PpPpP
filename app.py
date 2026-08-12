@@ -408,11 +408,12 @@ def _start_prefetch_thread() -> None:
     def _run() -> None:
         time.sleep(5)  # 等 app 完全启动
         while True:
-            _prefetch_loop()
             # 每次迭代读取最新 interval，支持运行时通过 /api/prefetch/config 调整
             interval = _prefetch_state.get('interval') or 0
             if interval <= 0:
-                break
+                time.sleep(60)  # interval=0 时暂停（禁用），每分钟检查一次以便重新启用
+                continue
+            _prefetch_loop()
             time.sleep(interval)
 
     threading.Thread(target=_run, daemon=True).start()
@@ -1581,23 +1582,26 @@ def prefetch_config_get() -> Response:
 @_csrf_required
 def prefetch_config_post() -> Response:
     body = request.get_json(silent=True) or {}
+    updates: dict[str, int] = {}
     for key in _PREFETCH_SETTINGS_KEYS:
         if key in body:
             try:
-                _prefetch_state[key] = max(0, int(body[key]))
+                updates[key] = max(0, int(body[key]))
             except (ValueError, TypeError):
-                return jsonify({'error': f'{key} must be integer >= 0'}), 400
+                return jsonify({'error': f'{key} must be integer'}), 400
 
-    # 写配置：改内存立即生效 + 持久化 settings.json（重启后仍生效）
-    current = _load_settings()
-    for state_key, json_key in _PREFETCH_SETTINGS_KEYS.items():
-        current[json_key] = _prefetch_state[state_key]
-    try:
-        os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
-        with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return jsonify({'error': f'保存失败: {e}'}), 500
+    # 写配置：先全部校验并持久化 settings.json，成功后一次性提交到内存，避免校验/写盘失败时状态漂移
+    if updates:
+        current = _load_settings()
+        for key, val in updates.items():
+            current[_PREFETCH_SETTINGS_KEYS[key]] = val
+        try:
+            os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
+            with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(current, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return jsonify({'error': f'保存失败: {e}'}), 500
+        _prefetch_state.update(updates)
 
     return jsonify({
         'interval': _prefetch_state['interval'],

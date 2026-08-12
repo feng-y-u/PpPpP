@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 import app
 from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
 
@@ -176,3 +178,49 @@ class TestCapacityCleanup:
         # 标签列表查询异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
         app._prefetch_loop()
         assert app._prefetch_state['running'] is False
+
+
+class TestPrefetchThreadLiveness:
+    def test_interval_zero_pauses_thread_but_allows_rerun(self, monkeypatch):
+        """interval=0 应暂停循环（睡 60s 继续检查）而非永久退出；重新置>0 后仍能执行预取。"""
+        captured = {}
+
+        class _FakeThread:
+            def __init__(self, **kwargs):
+                captured['target'] = kwargs.get('target')
+                captured['daemon'] = kwargs.get('daemon')
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(app.threading, 'Thread', _FakeThread)
+
+        sleeps = []
+        loops = []
+
+        def _fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 2:
+                app._prefetch_state['interval'] = 5  # 暂停期间重新启用
+            if len(sleeps) >= 3:
+                raise RuntimeError('stop-loop')
+
+        monkeypatch.setattr(app.time, 'sleep', _fake_sleep)
+        monkeypatch.setattr(app, '_prefetch_loop', lambda: loops.append(1))
+
+        old_interval = app._prefetch_state['interval']
+        try:
+            app._prefetch_state['interval'] = 60
+            app._start_prefetch_thread()
+            assert captured.get('target') is not None
+            _run = captured['target']
+
+            app._prefetch_state['interval'] = 0
+            with pytest.raises(RuntimeError, match='stop-loop'):
+                _run()
+        finally:
+            app._prefetch_state['interval'] = old_interval
+
+        # interval=0 时走了 sleep(60) 暂停路径而非 break，随后重启用 interval=5 成功执行了 _prefetch_loop
+        assert 60 in sleeps
+        assert loops == [1]

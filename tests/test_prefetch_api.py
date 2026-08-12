@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from datetime import datetime, timezone
 
@@ -88,6 +89,22 @@ class TestPrefetchConfigAPI:
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 400
         assert 'error' in resp.get_json()
+
+    def test_post_partial_invalid_does_not_mutate_state(self, client, _isolate_settings):
+        """部分字段非法时返回 400，且合法字段不得先于校验整体写入内存/磁盘。"""
+        token = _get_token(client)
+        before = dict(app._prefetch_state)
+        resp = client.post('/api/prefetch/config',
+                           data=json.dumps({'interval': 5, 'pages': 'abc'}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 400
+        assert 'error' in resp.get_json()
+        assert app._prefetch_state['interval'] == before['interval']
+        assert app._prefetch_state['pages'] == before['pages']
+        assert app._prefetch_state['max_illusts'] == before['max_illusts']
+        # settings.json 未被写入（文件不应存在）
+        assert not os.path.exists(_isolate_settings)
 
     def test_post_without_csrf_403(self, client):
         resp = client.post('/api/prefetch/config',
