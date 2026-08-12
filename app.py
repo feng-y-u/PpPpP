@@ -125,7 +125,6 @@ def _build_orphan_dicts(pixiv_ids: list[int], local_items: dict[int, list[str]])
             'bookmark_count': 0,
             'upload_date': None,
             'thumb_url': '',
-            'description': '',
             'original_urls': [],
             'local_paths': paths,
             'file_count': len(paths),
@@ -233,7 +232,6 @@ def _auto_follow_worker() -> None:
                     user_id=r['user_id'], user_name=r['user_name'],
                     page_count=r['page_count'], bookmark_count=r['bookmark_count'],
                     thumb_url=r['thumb_url'], upload_date=r['upload_date'],
-                    description=r.get('description', ''),
                 )
                 illust.tags_list = r.get('tags', [])
                 illust.original_urls_list = r.get('original_urls', [])
@@ -1285,7 +1283,6 @@ def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, ma
                     user_name=r['user_name'], page_count=r['page_count'],
                     bookmark_count=r['bookmark_count'], thumb_url=r['thumb_url'],
                     upload_date=r['upload_date'],
-                    description=r.get('description', ''),
                 )
                 illust.tags_list = r.get('tags', [])
                 illust.original_urls_list = r.get('original_urls', [])

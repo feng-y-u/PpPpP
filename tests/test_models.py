@@ -178,7 +178,7 @@ class TestIsRemoved:
         assert not hasattr(il, 'favorited_at')
 
 
-from models import SearchCache, safe_commit, get_session
+from models import SearchCache, safe_commit
 
 
 class TestSearchCache:
@@ -227,3 +227,21 @@ class TestSearchCache:
 
     def test_description_removed(self, clean_db, sample_illust):
         assert not hasattr(sample_illust, 'description')
+        import models
+        with models.engine.connect() as conn:
+            cols = [r[1] for r in conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()]
+        assert 'description' not in cols
+
+
+class TestDescriptionPrefetchMigration:
+    def test_migration_drops_description_adds_prefetch_source(self, clean_db):
+        import models as m
+        with m.engine.connect() as conn:
+            conn.exec_driver_sql('ALTER TABLE illusts ADD COLUMN description TEXT DEFAULT ""')
+            conn.exec_driver_sql('ALTER TABLE illusts DROP COLUMN prefetch_source')
+            conn.commit()
+        m.init_db()
+        with m.engine.connect() as conn:
+            cols = [r[1] for r in conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()]
+        assert 'description' not in cols
+        assert 'prefetch_source' in cols

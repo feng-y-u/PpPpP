@@ -210,6 +210,33 @@ class CollectionItem(Base):
         }
 
 
+def _rebuild_illusts_table(drop_cols: set[str]) -> None:
+    """重建 illusts 表以删除列（SQLite < 3.35），保留完整 schema（PK/NOT NULL/DEFAULT）。"""
+    with engine.connect() as conn:
+        info_rows = conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()
+        # info_rows: (cid, name, type, notnull, dflt_value, pk)
+        keep = [r for r in info_rows if r[1] not in drop_cols]
+        col_defs = []
+        for _cid, name, ctype, notnull, dflt, pk in keep:
+            parts = [f'"{name}"', ctype]
+            if notnull:
+                parts.append('NOT NULL')
+            if dflt is not None:
+                parts.append(f'DEFAULT {dflt}')
+            if pk:
+                parts.append('PRIMARY KEY AUTOINCREMENT')
+            col_defs.append(' '.join(parts))
+        col_list = ', '.join(f'"{r[1]}"' for r in keep)
+        conn.execute(text(f'CREATE TABLE _illusts_new ({", ".join(col_defs)})'))
+        conn.execute(text(f'INSERT INTO _illusts_new ({col_list}) SELECT {col_list} FROM illusts'))
+        conn.execute(text('DROP TABLE illusts'))
+        conn.execute(text('ALTER TABLE _illusts_new RENAME TO illusts'))
+        conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_illusts_pixiv_id ON illusts(pixiv_id)'))
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
+        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
+        conn.commit()
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
 
@@ -274,17 +301,7 @@ def init_db() -> None:
                     conn.execute(text('ALTER TABLE illusts DROP COLUMN favorited_at'))
                 conn.commit()
         else:
-            with engine.connect() as conn:
-                info_rows = conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()
-                keep = [r[1] for r in info_rows if r[1] not in ('is_favorite', 'favorited_at')]
-                col_list = ', '.join(f'"{c}"' for c in keep)
-                conn.execute(text(f'CREATE TABLE _illusts_new AS SELECT {col_list} FROM illusts'))
-                conn.execute(text('DROP TABLE illusts'))
-                conn.execute(text('ALTER TABLE _illusts_new RENAME TO illusts'))
-                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
-                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
-                conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_illusts_pixiv_id ON illusts(pixiv_id)'))
-                conn.commit()
+            _rebuild_illusts_table({'is_favorite', 'favorited_at'})
 
     # ── SearchCache 预取：新增 prefetch_source 列，移除已废弃的 description 列 ──
     if 'prefetch_source' not in columns:
@@ -301,17 +318,7 @@ def init_db() -> None:
                 conn.execute(text('ALTER TABLE illusts DROP COLUMN description'))
                 conn.commit()
         else:
-            with engine.connect() as conn:
-                info_rows = conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()
-                keep = [r[1] for r in info_rows if r[1] != 'description']
-                col_list = ', '.join(f'"{c}"' for c in keep)
-                conn.execute(text(f'CREATE TABLE _illusts_new AS SELECT {col_list} FROM illusts'))
-                conn.execute(text('DROP TABLE illusts'))
-                conn.execute(text('ALTER TABLE _illusts_new RENAME TO illusts'))
-                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_dl_status_created ON illusts(download_status, created_at)'))
-                conn.execute(text('CREATE INDEX IF NOT EXISTS ix_illusts_user_id ON illusts(user_id)'))
-                conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_illusts_pixiv_id ON illusts(pixiv_id)'))
-                conn.commit()
+            _rebuild_illusts_table({'description'})
 
 
 def get_session() -> Session:

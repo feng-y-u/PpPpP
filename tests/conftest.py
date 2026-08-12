@@ -15,7 +15,7 @@ config.AUTO_FOLLOW_INTERVAL = 0
 
 import pytest
 
-from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Collection, CollectionItem
+from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Collection, CollectionItem, SearchCache
 
 
 @pytest.fixture(scope='session')
@@ -47,7 +47,7 @@ def db(app):
 @pytest.fixture
 def clean_db(db):
     """Clean all tables before the test."""
-    for table in [BlockedTag, DownloadLog, CollectionItem, Collection, Illust]:
+    for table in [BlockedTag, DownloadLog, CollectionItem, Collection, Illust, SearchCache]:
         db.query(table).delete()
     db.commit()
     return db

@@ -97,7 +97,7 @@ class TestProcessItemsBookmarkFill:
             'bookmark_count': 900, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
             'original_urls': ['https://i.pximg.net/1003_p0.jpg'],
-            'tags': ['a'], 'description': '',
+            'tags': ['a'],
         }}, 1)
 
         results = fetcher._process_items(
@@ -142,7 +142,7 @@ class TestProcessItemsBookmarkFill:
                 'bookmark_count': 500, 'thumb_url': 'https://x.jpg',
                 'upload_date': '2026-01-01T00:00:00+09:00',
                 'original_urls': ['https://i.pximg.net/2001_p0.jpg'],
-                'tags': ['a'], 'description': ''}
+                'tags': ['a']}
         d300 = {**d500, 'bookmark_count': 300}
         mock_fetch.return_value = ({2001: d500, 2002: d300, 2003: d500, 2004: d500}, 4)
 
@@ -205,7 +205,7 @@ class TestProcessItemsBookmarkFill:
                 'bookmark_count': 500, 'thumb_url': 'https://x.jpg',
                 'upload_date': '2026-01-01T00:00:00+09:00',
                 'original_urls': [f'https://i.pximg.net/{pid}_p0.jpg'],
-                'tags': ['a'], 'description': '',
+                'tags': ['a'],
             }
 
         with patch('fetcher._get_illust_detail', side_effect=_fake_detail):
@@ -235,7 +235,7 @@ class TestProcessItemsBookmarkFill:
                 'bookmark_count': 500, 'thumb_url': 'https://x.jpg',
                 'upload_date': '2026-01-01T00:00:00+09:00',
                 'original_urls': [f'https://i.pximg.net/{pid}_p0.jpg'],
-                'tags': ['a'], 'description': '',
+                'tags': ['a'],
             }
 
         with patch('fetcher._get_illust_detail', side_effect=_fake_detail):
@@ -343,7 +343,7 @@ class TestBookmarkStaleness:
             'bookmark_count': 800, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
             'original_urls': ['https://i.pximg.net/7002_p0.jpg'],
-            'tags': ['a'], 'description': '',
+            'tags': ['a'],
         }}, 1)
 
         results = fetcher._process_items(
@@ -374,7 +374,7 @@ class TestBookmarkStaleness:
             'bookmark_count': 900, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
             'original_urls': ['https://i.pximg.net/8001_p0.jpg'],
-            'tags': ['a'], 'description': '',
+            'tags': ['a'],
         }}, 1)
 
         results = fetcher._process_items(

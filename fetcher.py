@@ -368,7 +368,6 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                 'upload_date': body.get('uploadDate', body.get('createDate', '')),
                 'original_urls': _extract_original_urls(body),
                 'tags': _parse_tags(body.get('tags')),
-                'description': body.get('description', ''),
             }
         except requests.RequestException as e:
             logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
@@ -437,7 +436,7 @@ _FILL_ATTEMPT_INTERVAL = 300.0  # 同一作品两次补全尝试的最小间隔�
 
 
 def _background_fill_details(pixiv_ids: list[int]) -> None:
-    """后台补拉详情并写入 DB（bookmark_count / original_urls / description）。
+    """后台补拉详情并写入 DB（bookmark_count / original_urls）。
 
     使用 _filling_ids 集合去重，避免同一 pixiv_id 同时被多个补全任务拉取。
     同一作品距上次补全尝试不足 _FILL_ATTEMPT_INTERVAL 时跳过，防止反复失败刷限流。
@@ -470,8 +469,6 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
                     existing.original_urls_list = detail['original_urls']
                 existing.bookmark_count = detail.get('bookmark_count', existing.bookmark_count)
                 existing.bookmark_updated_at = now_utc
-                if detail.get('description') and not existing.description:
-                    existing.description = detail['description']
             safe_commit(db)
     except Exception as e:
         logger.error(f'Background fill details failed: {e}')
@@ -624,8 +621,6 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             existing.bookmark_updated_at = now_utc
             if detail.get('original_urls'):
                 existing.original_urls_list = detail['original_urls']
-            if detail.get('description') and not existing.description:
-                existing.description = detail['description']
             results.append(existing.to_dict())
 
     if new_illusts:
@@ -704,7 +699,6 @@ def _illust_from_item(item: dict, detail: dict | None = None) -> Illust:
         bookmark_count=detail.get('bookmark_count', 0) if detail else 0,
         thumb_url=item.get('url', ''),
         upload_date=_parse_date(item.get('updateDate')),
-        description=detail.get('description', '') if detail else '',
     )
     illust.tags_list = _parse_tags(item.get('tags', []))
     illust.original_urls_list = detail.get('original_urls', []) if detail else []
@@ -722,7 +716,6 @@ def _illust_from_detail(item: int, detail: dict) -> Illust:
         bookmark_count=detail['bookmark_count'],
         thumb_url=detail['thumb_url'],
         upload_date=_parse_date(detail['upload_date']),
-        description=detail.get('description', ''),
     )
     illust.tags_list = detail['tags']
     illust.original_urls_list = detail['original_urls']

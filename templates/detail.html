@@ -125,11 +125,6 @@
   cursor: pointer; border: 1px solid transparent; transition: all 0.15s;
 }
 .tag-item:hover { background: rgba(212,67,107,.15); color: var(--accent); border-color: rgba(212,67,107,.2); }
-.desc-text {
-  font-size: 0.82rem; color: var(--text-secondary); line-height: 1.7;
-  margin-bottom: 22px; white-space: pre-wrap; word-break: break-word;
-}
-.desc-text:empty { display: none; }
 
 /* Related */
 .section-label-row {
@@ -274,9 +269,6 @@
       {% endfor %}
     </div>
     {% endif %}
-
-    <div class="section-label">描述</div>
-    <div class="desc-text" id="descText">{{ illust.description or '暂无描述' }}</div>
 
     {% if related %}
     <div class="section-label-row">
