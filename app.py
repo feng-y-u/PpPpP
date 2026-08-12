@@ -421,6 +421,63 @@ def _start_prefetch_thread() -> None:
 
 _start_prefetch_thread()
 
+
+def _is_r18(tags: list[str]) -> bool:
+    return 'R-18' in tags or 'R-18G' in tags
+
+
+def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
+                     tag_mode: str, r18_mode: str, offset: int = 0,
+                     limit: int = 24) -> tuple[list[dict], bool, int]:
+    """从 SearchCache + Illust 表查询预取结果，支持库内过滤排序分页。
+
+    Returns:
+        (results_dicts, has_more, next_offset)
+    """
+    with get_session() as db:
+        sc = db.query(SearchCache).filter(
+            SearchCache.tag == tag,
+            SearchCache.status == 'done',
+        ).first()
+        if not sc:
+            return [], False, 0
+
+        try:
+            all_ids = json.loads(sc.illust_ids) if sc.illust_ids else []
+        except (json.JSONDecodeError, TypeError):
+            all_ids = []
+        if not all_ids:
+            return [], False, 0
+
+        id_map = {i.pixiv_id: i for i in db.query(Illust).filter(Illust.pixiv_id.in_(all_ids)).all()}
+
+    # 按预取顺序过滤（缺失的 Illust 行跳过）
+    filtered: list[Illust] = []
+    for pid in all_ids:
+        illust = id_map.get(pid)
+        if not illust:
+            continue
+        if illust.bookmark_count < min_bookmarks:
+            continue
+        if r18_mode == 'safe' and _is_r18(illust.tags_list):
+            continue
+        # tag_mode：预取是单标签搜索，or/and 均命中该标签，无需额外过滤
+        filtered.append(illust)
+
+    # 排序
+    if sort_order == 'popular_d':
+        filtered.sort(key=lambda x: x.bookmark_count, reverse=True)
+    else:  # date_d
+        filtered.sort(key=lambda x: (x.upload_date is not None, x.upload_date), reverse=True)
+
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
+    has_more = (offset + limit) < total
+    next_offset = offset + limit if has_more else 0
+
+    return [i.to_dict() for i in page], has_more, next_offset
+
+
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
 download_locks: dict[int, threading.Lock] = {}
 download_cancellations: set[int] = set()
@@ -709,14 +766,23 @@ def _submit_search_task(fn) -> str:
 
     def _run() -> None:
         try:
-            results, next_cursor, has_more = fn()
-            task['results'] = results
-            task['cursor'] = next_cursor
-            task['has_more'] = has_more
-            task['fetch_stats'] = fetcher.get_last_fetch_stats()
+            result = fn()
+            if isinstance(result, dict):
+                task['results'] = result.get('results', [])
+                task['cursor'] = result.get('cursor')
+                task['has_more'] = result.get('has_more', False)
+                task['fetch_stats'] = result.get('fetch_stats') or fetcher.get_last_fetch_stats()
+                task['source'] = result.get('source')
+                task['cached_at'] = result.get('cached_at')
+            else:
+                results, next_cursor, has_more = result
+                task['results'] = results
+                task['cursor'] = next_cursor
+                task['has_more'] = has_more
+                task['fetch_stats'] = fetcher.get_last_fetch_stats()
             task['status'] = 'done'
             logger.info(
-                f'[search] 完成 task={task_id} results={len(results)} has_more={has_more} '
+                f'[search] 完成 task={task_id} results={len(task["results"])} has_more={task["has_more"]} '
                 f'details={task["fetch_stats"].get("detail_fetched", 0)} '
                 f'failed={task["fetch_stats"].get("detail_failed", 0)} '
                 f'seconds={(time.time() - task["created_at"]):.1f}'
@@ -794,6 +860,80 @@ def search() -> Response:
         'min_bookmarks': min_bookmarks,
     }
 
+    # 命中预取缓存：返回库内结果，不请求 Pixiv
+    if search_type == 'tag' and query and not cursor_str:
+        with get_session() as db:
+            sc = db.query(SearchCache).filter(
+                SearchCache.tag == query.strip(),
+                SearchCache.status == 'done',
+            ).first()
+            if sc:
+                cached_at = sc.cached_at.isoformat() if sc.cached_at else None
+
+                def _cache_fn():
+                    results, has_more, next_offset = query_cached_tag(
+                        query.strip(), min_bookmarks, sort_order, tag_mode, r18_mode,
+                        offset=0, limit=ITEMS_PER_PAGE,
+                    )
+                    next_cursor = None
+                    if has_more:
+                        next_cursor = encode_cursor({
+                            'type': 'tag',
+                            'query': query.strip(),
+                            'sort': sort_order,
+                            'tag_mode': tag_mode,
+                            'r18_mode': r18_mode,
+                            'min_bookmarks': min_bookmarks,
+                            'cache_offset': next_offset,
+                            'cached_at': cached_at,
+                            'created_at': int(time.time()),
+                        })
+                    return {
+                        'results': results,
+                        'cursor': next_cursor,
+                        'has_more': has_more,
+                        'fetch_stats': {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0},
+                        'cached_at': cached_at,
+                        'source': 'cache',
+                    }
+
+                task_id = _submit_search_task(_cache_fn)
+                logger.info(
+                    f'[search] 命中预取缓存 task={task_id} query={query!r} '
+                    f'min={min_bookmarks} sort={sort_order} r18={r18_mode}'
+                )
+                return jsonify({'task_id': task_id, 'status': 'running'})
+
+    # 缓存游标翻页
+    if cursor_data and 'cache_offset' in cursor_data:
+        cache_offset = cursor_data.get('cache_offset', 0)
+        cache_tag = cursor_data.get('query', '')
+        if cache_tag and search_type == 'tag':
+
+            def _cache_page_fn():
+                results, has_more, next_offset = query_cached_tag(
+                    cache_tag, min_bookmarks, sort_order, tag_mode, r18_mode,
+                    offset=cache_offset, limit=ITEMS_PER_PAGE,
+                )
+                next_cursor = None
+                if has_more:
+                    next_cursor = encode_cursor({
+                        **cursor_data,
+                        'cache_offset': next_offset,
+                        'created_at': int(time.time()),
+                    })
+                return {
+                    'results': results,
+                    'cursor': next_cursor,
+                    'has_more': has_more,
+                    'fetch_stats': {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0},
+                    'cached_at': cursor_data.get('cached_at'),
+                    'source': 'cache',
+                }
+
+            task_id = _submit_search_task(_cache_page_fn)
+            return jsonify({'task_id': task_id, 'status': 'running'})
+
     # 组装后台执行闭包
     if search_type == 'tag':
         if len(query) > 200:
@@ -848,6 +988,10 @@ def search_status(task_id: str) -> Response:
         'has_more': task['has_more'],
         'fetch_stats': task['fetch_stats'],
     }
+    if task.get('source'):
+        resp['source'] = task['source']
+    if task.get('cached_at'):
+        resp['cached_at'] = task['cached_at']
     if task['status'] == 'error':
         resp['error'] = task['error']
         if task['error'] == 'auth':
