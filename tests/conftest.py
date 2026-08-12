@@ -12,6 +12,7 @@ import config
 _TEST_DB_PATH = os.path.join(tempfile.gettempdir(), f'pixiv_test_{os.getpid()}.db')
 config.DATABASE_PATH = _TEST_DB_PATH
 config.AUTO_FOLLOW_INTERVAL = 0
+config.PREFETCH_INTERVAL = 0
 
 import pytest
 

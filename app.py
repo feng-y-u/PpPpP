@@ -29,11 +29,12 @@ from sqlalchemy import text
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
     MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
+    PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
     MEDIUM_IMAGE_SIZE,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
     ITEMS_PER_PAGE,
 )
-from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, safe_commit
+from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
 import fetcher
 from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
 
@@ -188,6 +189,14 @@ _auto_follow_state = {
 }
 _auto_follow_stop = threading.Event()
 
+_prefetch_state = {
+    'running': False,
+    'last_check': None,
+    'interval': PREFETCH_INTERVAL,
+    'pages': PREFETCH_PAGES,
+    'max_illusts': PREFETCH_MAX_ILLUSTS,
+}
+
 def _auto_follow_worker() -> None:
     while not _auto_follow_stop.is_set():
         interval = _auto_follow_state['interval']
@@ -255,6 +264,140 @@ def _auto_follow_worker() -> None:
 
 _auto_follow_thread = threading.Thread(target=_auto_follow_worker, daemon=True)
 _auto_follow_thread.start()
+
+# ── 搜索预取后台任务 ──
+def _prefetch_one_tag(tag: str) -> None:
+    """预取单个标签：搜索并缓存作品 ID，将 Illust 标记为预取来源。"""
+    with get_session() as db:
+        row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+        if row is None:
+            row = SearchCache(tag=tag)
+            db.add(row)
+        if row.status == 'fetching':
+            return  # 正在取中，避免并发重复预取
+        row.status = 'fetching'
+        row.error = ''
+        safe_commit(db)
+
+    all_ids: list[int] = []
+    try:
+        for page in range(1, _prefetch_state['pages'] + 1):
+            results, has_more = search_by_tag(
+                tag, min_bookmarks=1, page=page,
+                sort_order='date_d', r18_mode='all', tag_mode='or',
+            )
+            page_ids = [r.get('pixiv_id') for r in results if r.get('pixiv_id')]
+            all_ids.extend(page_ids)
+            if page_ids:
+                # search_by_tag 已写入 Illust 行，这里只翻转 prefetch_source 标记
+                with get_session() as db:
+                    existing = db.query(Illust).filter(Illust.pixiv_id.in_(page_ids)).all()
+                    for illust in existing:
+                        illust.prefetch_source = 1
+                    safe_commit(db)
+            if not has_more:
+                break
+
+        with get_session() as db:
+            row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+            if row:
+                row.illust_ids = json.dumps(all_ids, ensure_ascii=False)
+                row.cached_at = datetime.now(timezone.utc)
+                row.status = 'done'
+                row.total = len(all_ids)
+                row.error = ''
+                safe_commit(db)
+    except Exception as e:
+        logger.error(f'[prefetch] 标签 {tag} 预取失败: {e}')
+        with get_session() as db:
+            row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+            if row:
+                row.status = 'error'
+                row.error = str(e)
+                safe_commit(db)
+
+
+def _prefetch_capacity_cleanup() -> None:
+    """容量清理：超出上限时从最旧标签末尾删除未下载未收藏的预取作品。"""
+    with get_session() as db:
+        count = db.query(Illust).filter(Illust.prefetch_source == 1).count()
+        max_illusts = _prefetch_state['max_illusts']
+        if count <= max_illusts:
+            return
+        need_free = count - max_illusts
+
+        delete_list: list[int] = []
+        old_tags = db.query(SearchCache).order_by(SearchCache.cached_at.asc()).all()
+        for sc in old_tags:
+            if need_free <= 0:
+                break
+            try:
+                ids = json.loads(sc.illust_ids) if sc.illust_ids else []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            kept = list(ids)
+            while kept and need_free > 0:
+                pid = kept.pop()
+                if not isinstance(pid, int):
+                    continue
+                # 仍被其他 SearchCache 引用时跳过（防止破坏其他标签的缓存）
+                other_refs = db.query(SearchCache).filter(
+                    SearchCache.tag != sc.tag,
+                    SearchCache.illust_ids.like(f'%{pid}%'),
+                ).first()
+                if other_refs:
+                    continue
+                illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+                if illust is None or illust.download_status == 'done' or illust.local_paths_list:
+                    continue
+                if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
+                    continue
+                delete_list.append(pid)
+                need_free -= 1
+            sc.illust_ids = json.dumps(kept, ensure_ascii=False)
+            safe_commit(db)
+
+        if delete_list:
+            db.query(Illust).filter(Illust.pixiv_id.in_(delete_list)).delete(synchronize_session=False)
+            safe_commit(db)
+            logger.info(f'[prefetch] 容量清理: 删除 {len(delete_list)} 条最旧预取作品')
+
+
+def _prefetch_loop() -> None:
+    """后台预取循环：遍历所有 SearchCache 标签，串行预取。"""
+    _prefetch_state['running'] = True
+    try:
+        with get_session() as db:
+            tags = [t[0] for t in db.query(SearchCache.tag).all()]
+        if not tags:
+            return
+        logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
+        for tag in tags:
+            _prefetch_one_tag(tag)
+        _prefetch_capacity_cleanup()
+        _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
+    finally:
+        _prefetch_state['running'] = False
+
+
+def _start_prefetch_thread() -> None:
+    """启动预取守护线程。首轮延迟 5 秒，之后按 interval 循环。"""
+    interval = _prefetch_state['interval']
+    if interval <= 0:
+        logger.info('[prefetch] 已禁用（interval=0）')
+        return
+
+    def _run() -> None:
+        time.sleep(5)  # 等 app 完全启动
+        while True:
+            _prefetch_loop()
+            time.sleep(interval)
+
+    threading.Thread(target=_run, daemon=True).start()
+    logger.info(f'[prefetch] 后台线程已启动，interval={interval}s')
+
+
+_start_prefetch_thread()
 
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
 download_locks: dict[int, threading.Lock] = {}
