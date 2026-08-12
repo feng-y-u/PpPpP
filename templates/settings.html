@@ -268,21 +268,23 @@ let prefetchTags = [];
 
 async function loadPrefetchTags() {
   try {
-    prefetchTags = await fetch('/api/prefetch/tags').then(r => r.json());
+    const r = await fetch('/api/prefetch/tags');
+    const data = await r.json();
+    if (!Array.isArray(data)) { showToast('加载预取标签失败', true); return; }
+    prefetchTags = data;
     renderPrefetchTags();
-  } catch {}
+  } catch { showToast('加载预取标签失败', true); }
 }
 
 function renderPrefetchTags() {
-  const list = document.getElementById('prefetchTagList');
+  const list = $('#prefetchTagList');
   if (!list) return;
   if (!prefetchTags.length) {
     list.innerHTML = '<span style="color:var(--text-muted);font-size:0.8rem;">暂无预取标签</span>';
     return;
   }
   list.innerHTML = prefetchTags.map(t => {
-    const statusColor = t.status === 'done' ? '#198754' : (t.status === 'error' ? '#dc3545' : '#6c757d');
-    return `<span class="badge" style="background:var(--accent);font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;" data-tag="${escAttr(t.tag)}" title="状态: ${t.status} · 条数: ${t.total || 0}">
+    return `<span class="badge" style="background:var(--accent);font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;" data-tag="${escAttr(t.tag)}" title="状态: ${escAttr(t.status)} · 条数: ${t.total || 0}">
       ${escHtml(t.tag)}
       <span style="opacity:.6;">&times;</span>
     </span>`;
@@ -293,40 +295,47 @@ function renderPrefetchTags() {
 }
 
 async function addPrefetchTag() {
-  const input = document.getElementById('prefetchTagInput');
+  const input = $('#prefetchTagInput');
+  const btn = $('#addPrefetchTagBtn');
   const tag = (input.value || '').trim();
   if (!tag) return;
-  const resp = await fetch('/api/prefetch/tags', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
-    body: JSON.stringify({tag}),
-  });
-  const err = await resp.json().catch(() => ({}));
-  if (resp.ok) {
-    showToast('已添加预取标签', false);
-    input.value = '';
-    loadPrefetchTags();
-  } else {
-    showToast(err.error || '添加失败', true);
-  }
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/prefetch/tags', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+      body: JSON.stringify({tag}),
+    });
+    const err = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      showToast('已添加预取标签', false);
+      input.value = '';
+      loadPrefetchTags();
+    } else {
+      showToast(err.error || '添加失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+  finally { btn.disabled = false; }
 }
 
 async function removePrefetchTag(tag) {
-  const resp = await fetch(`/api/prefetch/tags/${encodeURIComponent(tag)}`, {
-    method: 'DELETE',
-    headers: {'X-CSRF-Token': csrfToken},
-  });
-  if (resp.ok) {
-    showToast('已删除', false);
-    loadPrefetchTags();
-  } else {
-    const err = await resp.json().catch(() => ({}));
-    showToast(err.error || '删除失败', true);
-  }
+  try {
+    const resp = await fetch(`/api/prefetch/tags/${encodeURIComponent(tag)}`, {
+      method: 'DELETE',
+      headers: {'X-CSRF-Token': csrfToken},
+    });
+    if (resp.ok) {
+      showToast('已删除', false);
+      loadPrefetchTags();
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      showToast(err.error || '删除失败', true);
+    }
+  } catch { showToast('网络错误', true); }
 }
 
-document.getElementById('addPrefetchTagBtn')?.addEventListener('click', addPrefetchTag);
-document.getElementById('prefetchTagInput')?.addEventListener('keydown', e => {
+$('#addPrefetchTagBtn').addEventListener('click', addPrefetchTag);
+$('#prefetchTagInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') addPrefetchTag();
 });
 
