@@ -13,7 +13,7 @@
 ## 需求摘要（已与用户确认）
 
 1. **预取标签**：手动配置清单（设置页增删），不自动学习
-2. **数据范围**：宽松参数预取（收藏数 ≥ 0、R18 不过滤），完整作品数据写入 `Illust` 表；**全局移除 `description` 字段**（不只缓存不要，整个系统都不再需要描述）
+2. **数据范围**：宽松参数预取（收藏数 ≥ 1、R18 不过滤），完整作品数据写入 `Illust` 表；**全局移除 `description` 字段**（不只缓存不要，整个系统都不再需要描述）
 3. **命中方式**：搜索命中即秒回缓存 + 标注缓存时间 + 「立即刷新」按钮
 4. **调度**：应用内后台 daemon 线程，interval 设置页可配（0 = 禁用）
 5. **二次过滤**：命中后在库内按用户的 `min_bookmarks` / R18 / 排序过滤排序，不重新抓 Pixiv
@@ -61,10 +61,10 @@ class SearchCache(Base):
 
 ### 预取参数（宽松全覆盖）
 
-`search_by_tag(tag, min_bookmarks=0, sort='date_d', r18_mode='all', tag_mode='or')`
+`search_by_tag(tag, min_bookmarks=1, sort='date_d', r18_mode='all', tag_mode='or')`
 
 - **排序用 `date_d` 而非 `popular_d`**：`popular_d` 需 Pixiv Premium，非 Premium 静默返回空结果。命中后的人气排序在库内用 `bookmark_count` 降序近似
-- `min_bookmarks=0` 保证宽口径，用户搜索任意收藏数门槛都能在库内过滤命中
+- **`min_bookmarks=1`（不是 0）**：`search_by_tag` 在 `min_bookmarks=0` 时强制走 defer 路径（`defer = defer_details or (min_bookmarks == 0)`），返回结果 `bookmark_count=0`、详情后台补全——导致库内无法按收藏数过滤/排序。用 `1` 强制走同步详情路径拿到真实收藏数；同时也符合用户"缓存收藏数大于0的作品"的需求。用户搜索任意更高收藏数门槛仍可在库内过滤命中
 
 ### 预取流程（串行，尊重限流）
 
