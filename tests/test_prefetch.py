@@ -157,6 +157,30 @@ class TestCapacityCleanup:
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
         assert remaining == {1}
 
+    def test_capacity_cleanup_exact_membership_no_like_false_positive(self, clean_db):
+        # LIKE 子串误判：pid 1234567 不应被 tag_b 的 12345678 误判为“仍被引用”
+        clean_db.add_all([
+            SearchCache(tag='tag_a', illust_ids='[1234567]',
+                        cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+            SearchCache(tag='tag_b', illust_ids='[12345678]',
+                        cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
+            Illust(pixiv_id=1234567, title='a', prefetch_source=1),
+            Illust(pixiv_id=12345678, title='b', prefetch_source=1),
+        ])
+        safe_commit(clean_db)
+
+        old = app._prefetch_state['max_illusts']
+        try:
+            app._prefetch_state['max_illusts'] = 1
+            app._prefetch_capacity_cleanup()
+        finally:
+            app._prefetch_state['max_illusts'] = old
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1234567).first() is None
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 12345678).first() is not None
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == []
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [12345678]
+
     def test_prefetch_loop_survives_cleanup_error(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='t'))
         safe_commit(clean_db)
@@ -178,6 +202,23 @@ class TestCapacityCleanup:
         # 标签列表查询异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
         app._prefetch_loop()
         assert app._prefetch_state['running'] is False
+
+
+class TestQueryCachedTagSort:
+    def test_date_d_sort_with_multiple_none_upload_date(self, clean_db):
+        clean_db.add_all([
+            SearchCache(tag='x', illust_ids='[1, 2]', status='done'),
+            Illust(pixiv_id=1, title='a', bookmark_count=5),
+            Illust(pixiv_id=2, title='b', bookmark_count=5),
+        ])
+        safe_commit(clean_db)
+
+        results, has_more, next_offset = app.query_cached_tag(
+            'x', 0, 'date_d', 'or', 'all')
+
+        assert {r['pixiv_id'] for r in results} == {1, 2}
+        assert has_more is False
+        assert next_offset == 0
 
 
 class TestPrefetchThreadLiveness:

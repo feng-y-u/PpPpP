@@ -273,13 +273,19 @@ def _prefetch_one_tag(tag: str) -> None:
         with get_session() as db:
             row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
             if row is None:
-                row = SearchCache(tag=tag)
+                row = SearchCache(tag=tag, status='fetching')
                 db.add(row)
-            if row.status == 'fetching':
-                return  # 正在取中，避免并发重复预取
-            row.status = 'fetching'
-            row.error = ''
-            safe_commit(db)
+                safe_commit(db)
+            else:
+                # 原子抢占 fetching 状态，避免并发重复预取同一标签
+                updated = db.execute(
+                    text('UPDATE search_cache SET status = :s WHERE tag = :t AND status != :s'),
+                    {'s': 'fetching', 't': tag},
+                ).rowcount
+                safe_commit(db)
+                if updated == 0:
+                    # 已被其他线程抢占，正在预取中
+                    return
 
         for page in range(1, _prefetch_state['pages'] + 1):
             results, has_more = search_by_tag(
@@ -319,6 +325,20 @@ def _prefetch_one_tag(tag: str) -> None:
                 safe_commit(db)
 
 
+def _collect_other_tag_pids(db, exclude_tag: str) -> set[int]:
+    """收集除 exclude_tag 外所有 SearchCache 标签引用的 pixiv_id 集合。"""
+    result: set[int] = set()
+    for other in db.query(SearchCache).filter(SearchCache.tag != exclude_tag).all():
+        try:
+            ids = json.loads(other.illust_ids or '[]')
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for pid in ids:
+            if isinstance(pid, int):
+                result.add(pid)
+    return result
+
+
 def _prefetch_capacity_cleanup() -> None:
     """容量清理：超出上限时从最旧标签末尾删除未下载未收藏的预取作品。"""
     with get_session() as db:
@@ -339,17 +359,14 @@ def _prefetch_capacity_cleanup() -> None:
                 continue
             # 从尾部（最旧条目）找可删作品；受保护的作品保留在标签列表中
             delete_from_tag: list[int] = []
+            other_pids = _collect_other_tag_pids(db, sc.tag)
             for pid in reversed(ids):
                 if need_free <= 0:
                     break
                 if not isinstance(pid, int):
                     continue
                 # 仍被其他 SearchCache 引用时跳过（防止破坏其他标签的缓存）
-                other_refs = db.query(SearchCache).filter(
-                    SearchCache.tag != sc.tag,
-                    SearchCache.illust_ids.like(f'%{pid}%'),
-                ).first()
-                if other_refs:
+                if pid in other_pids:
                     continue
                 illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
                 if illust is None or illust.download_status == 'done' or illust.local_paths_list:
@@ -465,7 +482,7 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     if sort_order == 'popular_d':
         filtered.sort(key=lambda x: x.bookmark_count, reverse=True)
     else:  # date_d
-        filtered.sort(key=lambda x: (x.upload_date is not None, x.upload_date), reverse=True)
+        filtered.sort(key=lambda x: (x.upload_date is not None, x.upload_date or datetime.min), reverse=True)
 
     total = len(filtered)
     page = filtered[offset:offset + limit]
@@ -745,7 +762,12 @@ def _cleanup_search_tasks() -> None:
 
 
 def _submit_search_task(fn) -> str:
-    """提交搜索任务到后台线程，返回 task_id。fn: () -> (results, cursor, has_more)"""
+    """提交搜索任务到后台线程，返回 task_id。
+
+    fn 返回两种形态之一：
+    - 元组 (results, cursor, has_more)
+    - 字典 {results, cursor, has_more, fetch_stats, source, cached_at}
+    """
     _cleanup_search_tasks()
     task_id = secrets.token_hex(8)
     task: dict = {
@@ -1651,15 +1673,12 @@ def prefetch_tags_delete(tag: str) -> Response:
             ids = []
 
         deletable: list[int] = []
+        other_pids = _collect_other_tag_pids(db, tag)
         for pid in ids:
             if not isinstance(pid, int):
                 continue
             # 仍被其他 SearchCache 引用时保留
-            other_refs = db.query(SearchCache).filter(
-                SearchCache.tag != tag,
-                SearchCache.illust_ids.like(f'%{pid}%'),
-            ).first()
-            if other_refs:
+            if pid in other_pids:
                 continue
             illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
             if illust is None or not illust.prefetch_source:
