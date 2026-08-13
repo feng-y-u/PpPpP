@@ -148,6 +148,10 @@
     <button class="btn btn-sm btn-soft" id="prevPageBtn" disabled>上一页</button>
     <span id="paginationStatus" style="margin:0 12px;font-size:0.8rem;"></span>
     <button class="btn btn-sm btn-soft" id="nextPageBtn" disabled>下一页</button>
+    <span style="margin-left:8px;font-size:0.8rem;">
+      跳至 <input id="pageJumpInput" type="number" min="1" style="width:56px;padding:2px 6px;"> 页
+      <button class="btn btn-sm btn-soft" id="pageJumpBtn">跳转</button>
+    </span>
   </div>
 </div>
 </div>
@@ -238,6 +242,7 @@ let cacheTags = [];
 let currentOffset = 0;
 let cacheHasMore = false;
 let cachePageSize = 24;
+let cacheFilteredTotal = 0;
 
 async function loadCacheTags() {
   try {
@@ -281,6 +286,7 @@ async function browseCache() {
 
 function renderCacheResults(data) {
   cachePageSize = data.page_size || cachePageSize;
+  cacheFilteredTotal = data.filtered_total || 0;
   $('#masonryGrid').innerHTML = '';
   if (!data.results.length) {
     $('#emptyState').style.display = 'block';
@@ -297,10 +303,24 @@ function renderCacheResults(data) {
 function renderCachePagination() {
   $('#paginationBar').style.display = 'block';
   const pageNum = Math.floor(currentOffset / cachePageSize) + 1;
+  const totalPages = cacheFilteredTotal > 0 ? Math.ceil(cacheFilteredTotal / cachePageSize) : 1;
   $('#prevPageBtn').disabled = currentOffset === 0;
   $('#nextPageBtn').disabled = !cacheHasMore;
-  $('#paginationStatus').textContent = `第 ${pageNum} 页`;
+  $('#paginationStatus').textContent = `第 ${pageNum} / ${totalPages} 页`;
 }
+
+function jumpToPage() {
+  const totalPages = cacheFilteredTotal > 0 ? Math.ceil(cacheFilteredTotal / cachePageSize) : 1;
+  const p = parseInt($('#pageJumpInput').value);
+  if (!p || p < 1 || p > totalPages) {
+    showToast(`页码需在 1-${totalPages} 之间`, true);
+    return;
+  }
+  browseCacheWithOffset((p - 1) * cachePageSize);
+}
+
+$('#pageJumpBtn').addEventListener('click', jumpToPage);
+$('#pageJumpInput').addEventListener('keydown', e => { if (e.key === 'Enter') jumpToPage(); });
 
 $('#cacheBrowseBtn').addEventListener('click', browseCache);
 $('#cacheTagSelect').addEventListener('change', () => { updateCacheMeta(); browseCache(); });
