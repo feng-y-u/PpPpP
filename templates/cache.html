@@ -241,12 +241,13 @@ let cachePageSize = 24;
 
 async function loadCacheTags() {
   try {
+    const prevTag = $('#cacheTagSelect').value;
     cacheTags = await fetch('/api/prefetch/tags').then(r => r.json());
     const sel = $('#cacheTagSelect');
     sel.innerHTML = cacheTags.length
       ? cacheTags.map(t => `<option value="${escAttr(t.tag)}">${escHtml(t.tag)}（${escHtml(t.status)} · ${t.total || 0}条）</option>`).join('')
       : '<option value="">暂无预取标签</option>';
-    sel.value = cacheTags[0] ? cacheTags[0].tag : '';
+    sel.value = cacheTags.some(t => t.tag === prevTag) ? prevTag : (cacheTags[0] ? cacheTags[0].tag : '');
     $('#cacheRefreshBtn').disabled = !cacheTags.length;
     updateCacheMeta();
   } catch { $('#cacheTagSelect').innerHTML = '<option value="">加载失败</option>'; }
