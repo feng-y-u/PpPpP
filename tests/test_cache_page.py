@@ -1,4 +1,6 @@
+import json
 from datetime import datetime, timezone
+
 from models import SearchCache, Illust, safe_commit
 
 
@@ -6,7 +8,7 @@ class TestCacheItemsApi:
     def _seed(self, db, tag='测试', status='done', ids=None):
         if ids is None:
             ids = [101, 102, 103, 104]
-        db.add(SearchCache(tag=tag, illust_ids=str(ids), status=status,
+        db.add(SearchCache(tag=tag, illust_ids=json.dumps(ids), status=status,
                            cached_at=datetime(2026, 8, 13, 3, 0, tzinfo=timezone.utc), total=len(ids)))
         for pid, bm, d in [(101, 100, '2026-08-10'), (102, 10, '2026-08-12'), (103, 500, '2026-08-01'), (104, 1, '2026-08-11')]:
             i = Illust(pixiv_id=pid, title=f't{pid}', bookmark_count=bm,
@@ -26,6 +28,8 @@ class TestCacheItemsApi:
         assert data['page_size'] == 24
         assert len(data['results']) == 4
         assert data['has_more'] is False
+        dates = [x['upload_date'][:10] for x in data['results']]
+        assert dates == ['2026-08-12', '2026-08-11', '2026-08-10', '2026-08-01']
 
     def test_items_min_bookmarks_filter(self, clean_db, client):
         self._seed(clean_db)
@@ -49,6 +53,30 @@ class TestCacheItemsApi:
         assert len(data['results']) == 2
         assert data['offset'] == 2
         assert data['has_more'] is False
+
+    def test_items_has_more_pagination(self, clean_db, client):
+        # 25 条 > page_size 24 → 第一页 has_more=True，第二页取到剩余 1 条
+        ids = list(range(1, 26))
+        db = clean_db
+        db.add(SearchCache(tag='大标签', illust_ids=json.dumps(ids), status='done',
+                           cached_at=datetime(2026, 8, 13, 3, 0, tzinfo=timezone.utc), total=len(ids)))
+        for pid in ids:
+            i = Illust(pixiv_id=pid, title=f't{pid}', bookmark_count=pid,
+                       upload_date=datetime.fromisoformat('2026-08-01T00:00:00'), thumb_url='https://i.pximg.net/x.jpg')
+            i.tags_list = ['tag']
+            db.add(i)
+        safe_commit(db)
+
+        r1 = client.get('/api/cache/items?tag=大标签')
+        d1 = r1.get_json()
+        assert d1['has_more'] is True
+        assert len(d1['results']) == 24
+
+        r2 = client.get('/api/cache/items?tag=大标签&offset=24')
+        d2 = r2.get_json()
+        assert d2['has_more'] is False
+        assert len(d2['results']) == 1
+        assert d2['offset'] == 24
 
     def test_items_missing_tag_param(self, clean_db, client):
         r = client.get('/api/cache/items')
