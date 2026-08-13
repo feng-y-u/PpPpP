@@ -122,19 +122,7 @@ class TestQueryCachedTag:
         assert [r['pixiv_id'] for r in results] == [2, 1]
 
 
-class TestSearchRouteCache:
-    def _poll(self, client, task_id, timeout=50):
-        """轮询异步搜索任务直到终态（与 test_app.py 的 TestSearch._poll 一致）。"""
-        for _ in range(timeout):
-            r = client.get(f'/api/search/status/{task_id}')
-            if r.status_code == 404:
-                return r
-            data = r.get_json()
-            if data and data.get('status') != 'running':
-                return r
-            time.sleep(0.05)
-        raise AssertionError(f'搜索任务 {task_id} 超时未完成')
-
+class TestSearchAlwaysLive:
     def test_search_route_always_live_even_for_cached_tag(self, clean_db, client, monkeypatch):
         clean_db.add(SearchCache(tag='缓存标签', status='done', illust_ids='[1,2,3]'))
         safe_commit(clean_db)

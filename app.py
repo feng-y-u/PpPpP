@@ -764,9 +764,7 @@ def _cleanup_search_tasks() -> None:
 def _submit_search_task(fn) -> str:
     """提交搜索任务到后台线程，返回 task_id。
 
-    fn 返回两种形态之一：
-    - 元组 (results, cursor, has_more)
-    - 字典 {results, cursor, has_more, fetch_stats, source, cached_at}
+    fn 返回元组 (results, cursor, has_more)。
     """
     _cleanup_search_tasks()
     task_id = secrets.token_hex(8)
@@ -785,20 +783,11 @@ def _submit_search_task(fn) -> str:
 
     def _run() -> None:
         try:
-            result = fn()
-            if isinstance(result, dict):
-                task['results'] = result.get('results', [])
-                task['cursor'] = result.get('cursor')
-                task['has_more'] = result.get('has_more', False)
-                task['fetch_stats'] = result.get('fetch_stats') or fetcher.get_last_fetch_stats()
-                task['source'] = result.get('source')
-                task['cached_at'] = result.get('cached_at')
-            else:
-                results, next_cursor, has_more = result
-                task['results'] = results
-                task['cursor'] = next_cursor
-                task['has_more'] = has_more
-                task['fetch_stats'] = fetcher.get_last_fetch_stats()
+            results, next_cursor, has_more = fn()
+            task['results'] = results
+            task['cursor'] = next_cursor
+            task['has_more'] = has_more
+            task['fetch_stats'] = fetcher.get_last_fetch_stats()
             task['status'] = 'done'
             logger.info(
                 f'[search] 完成 task={task_id} results={len(task["results"])} has_more={task["has_more"]} '
@@ -933,10 +922,6 @@ def search_status(task_id: str) -> Response:
         'has_more': task['has_more'],
         'fetch_stats': task['fetch_stats'],
     }
-    if task.get('source'):
-        resp['source'] = task['source']
-    if task.get('cached_at'):
-        resp['cached_at'] = task['cached_at']
     if task['status'] == 'error':
         resp['error'] = task['error']
         if task['error'] == 'auth':
