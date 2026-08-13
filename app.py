@@ -442,11 +442,11 @@ _start_prefetch_thread()
 
 def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
                      tag_mode: str, r18_mode: str, offset: int = 0,
-                     limit: int = 24) -> tuple[list[dict], bool, int]:
+                     limit: int = 24) -> tuple[list[dict], bool, int, int]:
     """从 SearchCache + Illust 表查询预取结果，支持库内过滤排序分页。
 
     Returns:
-        (results_dicts, has_more, next_offset)
+        (results_dicts, has_more, next_offset, filtered_total)
     """
     with get_session() as db:
         sc = db.query(SearchCache).filter(
@@ -454,14 +454,14 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
             SearchCache.status == 'done',
         ).first()
         if not sc:
-            return [], False, 0
+            return [], False, 0, 0
 
         try:
             all_ids = json.loads(sc.illust_ids) if sc.illust_ids else []
         except (json.JSONDecodeError, TypeError):
             all_ids = []
         if not all_ids:
-            return [], False, 0
+            return [], False, 0, 0
 
         id_map = {i.pixiv_id: i for i in db.query(Illust).filter(Illust.pixiv_id.in_(all_ids)).all()}
 
@@ -489,7 +489,7 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     has_more = (offset + limit) < total
     next_offset = offset + limit if has_more else 0
 
-    return [i.to_dict() for i in page], has_more, next_offset
+    return [i.to_dict() for i in page], has_more, next_offset, total
 
 
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
@@ -959,7 +959,7 @@ def cache_items() -> Response:
         sc_status = sc.status
         sc_total = sc.total
 
-    results, has_more, _next = query_cached_tag(
+    results, has_more, _next, filtered_total = query_cached_tag(
         tag, min_bookmarks, sort_order, 'or', 'all',
         offset=offset, limit=ITEMS_PER_PAGE,
     )
@@ -968,6 +968,7 @@ def cache_items() -> Response:
         'cached_at': cached_at,
         'status': sc_status,
         'total': sc_total,
+        'filtered_total': filtered_total,
         'offset': offset,
         'page_size': ITEMS_PER_PAGE,
         'results': results,

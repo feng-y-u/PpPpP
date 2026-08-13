@@ -25,6 +25,7 @@ class TestCacheItemsApi:
         assert data['tag'] == '测试'
         assert data['status'] == 'done'
         assert data['total'] == 4
+        assert data['filtered_total'] == 4
         assert data['page_size'] == 24
         assert len(data['results']) == 4
         assert data['has_more'] is False
@@ -37,6 +38,7 @@ class TestCacheItemsApi:
         data = r.get_json()
         ids = {x['pixiv_id'] for x in data['results']}
         assert ids == {101, 103}
+        assert data['filtered_total'] == 2
 
     def test_items_popular_sort(self, clean_db, client):
         self._seed(clean_db)

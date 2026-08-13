@@ -21,12 +21,13 @@ class TestQueryCachedTag:
         ])
         safe_commit(clean_db)
 
-        results, has_more, next_offset = app.query_cached_tag(
+        results, has_more, next_offset, filtered_total = app.query_cached_tag(
             'x', 0, 'date_d', 'or', 'all', offset=0, limit=2)
 
         assert [r['pixiv_id'] for r in results] == [4, 3]
         assert has_more is True
         assert next_offset == 2
+        assert filtered_total == 4
 
     def test_min_bookmarks_and_r18(self, clean_db):
         r18 = Illust(pixiv_id=2, title='r18', bookmark_count=100)
@@ -41,12 +42,13 @@ class TestQueryCachedTag:
         ])
         safe_commit(clean_db)
 
-        results, has_more, next_offset = app.query_cached_tag(
+        results, has_more, next_offset, filtered_total = app.query_cached_tag(
             'x', 10, 'date_d', 'or', 'safe')
 
         assert [r['pixiv_id'] for r in results] == [3]
         assert has_more is False
         assert next_offset == 0
+        assert filtered_total == 1
 
     def test_r18g_filtered_in_safe_mode(self, clean_db):
         r18g = Illust(pixiv_id=1, title='g', bookmark_count=50)
@@ -58,7 +60,7 @@ class TestQueryCachedTag:
         ])
         safe_commit(clean_db)
 
-        results, _, _ = app.query_cached_tag('x', 0, 'date_d', 'or', 'safe')
+        results, _, _, _ = app.query_cached_tag('x', 0, 'date_d', 'or', 'safe')
         assert [r['pixiv_id'] for r in results] == [2]
 
     def test_missing_or_not_done(self, clean_db):
@@ -66,25 +68,28 @@ class TestQueryCachedTag:
         safe_commit(clean_db)
 
         # 无缓存行
-        results, has_more, next_offset = app.query_cached_tag('nope', 0, 'date_d', 'or', 'all')
+        results, has_more, next_offset, filtered_total = app.query_cached_tag('nope', 0, 'date_d', 'or', 'all')
         assert results == []
         assert has_more is False
         assert next_offset == 0
+        assert filtered_total == 0
 
         # status 非 done
-        results, has_more, next_offset = app.query_cached_tag('pending', 0, 'date_d', 'or', 'all')
+        results, has_more, next_offset, filtered_total = app.query_cached_tag('pending', 0, 'date_d', 'or', 'all')
         assert results == []
         assert has_more is False
         assert next_offset == 0
+        assert filtered_total == 0
 
     def test_empty_ids(self, clean_db):
         clean_db.add(SearchCache(tag='x', illust_ids='[]', status='done'))
         safe_commit(clean_db)
 
-        results, has_more, next_offset = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
+        results, has_more, next_offset, filtered_total = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
         assert results == []
         assert has_more is False
         assert next_offset == 0
+        assert filtered_total == 0
 
     def test_missing_illust_skipped(self, clean_db):
         # illust_ids 引用了不存在的行（已被容量清理删除）→ 跳过，不报错
@@ -94,9 +99,10 @@ class TestQueryCachedTag:
         ])
         safe_commit(clean_db)
 
-        results, has_more, next_offset = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
+        results, has_more, next_offset, filtered_total = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
         assert [r['pixiv_id'] for r in results] == [1]
         assert has_more is False
+        assert filtered_total == 1
 
     def test_popular_sort(self, clean_db):
         clean_db.add_all([
@@ -106,7 +112,7 @@ class TestQueryCachedTag:
         ])
         safe_commit(clean_db)
 
-        results, _, _ = app.query_cached_tag('x', 0, 'popular_d', 'or', 'all')
+        results, _, _, _ = app.query_cached_tag('x', 0, 'popular_d', 'or', 'all')
         assert [r['pixiv_id'] for r in results] == [2, 1]
 
     def test_none_upload_date_sorts_last(self, clean_db):
@@ -118,7 +124,7 @@ class TestQueryCachedTag:
         ])
         safe_commit(clean_db)
 
-        results, _, _ = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
+        results, _, _, _ = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
         assert [r['pixiv_id'] for r in results] == [2, 1]
 
 

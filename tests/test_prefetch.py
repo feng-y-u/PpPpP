@@ -213,12 +213,13 @@ class TestQueryCachedTagSort:
         ])
         safe_commit(clean_db)
 
-        results, has_more, next_offset = app.query_cached_tag(
+        results, has_more, next_offset, filtered_total = app.query_cached_tag(
             'x', 0, 'date_d', 'or', 'all')
 
         assert {r['pixiv_id'] for r in results} == {1, 2}
         assert has_more is False
         assert next_offset == 0
+        assert filtered_total == 2
 
 
 class TestPrefetchThreadLiveness:
