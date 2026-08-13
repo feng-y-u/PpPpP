@@ -135,77 +135,17 @@ class TestSearchRouteCache:
             time.sleep(0.05)
         raise AssertionError(f'搜索任务 {task_id} 超时未完成')
 
-    def test_search_route_cache_hit(self, clean_db, client):
-        # cached_at 用 naive datetime（SQLite DateTime 回读不带 tzinfo）
-        cached_at = datetime(2025, 1, 1, 12, 0, 0)
-        clean_db.add_all([
-            SearchCache(tag='x', illust_ids='[1, 2]', status='done', cached_at=cached_at),
-            Illust(pixiv_id=1, title='a', bookmark_count=10,
-                   upload_date=datetime(2023, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=2, title='b', bookmark_count=20,
-                   upload_date=datetime(2023, 2, 1, tzinfo=timezone.utc)),
-        ])
+    def test_search_route_always_live_even_for_cached_tag(self, clean_db, client, monkeypatch):
+        clean_db.add(SearchCache(tag='缓存标签', status='done', illust_ids='[1,2,3]'))
         safe_commit(clean_db)
 
-        resp = client.get('/search?type=tag&query=x&min_bookmarks=0')
-        assert resp.status_code == 200
-        assert 'task_id' in resp.get_json()
+        called = []
+        def fake_search_by_tag(*args, **kwargs):
+            called.append(1)
+            return [], False
+        monkeypatch.setattr('app.search_by_tag', fake_search_by_tag)
 
-        final = self._poll(client, resp.get_json()['task_id'])
-        assert final.status_code == 200
-        body = final.get_json()
-        assert body['status'] == 'done'
-        assert body['source'] == 'cache'
-        assert body['cached_at'] == '2025-01-01T12:00:00'
-        assert [r['pixiv_id'] for r in body['results']] == [2, 1]
-        assert body['has_more'] is False
-        assert body['cursor'] is None
-
-    def test_search_route_cache_miss_still_async(self, clean_db, client, monkeypatch):
-        # 未命中缓存 → 仍走异步任务（用 mock 避免真实网络请求）
-        monkeypatch.setattr(app, 'search_by_tag', lambda *a, **k: ([], False))
-        resp = client.get('/search?type=tag&query=not-cached')
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert 'task_id' in data
-
-        final = self._poll(client, data['task_id'])
-        assert final.status_code == 200
-        body = final.get_json()
-        assert body['status'] == 'done'
-        assert body.get('source') is None  # 非缓存路径不带 source
-
-    def test_search_route_cache_cursor_pagination(self, clean_db, client):
-        cached_at = datetime(2025, 1, 1, 12, 0, 0)
-        clean_db.add_all([
-            SearchCache(tag='x', illust_ids='[1, 2, 3]', status='done', cached_at=cached_at),
-            Illust(pixiv_id=1, title='a', bookmark_count=10,
-                   upload_date=datetime(2023, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=2, title='b', bookmark_count=20,
-                   upload_date=datetime(2023, 2, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=3, title='c', bookmark_count=30,
-                   upload_date=datetime(2023, 3, 1, tzinfo=timezone.utc)),
-        ])
-        safe_commit(clean_db)
-
-        # 第一页：limit=ITEMS_PER_PAGE(24) > 3 条，全量返回
-        resp = client.get('/search?type=tag&query=x&min_bookmarks=0')
-        task_id = resp.get_json()['task_id']
-        body = self._poll(client, task_id).get_json()
-        assert body['source'] == 'cache'
-        assert [r['pixiv_id'] for r in body['results']] == [3, 2, 1]
-        assert body['has_more'] is False
-
-        # 构造 cache_offset 游标模拟第二页（date_d 排序，offset=2 → 剩 [1]）
-        cursor = app.encode_cursor({
-            'type': 'tag', 'query': 'x', 'sort': 'date_d',
-            'tag_mode': 'or', 'r18_mode': 'all', 'min_bookmarks': 0,
-            'cache_offset': 2, 'created_at': int(time.time()),
-        })
-        resp = client.get(f'/search?type=tag&query=x&min_bookmarks=0&cursor={cursor}')
-        assert resp.status_code == 200
-        task_id = resp.get_json()['task_id']
-        body = self._poll(client, task_id).get_json()
-        assert body['source'] == 'cache'
-        assert [r['pixiv_id'] for r in body['results']] == [1]
-        assert body['has_more'] is False
+        r = client.get('/search?type=tag&query=缓存标签')
+        assert r.status_code == 200
+        assert 'task_id' in r.get_json()
+        assert called, '预取标签搜索必须走实时 search_by_tag'
