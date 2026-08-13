@@ -55,7 +55,7 @@ FETCH_DETAIL_WORKERS = 5   # 详情 API 并行获取线程数
 # 搜索预取设置
 PREFETCH_INTERVAL = 3600        # 预取间隔（秒），0 禁用
 PREFETCH_PAGES = 3              # 每标签预取页数
-PREFETCH_MAX_ILLUSTS = 20000    # 预取来源作品最大数量
+PREFETCH_MAX_ILLUSTS = 10000    # 预取来源作品最大数量
 
 # 显示设置
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下

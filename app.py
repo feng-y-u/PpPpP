@@ -309,10 +309,14 @@ def _prefetch_one_tag(tag: str) -> None:
         with get_session() as db:
             row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
             if row:
-                row.illust_ids = json.dumps(all_ids, ensure_ascii=False)
+                # 累积合并：新结果在前，旧作品去重保留在后（条数只增不减，由容量清理兜底）
+                old_ids = json.loads(row.illust_ids) if row.illust_ids else []
+                seen = set(all_ids)
+                merged = list(all_ids) + [pid for pid in old_ids if pid not in seen]
+                row.illust_ids = json.dumps(merged, ensure_ascii=False)
                 row.cached_at = datetime.now(timezone.utc)
                 row.status = 'done'
-                row.total = len(all_ids)
+                row.total = len(merged)
                 row.error = ''
                 safe_commit(db)
     except Exception as e:
@@ -340,7 +344,7 @@ def _collect_other_tag_pids(db, exclude_tag: str) -> set[int]:
 
 
 def _prefetch_capacity_cleanup() -> None:
-    """容量清理：超出上限时从最旧标签末尾删除未下载未收藏的预取作品。"""
+    """容量清理：超出上限时优先删除收藏数最低的未下载未收藏预取作品。"""
     with get_session() as db:
         count = db.query(Illust).filter(Illust.prefetch_source == 1).count()
         max_illusts = _prefetch_state['max_illusts']
@@ -348,45 +352,35 @@ def _prefetch_capacity_cleanup() -> None:
             return
         need_free = count - max_illusts
 
-        to_delete: list[int] = []
-        old_tags = db.query(SearchCache).order_by(SearchCache.cached_at.asc()).all()
-        for sc in old_tags:
-            if need_free <= 0:
-                break
+        fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
+        candidates: list[Illust] = []
+        for i in db.query(Illust).filter(Illust.prefetch_source == 1).all():
+            if i.download_status == 'done' or i.local_paths_list:
+                continue
+            if i.pixiv_id in fav_ids:
+                continue
+            candidates.append(i)
+
+        # 收藏数低优先删除，并列时更早上传的优先
+        candidates.sort(key=lambda x: (x.bookmark_count, x.upload_date or datetime.min))
+        to_delete = [c.pixiv_id for c in candidates[:need_free]]
+        if not to_delete:
+            return
+
+        to_delete_set = set(to_delete)
+        for sc in db.query(SearchCache).all():
             try:
                 ids = json.loads(sc.illust_ids) if sc.illust_ids else []
             except (json.JSONDecodeError, TypeError):
                 continue
-            # 从尾部（最旧条目）找可删作品；受保护的作品保留在标签列表中
-            delete_from_tag: list[int] = []
-            other_pids = _collect_other_tag_pids(db, sc.tag)
-            for pid in reversed(ids):
-                if need_free <= 0:
-                    break
-                if not isinstance(pid, int):
-                    continue
-                # 仍被其他 SearchCache 引用时跳过（防止破坏其他标签的缓存）
-                if pid in other_pids:
-                    continue
-                illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
-                if illust is None or illust.download_status == 'done' or illust.local_paths_list:
-                    continue
-                if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
-                    continue
-                delete_from_tag.append(pid)
-                need_free -= 1
-
-            if delete_from_tag:
-                # 只移除真正删除的 pid，受保护的作品留在列表中
-                new_ids = [p for p in ids if p not in delete_from_tag]
+            new_ids = [p for p in ids if p not in to_delete_set]
+            if len(new_ids) != len(ids):
                 sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
-                to_delete.extend(delete_from_tag)
-                safe_commit(db)
+        safe_commit(db)
 
-        if to_delete:
-            db.query(Illust).filter(Illust.pixiv_id.in_(to_delete)).delete(synchronize_session=False)
-            safe_commit(db)
-            logger.info(f'[prefetch] 容量清理: 删除 {len(to_delete)} 条最旧预取作品')
+        db.query(Illust).filter(Illust.pixiv_id.in_(to_delete)).delete(synchronize_session=False)
+        safe_commit(db)
+        logger.info(f'[prefetch] 容量清理: 删除 {len(to_delete)} 条低收藏预取作品')
 
 
 def _prefetch_loop() -> None:
@@ -1924,7 +1918,7 @@ _SETTINGS_DEFAULTS = {
     'items_per_page': 24,
     'prefetch_interval': 3600,
     'prefetch_pages': 3,
-    'prefetch_max_illusts': 20000,
+    'prefetch_max_illusts': 10000,
 }
 
 

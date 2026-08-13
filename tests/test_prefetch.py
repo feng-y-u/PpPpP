@@ -43,6 +43,42 @@ class TestPrefetchOneTag:
         assert row.status == 'error'
         assert row.error
 
+    def test_prefetch_one_tag_accumulates(self, clean_db, monkeypatch):
+        # 已有缓存 [1, 2]，第二次预取抓 [2, 3, 4] → 合并去重为 [2, 3, 4, 1]
+        clean_db.add(SearchCache(tag='acc', illust_ids='[1, 2]', status='done'))
+        safe_commit(clean_db)
+
+        calls = []
+
+        def _fake_search(tag, **kwargs):
+            calls.append(tag)
+            if len(calls) == 1:
+                return [{'pixiv_id': 2}, {'pixiv_id': 3}, {'pixiv_id': 4}], False
+            return [], False
+
+        monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+        app._prefetch_one_tag('acc')
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'acc').first()
+        assert row.status == 'done'
+        assert json.loads(row.illust_ids) == [2, 3, 4, 1]
+        assert row.total == 4
+
+    def test_prefetch_one_tag_error_keeps_old_ids(self, clean_db, monkeypatch):
+        # 预取失败时保持上次成功的 illust_ids 不变
+        clean_db.add(SearchCache(tag='keep', illust_ids='[1, 2]', status='done'))
+        safe_commit(clean_db)
+
+        def _boom(tag, **kwargs):
+            raise RuntimeError('network down')
+
+        monkeypatch.setattr(app, 'search_by_tag', _boom)
+        app._prefetch_one_tag('keep')
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'keep').first()
+        assert row.status == 'error'
+        assert json.loads(row.illust_ids) == [1, 2]
+
     def test_prefetch_one_tag_skips_when_fetching(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='y', status='fetching'))
         safe_commit(clean_db)
@@ -82,15 +118,16 @@ class TestPrefetchOneTag:
 
 
 class TestCapacityCleanup:
-    def test_capacity_cleanup_deletes_oldest(self, clean_db):
+    def test_capacity_cleanup_low_bookmark_first(self, clean_db):
+        # 超过上限时优先删除收藏数最低的预取作品，并从所有标签列表移除
         clean_db.add_all([
-            SearchCache(tag='tag_old', illust_ids='[1, 2]',
+            SearchCache(tag='tag_a', illust_ids='[1, 2, 3]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            SearchCache(tag='tag_new', illust_ids='[2, 3]',
+            SearchCache(tag='tag_b', illust_ids='[3]',
                         cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='a', prefetch_source=1),
-            Illust(pixiv_id=2, title='b', prefetch_source=1),
-            Illust(pixiv_id=3, title='c', prefetch_source=1),
+            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=10),
+            Illust(pixiv_id=2, title='high', prefetch_source=1, bookmark_count=500),
+            Illust(pixiv_id=3, title='mid', prefetch_source=1, bookmark_count=100),
         ])
         safe_commit(clean_db)
 
@@ -101,12 +138,11 @@ class TestCapacityCleanup:
         finally:
             app._prefetch_state['max_illusts'] = old
 
-        # 最旧标签的末尾（pid 1）与 tag_new 的 pid 3 被删除；
-        # pid 2 因被 tag_new 引用而保留在两个标签的列表中
+        # 收藏数最低的 pid1(10) 和 pid3(100) 被删，pid2(500) 保留
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
         assert remaining == {2}
-        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_old').first().illust_ids) == [2]
-        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_new').first().illust_ids) == [2]
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == []
 
     def test_capacity_cleanup_skips_downloaded_and_collected(self, clean_db):
         coll = Collection(name='test-coll')
@@ -157,15 +193,15 @@ class TestCapacityCleanup:
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
         assert remaining == {1}
 
-    def test_capacity_cleanup_exact_membership_no_like_false_positive(self, clean_db):
-        # LIKE 子串误判：pid 1234567 不应被 tag_b 的 12345678 误判为“仍被引用”
+    def test_capacity_cleanup_removes_from_all_tag_lists(self, clean_db):
+        # 被多个标签引用的低收藏作品也会被删，且从所有标签的列表移除
         clean_db.add_all([
-            SearchCache(tag='tag_a', illust_ids='[1234567]',
+            SearchCache(tag='tag_a', illust_ids='[1, 2]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            SearchCache(tag='tag_b', illust_ids='[12345678]',
+            SearchCache(tag='tag_b', illust_ids='[2]',
                         cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1234567, title='a', prefetch_source=1),
-            Illust(pixiv_id=12345678, title='b', prefetch_source=1),
+            Illust(pixiv_id=1, title='a', prefetch_source=1, bookmark_count=10),
+            Illust(pixiv_id=2, title='b', prefetch_source=1, bookmark_count=100),
         ])
         safe_commit(clean_db)
 
@@ -176,10 +212,11 @@ class TestCapacityCleanup:
         finally:
             app._prefetch_state['max_illusts'] = old
 
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1234567).first() is None
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 12345678).first() is not None
-        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == []
-        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [12345678]
+        # pid1(10) 收藏最低被删；pid2(100) 保留
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is None
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 2).first() is not None
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [2]
 
     def test_prefetch_loop_survives_cleanup_error(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='t'))
