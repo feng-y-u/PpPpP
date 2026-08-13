@@ -473,7 +473,6 @@ function resetPagination() {
   $('#nextPageBtn').disabled = true;
   $('#pageNumbers').innerHTML = '';
   $('#paginationBar').style.display = 'none';
-  renderCacheBadge(null);
 }
 
 function renderPaginationBar() {
@@ -682,50 +681,7 @@ function finishSearch(data) {
   lazyLoad();
   saveSearchState();
   maybeToastFetchStats(data.fetch_stats);
-  renderCacheBadge(data);
   showLoading(false);
-}
-
-function renderCacheBadge(data) {
-  const existing = document.getElementById('cacheBadge');
-  if (!data || data.source !== 'cache' || !data.cached_at) {
-    if (existing) existing.remove();
-    return;
-  }
-  const cachedTime = new Date(data.cached_at).toLocaleString('zh-CN');
-  const badge = existing || document.createElement('div');
-  badge.id = 'cacheBadge';
-  badge.dataset.tag = $('#searchQuery').value.trim();
-  badge.style.cssText = 'text-align:center;font-size:0.75rem;color:var(--text-muted);margin:0 0 8px;';
-  badge.innerHTML = `缓存结果 · 更新于 ${cachedTime}
-      <button class="btn btn-sm btn-soft ms-2" id="refreshCacheBtn" style="font-size:0.7rem;padding:1px 8px;">刷新</button>`;
-  if (!existing) $('#masonryGrid').before(badge);
-  document.getElementById('refreshCacheBtn')?.addEventListener('click', () => refreshCache());
-}
-
-async function refreshCache() {
-  const badge = document.getElementById('cacheBadge');
-  const tag = badge ? badge.dataset.tag : '';
-  if (!tag) return;
-  const btn = document.getElementById('refreshCacheBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '刷新中...'; }
-  try {
-    const resp = await fetch('/api/prefetch/refresh', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
-      body: JSON.stringify({tag}),
-    });
-    const err = await resp.json().catch(() => ({}));
-    if (resp.ok) {
-      showToast('已开始刷新缓存，稍后重新搜索即可看到更新');
-    } else {
-      showToast(err.error || '刷新失败', true);
-    }
-  } catch {
-    showToast('网络错误', true);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '刷新'; }
-  }
 }
 
 // 分页去重：Pixiv 搜索分页在 date_d 排序下会漂移（新作品插入导致页间重叠），
