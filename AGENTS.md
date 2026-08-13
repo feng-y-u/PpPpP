@@ -32,7 +32,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 | `fetcher.py` | Pixiv API 封装：Cookie/OAuth 认证、搜索、作品详情 |
 | `models.py` | SQLAlchemy ORM：Illust、BlockedTag、DownloadLog、Collection、CollectionItem |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
-| `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁、登录） |
+| `templates/*.html` | 9 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（cron 磁盘清理，30 天 / 收藏 < 100） |
 | `pixiv-api-http-main/` | 内置的第三方 Node.js Pixiv API 参考实现（含 `search/no-premium.js` 等），作为接口格式对照参考，不参与运行 |
@@ -66,7 +66,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。缩略图代理 `/thumb/<base64_url>` 处理此问题（仅允许 `https://i.pximg.net/` 白名单 URL，磁盘缓存 7 天）。
 - **游标分页 24 小时过期**（`app.py:841`）：翻页游标包含时间戳，超时后客户端需重新搜索。空页去重 + 死游标作废由前端处理。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址（`config.py:48`）。
-- **搜索预取缓存**：手动在设置页配置预取标签，后台线程按 interval 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）定时预取并写入 `Illust` + `SearchCache` 表。`/search` 命中 `SearchCache`（tag 完全匹配且 status=done）时零网络请求，在库内按用户参数过滤/排序/分页返回（`query_cached_tag`）。缓存游标带 24h TTL。`popular_d` 排序为 `bookmark_count` 降序的库内近似。
+- **搜索预取缓存**：手动在设置页配置预取标签，后台线程按 interval 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）定时预取并写入 `Illust` + `SearchCache` 表。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果通过独立 `/cache` 页面浏览（`GET /api/cache/items`，库内按收藏数/排序过滤分页，`query_cached_tag`）。`popular_d` 排序为 `bookmark_count` 降序的库内近似。
 
 ### 数据库
 - **没有迁移系统**：启动时 `SQLAlchemy create_all()` + `init_db()` 中的手动 `ALTER TABLE` 逻辑（`models.py:240`）负责全部 schema 变更。当前会补加 `file_size`、`downloaded_at`、`bookmark_updated_at`、`prefetch_source`（预取来源标记）列与 `collection_items.position`（拖拽排序），通过 `PRAGMA user_version` 一次性回填 position 初值，并新增 `SearchCache` 表（tag→illust_ids 映射，预取缓存）。**`description` 列已彻底移除**（模型、`to_dict`、fetcher、模板均不再有，init_db 会 DROP）。**`is_favorite` / `favorited_at` 列已废弃，init_db 会将其 DROP**。SQLite < 3.35 时用 `_rebuild_illusts_table`（`models.py:213`）建表重建，保留 PK/UNIQUE/NOT NULL。其他 schema 变更需手动添加类似逻辑。
@@ -92,7 +92,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF）、`tests/test_auth.py`（认证）、`tests/test_models.py`（模型）、`tests/test_fetcher.py`（Pixiv API 封装）、`tests/test_prefetch.py`（预取引擎/容量清理）、`tests/test_search_cache.py`（缓存命中查询）、`tests/test_prefetch_api.py`（预取管理 API）
+- 测试文件：`tests/test_app.py`（路由/API/CSRF）、`tests/test_auth.py`（认证）、`tests/test_models.py`（模型）、`tests/test_fetcher.py`（Pixiv API 封装）、`tests/test_prefetch.py`（预取引擎/容量清理）、`tests/test_search_cache.py`（库内缓存查询）、`tests/test_prefetch_api.py`（预取管理 API）、`tests/test_cache_page.py`（缓存浏览 API/页面）
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件并设 `AUTO_FOLLOW_INTERVAL=0`（事后覆盖无效，会连到生产库）
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）
 - 需要有效 `cookies.txt` 才能通过集成测试（涉及真实 Pixiv API 调用的测试）
