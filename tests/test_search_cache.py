@@ -148,4 +148,7 @@ class TestSearchRouteCache:
         r = client.get('/search?type=tag&query=缓存标签')
         assert r.status_code == 200
         assert 'task_id' in r.get_json()
+        deadline = time.time() + 3
+        while not called and time.time() < deadline:
+            time.sleep(0.02)
         assert called, '预取标签搜索必须走实时 search_by_tag'
