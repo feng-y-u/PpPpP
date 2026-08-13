@@ -1298,6 +1298,12 @@ def gallery() -> str:
     return render_template('gallery.html', csrf_token=_get_csrf_token())
 
 
+@app.route('/cache')
+def cache_page() -> str:
+    """缓存浏览页：查看预取标签的缓存结果。"""
+    return render_template('cache.html', csrf_token=_get_csrf_token())
+
+
 @app.route('/api/gallery')
 def api_gallery() -> Response:
     tag_filter = request.args.get('tag', '').strip()

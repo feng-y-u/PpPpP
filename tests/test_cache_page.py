@@ -100,3 +100,12 @@ class TestCacheItemsApi:
         assert r.status_code == 200
         data = r.get_json()
         assert len(data['results']) == 4
+
+
+class TestCachePage:
+    def test_cache_page_renders(self, client):
+        r = client.get('/cache')
+        assert r.status_code == 200
+        html = r.get_data(as_text=True)
+        assert 'cacheTagSelect' in html
+        assert '缓存' in html
