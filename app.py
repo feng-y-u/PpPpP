@@ -1019,6 +1019,51 @@ def search_status(task_id: str) -> Response:
     return jsonify(resp)
 
 
+@app.route('/api/cache/items')
+def cache_items() -> Response:
+    """浏览预取缓存：库内过滤/排序/分页，不请求 Pixiv。"""
+    tag = request.args.get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '缺少标签参数'}), 400
+
+    try:
+        min_bookmarks = max(0, int(request.args.get('min_bookmarks', '0') or 0))
+    except (ValueError, TypeError):
+        min_bookmarks = 0
+
+    sort_order = request.args.get('sort', 'date_d')
+    if sort_order not in ('popular_d', 'date_d'):
+        sort_order = 'date_d'
+
+    try:
+        offset = max(0, int(request.args.get('offset', '0') or 0))
+    except (ValueError, TypeError):
+        offset = 0
+
+    with get_session() as db:
+        sc = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+        if not sc:
+            return jsonify({'error': '标签不存在'}), 404
+        cached_at = sc.cached_at.isoformat() if sc.cached_at else None
+        sc_status = sc.status
+        sc_total = sc.total
+
+    results, has_more, _next = query_cached_tag(
+        tag, min_bookmarks, sort_order, 'or', 'all',
+        offset=offset, limit=ITEMS_PER_PAGE,
+    )
+    return jsonify({
+        'tag': tag,
+        'cached_at': cached_at,
+        'status': sc_status,
+        'total': sc_total,
+        'offset': offset,
+        'page_size': ITEMS_PER_PAGE,
+        'results': results,
+        'has_more': has_more,
+    })
+
+
 @app.route('/api/following')
 def api_following() -> Response:
     page = request.args.get('page', '1')
