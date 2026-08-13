@@ -89,12 +89,14 @@ class TestCacheItemsApi:
         assert r.status_code == 404
 
     def test_items_not_done_status(self, clean_db, client):
+        # fetching 状态下仍返回累积缓存数据，status 如实返回
         self._seed(clean_db, status='fetching')
         r = client.get('/api/cache/items?tag=测试')
         assert r.status_code == 200
         data = r.get_json()
         assert data['status'] == 'fetching'
-        assert data['results'] == []
+        assert len(data['results']) == 4
+        assert data['filtered_total'] == 4
 
     def test_items_invalid_params_use_defaults(self, clean_db, client):
         self._seed(clean_db)

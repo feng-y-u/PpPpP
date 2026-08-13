@@ -439,13 +439,14 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
                      limit: int = 24) -> tuple[list[dict], bool, int, int]:
     """从 SearchCache + Illust 表查询预取结果，支持库内过滤排序分页。
 
+    不限制 SearchCache.status（fetching/error 时也能查看已累积的缓存数据）。
+
     Returns:
         (results_dicts, has_more, next_offset, filtered_total)
     """
     with get_session() as db:
         sc = db.query(SearchCache).filter(
             SearchCache.tag == tag,
-            SearchCache.status == 'done',
         ).first()
         if not sc:
             return [], False, 0, 0
