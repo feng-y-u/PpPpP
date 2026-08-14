@@ -259,6 +259,35 @@ class TestQueryCachedTagSort:
         assert filtered_total == 2
 
 
+class TestResetStuckPrefetch:
+    def test_reset_stuck_fetching_tags(self, clean_db):
+        """fetching 残留（进程重启打断预取）应被启动重置为 done。"""
+        clean_db.add_all([
+            SearchCache(tag='stuck', status='fetching', illust_ids='[1, 2]'),
+            SearchCache(tag='normal', status='done', illust_ids='[3]'),
+        ])
+        safe_commit(clean_db)
+
+        app._reset_stuck_prefetch()
+
+        rows = {sc.tag: sc for sc in clean_db.query(SearchCache).all()}
+        assert rows['stuck'].status == 'done'
+        assert rows['stuck'].error == '上次预取被中断，已重置'
+        assert rows['stuck'].illust_ids == '[1, 2]'  # 累积数据保留
+        assert rows['normal'].status == 'done'  # done 状态不受影响
+        assert rows['normal'].error == ''
+
+    def test_no_stuck_tags_is_noop(self, clean_db):
+        clean_db.add(SearchCache(tag='x', status='done', illust_ids='[]'))
+        safe_commit(clean_db)
+
+        app._reset_stuck_prefetch()
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'x').first()
+        assert row.status == 'done'
+        assert row.error == ''
+
+
 class TestPrefetchThreadLiveness:
     def test_interval_zero_pauses_thread_but_allows_rerun(self, monkeypatch):
         """interval=0 应暂停循环（睡 60s 继续检查）而非永久退出；重新置>0 后仍能执行预取。"""

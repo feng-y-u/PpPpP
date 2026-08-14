@@ -167,6 +167,27 @@ def _reset_stuck_downloads() -> None:
 
 _reset_stuck_downloads()
 
+
+def _reset_stuck_prefetch() -> None:
+    """启动时重置上次崩溃/重启遗留下的 fetching 状态。
+
+    fetching 只能由本进程的预取线程设置，进程重启后必然是残留；
+    否则 _prefetch_one_tag 的抢占逻辑（status='fetching' 时 rowcount=0）
+    会让该标签被永远跳过，预取从此不再执行（缓存永不更新）。
+    """
+    with get_session() as db:
+        stuck = db.query(SearchCache).filter(SearchCache.status == 'fetching').all()
+        if not stuck:
+            return
+        for sc in stuck:
+            sc.status = 'done'
+            sc.error = '上次预取被中断，已重置'
+        safe_commit(db)
+        logger.info(f'[prefetch] 重置了 {len(stuck)} 个卡死的预取标签（fetching → done）')
+
+
+_reset_stuck_prefetch()
+
 # ── ⚠ 多进程限制 ─────────────────────────────────────
 # 以下状态变量（_auto_follow_state、download_locks、
 # download_cancellations、_queued_downloads、_download_progress、
