@@ -3,6 +3,22 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
+# ── Windows 沙箱（如 DSH）对 os.mkdir(path, mode) 生成的目录按 mode 映射 ACL ──
+# mode=0o700 会生成"仅属主"ACL，进程自身反而被拒（WinError 5），导致 pytest
+# 的 basetemp/tmp_path（一律 mkdir(mode=0o700)）创建后无法枚举、无法删除。
+# Windows 上 mode 本身无意义，这里丢弃 mode（回退默认 0o777）。必须在任何
+# tmp 目录创建之前生效，因此放在 import 区（pytest 的 basetemp 在首次使用
+# tmp_path 时才创建，晚于本模块导入）。
+if os.name == 'nt':
+    _orig_mkdir = os.mkdir
+
+    def _mkdir_sans_mode(path, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            return _orig_mkdir(path)
+        return _orig_mkdir(path, dir_fd=dir_fd)
+
+    os.mkdir = _mkdir_sans_mode
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── ⚠ 必须在 import models/app 之前覆盖数据库路径 ──

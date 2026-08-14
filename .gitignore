@@ -9,3 +9,4 @@ instance/
 dist/
 build/
 .pytest_cache/
+.pytest-tmp/

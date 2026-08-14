@@ -1,0 +1,95 @@
+From 1830e83c2e914922b525d8d8895ab5f76e808129 Mon Sep 17 00:00:00 2001
+From: feng-y-u <1834677757@qq.com>
+Date: Fri, 14 Aug 2026 10:49:39 +0800
+Subject: [PATCH] fix: reset stuck prefetch fetching status on startup
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+预取的 fetching 状态只能由本进程线程设置；进程被重启/崩溃打断时
+会残留 fetching，而 _prefetch_one_tag 的抢占逻辑在 status='fetching'
+时 rowcount=0 直接跳过，导致该标签被永远跳过、预取永不执行、缓存
+永不更新（cached_at 停滞）。
+
+在模块导入时（同 _reset_stuck_downloads）把残留 fetching 重置为 done，
+保留 illust_ids 累积数据。
+---
+ app.py                 | 21 +++++++++++++++++++++
+ tests/test_prefetch.py | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 50 insertions(+)
+
+diff --git a/app.py b/app.py
+index 6e080d7..3bfb054 100644
+--- a/app.py
++++ b/app.py
+@@ -167,6 +167,27 @@ def _reset_stuck_downloads() -> None:
+ 
+ _reset_stuck_downloads()
+ 
++
++def _reset_stuck_prefetch() -> None:
++    """启动时重置上次崩溃/重启遗留下的 fetching 状态。
++
++    fetching 只能由本进程的预取线程设置，进程重启后必然是残留；
++    否则 _prefetch_one_tag 的抢占逻辑（status='fetching' 时 rowcount=0）
++    会让该标签被永远跳过，预取从此不再执行（缓存永不更新）。
++    """
++    with get_session() as db:
++        stuck = db.query(SearchCache).filter(SearchCache.status == 'fetching').all()
++        if not stuck:
++            return
++        for sc in stuck:
++            sc.status = 'done'
++            sc.error = '上次预取被中断，已重置'
++        safe_commit(db)
++        logger.info(f'[prefetch] 重置了 {len(stuck)} 个卡死的预取标签（fetching → done）')
++
++
++_reset_stuck_prefetch()
++
+ # ── ⚠ 多进程限制 ─────────────────────────────────────
+ # 以下状态变量（_auto_follow_state、download_locks、
+ # download_cancellations、_queued_downloads、_download_progress、
+diff --git a/tests/test_prefetch.py b/tests/test_prefetch.py
+index 025f02d..3018503 100644
+--- a/tests/test_prefetch.py
++++ b/tests/test_prefetch.py
+@@ -259,6 +259,35 @@ class TestQueryCachedTagSort:
+         assert filtered_total == 2
+ 
+ 
++class TestResetStuckPrefetch:
++    def test_reset_stuck_fetching_tags(self, clean_db):
++        """fetching 残留（进程重启打断预取）应被启动重置为 done。"""
++        clean_db.add_all([
++            SearchCache(tag='stuck', status='fetching', illust_ids='[1, 2]'),
++            SearchCache(tag='normal', status='done', illust_ids='[3]'),
++        ])
++        safe_commit(clean_db)
++
++        app._reset_stuck_prefetch()
++
++        rows = {sc.tag: sc for sc in clean_db.query(SearchCache).all()}
++        assert rows['stuck'].status == 'done'
++        assert rows['stuck'].error == '上次预取被中断，已重置'
++        assert rows['stuck'].illust_ids == '[1, 2]'  # 累积数据保留
++        assert rows['normal'].status == 'done'  # done 状态不受影响
++        assert rows['normal'].error == ''
++
++    def test_no_stuck_tags_is_noop(self, clean_db):
++        clean_db.add(SearchCache(tag='x', status='done', illust_ids='[]'))
++        safe_commit(clean_db)
++
++        app._reset_stuck_prefetch()
++
++        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'x').first()
++        assert row.status == 'done'
++        assert row.error == ''
++
++
+ class TestPrefetchThreadLiveness:
+     def test_interval_zero_pauses_thread_but_allows_rerun(self, monkeypatch):
+         """interval=0 应暂停循环（睡 60s 继续检查）而非永久退出；重新置>0 后仍能执行预取。"""
+-- 
+2.53.0.windows.3
+
