@@ -1,4 +1,4 @@
-﻿from unittest.mock import patch
+from unittest.mock import patch
 
 import time
 import threading
@@ -184,7 +184,7 @@ class TestProcessItemsBookmarkFill:
         """early_stop 返回 True 后，_fetch_details_parallel 取消未启动的拉取；
         已启动的请求仍处理完（不 break 丢弃），返回其全部结果。"""
         with patch('fetcher._get_illust_detail', return_value=None), \
-             patch('fetcher._build_session', side_effect=RuntimeError('no net')):
+             patch('fetcher.build_pixiv_session', side_effect=RuntimeError('no net')):
             results, attempted = fetcher._fetch_details_parallel(
                 [4001, 4002, 4003, 4004],
                 early_stop=lambda detail: True,

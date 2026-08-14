@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 import re
 import time
-import hashlib
 import hmac
 import json
 from base64 import urlsafe_b64encode, urlsafe_b64decode
@@ -26,9 +24,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from config import (
     COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY, SSL_VERIFY, CURSOR_SECRET, ITEMS_PER_PAGE,
+    PROXY, SSL_VERIFY, CURSOR_SECRET,
 )
-from models import Illust, BlockedTag, get_session, safe_commit
+from models import Illust, BlockedTag, get_session, get_favorite_pids, safe_commit
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +104,9 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
             raise
         except Exception as e:
             logger.error(f'paginated_search: page {pixiv_page} failed: {e}')
+            # 失败页不可靠：结束分页，避免游标卡在失败页反复重试
+            # （已收集的批次照常返回，前端显示已有数据、无下一页）
+            pixiv_has_more = False
             break
 
         if not results and not has_more:
@@ -212,10 +213,6 @@ def build_pixiv_session() -> requests.Session:
     adapter.max_retries = retry
     s.mount('https://', adapter)
     return s
-
-
-# 向后兼容别名
-_build_session = build_pixiv_session
 
 
 def _split_tags(keyword: str) -> list[str]:
@@ -354,7 +351,10 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
             resp.raise_for_status()
             data = resp.json()
             if data.get('error'):
-                logger.warning(f'Detail API error for {pixiv_id}: {data.get("message")}')
+                msg = str(data.get('message', ''))
+                if _is_auth_error(msg):
+                    raise PixivAuthError(msg)
+                logger.warning(f'Detail API error for {pixiv_id}: {msg}')
                 return None
             body = data['body']
             urls = body.get('urls', {})
@@ -370,9 +370,13 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                 'tags': _parse_tags(body.get('tags')),
             }
         except requests.RequestException as e:
+            status = getattr(getattr(e, 'response', None), 'status_code', None)
+            if status == 401:
+                # 认证失效（cookie 过期等）：重试无意义，与检索路径一致上报，
+                # 避免 _process_items 把整页作品静默过滤成空结果。
+                raise PixivAuthError('Pixiv API returned HTTP 401 (认证已失效，请更新 cookies.txt)')
             logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
             if attempt < DETAIL_MAX_RETRIES:
-                status = getattr(getattr(e, 'response', None), 'status_code', None)
                 # 429/403 均为 Pixiv 限流（并发过高时返回 403），递增退避（3s/9s）
                 time.sleep((3 * (3 ** attempt)) if status in (403, 429) else 1)
     return None
@@ -398,7 +402,7 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     attempted = 0
 
     def _worker(pid: int) -> tuple[int, dict | None]:
-        session = _build_session()
+        session = build_pixiv_session()
         return pid, _get_illust_detail(session, pid, limiter)
 
     executor = ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS)
@@ -522,6 +526,17 @@ def clear_search_cache() -> None:
 
 # ── 公共流水线 ──
 
+def _mark_favorites(db: Any, results: list[dict]) -> list[dict]:
+    """按'我的收藏'收藏夹为结果集填充 is_favorite（复用调用方的 session）。"""
+    if not results:
+        return results
+    fav = get_favorite_pids(db)
+    for r in results:
+        if r.get('pixiv_id') in fav:
+            r['is_favorite'] = True
+    return results
+
+
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
                    min_bookmarks: int = 0, hide_r18: bool = False, defer_details: bool = False,
                    max_results: int = 0, limiter: _TokenBucket | None = None) -> list[dict]:
@@ -634,7 +649,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
     if defer_details:
         if max_results > 0:
             _last_fetch_stats.update(fetch_stats)
-        return results
+        return _mark_favorites(db, results)
 
     if to_fetch:
         # 流式过滤：拉取过程中直接判定过滤条件，凑够 max_results 条即提前终止
@@ -678,7 +693,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         fetch_stats['seconds'] = time.time() - fetch_start
         _last_fetch_stats.update(fetch_stats)
 
-    return results
+    return _mark_favorites(db, results)
 
 
 def _illust_from_item(item: dict, detail: dict | None = None) -> Illust:
@@ -725,7 +740,7 @@ def _illust_from_detail(item: int, detail: dict) -> Illust:
 # ── 搜索函数 ──
 
 def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
-                  sort_order: str = 'popular_d', max_pages: int = 10,
+                  sort_order: str = 'popular_d', max_pages: int = SEARCH_PAGES,
                   tag_mode: str = 'or', r18_mode: str = 'all',
                   defer_details: bool = False,
                   max_results: int = 0,
@@ -753,7 +768,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
     else:
         pixiv_query = '(' + ' OR '.join(tags) + ')'
 
-    session = _build_session()
+    session = build_pixiv_session()
     quoted = requests.utils.quote(pixiv_query)
     search_url = (
         f'{PIXIV_BASE_URL}/ajax/search/illustrations/{quoted}'
@@ -823,7 +838,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
         _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
         return cached
 
-    session = _build_session()
+    session = build_pixiv_session()
     url = (
         f'{PIXIV_BASE_URL}/ajax/discovery/artworks'
         f'?mode={r18_mode}&p={page}&limit=60&order={sort_order}'
@@ -882,7 +897,7 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
                    max_results: int = 0,
                    limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
     """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。"""
-    session = _build_session()
+    session = build_pixiv_session()
     all_ids = _get_user_profile_ids(session, user_id)
     if not all_ids:
         return [], False
@@ -930,6 +945,7 @@ def _get_user_profile_ids(session: requests.Session, user_id: str) -> list[int]:
 
     profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
     try:
+        _total_limiter.wait()  # 与其他 Pixiv 请求共用总限速，防止触发 429/403
         resp = session.get(profile_url, timeout=DETAIL_TIMEOUT)
         resp.raise_for_status()
         profile_data = resp.json()
@@ -967,7 +983,7 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
     if cached is not None:
         return cached
 
-    session = _build_session()
+    session = build_pixiv_session()
     url = f'{PIXIV_BASE_URL}/ajax/follow_latest/illust?mode={r18_mode}&p={page}'
     try:
         resp = session.get(url, timeout=DETAIL_TIMEOUT)

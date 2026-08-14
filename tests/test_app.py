@@ -430,7 +430,28 @@ class TestCollectionItemMove:
             conn.commit()
             assert r.rowcount == 0
 
-    def test_move_triggers_rebalance_when_gap_too_small(self, client, clean_db):
+    def test_move_rebalance_uses_refreshed_position(self, client, clean_db):
+        """回归：重排后条目位置已变化时，乐观锁须用重排后的新位置（曾误报 409）。"""
+        import models
+        coll = models.Collection(name='reb-test2')
+        clean_db.add(coll); clean_db.commit()
+        # 三个紧密间距（gap<1.0）→ 移动必触发 rebalance，且 70003 重排后位置会变化
+        for pid, pos in [(70001, 1000.0), (70002, 1000.4), (70003, 1000.8)]:
+            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
+        clean_db.commit()
+        token = self._token(client)
+        r = client.post(f'/api/collections/{coll.id}/items/70003/move',
+                        data=json.dumps({'direction': 'up'}),
+                        content_type='application/json',
+                        headers={'X-CSRF-Token': token})
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()['rebalanced'] is True
+        with models.get_session() as s:
+            items = s.query(models.CollectionItem).filter(
+                models.CollectionItem.collection_id == coll.id
+            ).order_by(models.CollectionItem.position).all()
+        assert [it.pixiv_id for it in items] == [70001, 70003, 70002]
+
         import models
         coll = models.Collection(name='reb-test')
         clean_db.add(coll); clean_db.commit()
@@ -475,6 +496,22 @@ class TestFavoriteMembershipContract:
         assert 90001 not in returned
         assert 90003 not in returned
         assert data['favorite_total'] > 0
+
+    def test_detail_page_reflects_favorite_membership(self, client, clean_db):
+        """回归：详情页收藏按钮初始状态须反映'我的收藏'归属（曾恒为未收藏）。"""
+        import models
+        default_id = self._default_coll(clean_db)
+        clean_db.add(models.Illust(pixiv_id=90060, title='fav-item', download_status='done'))
+        clean_db.add(models.Illust(pixiv_id=90061, title='plain-item', download_status='done'))
+        clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90060, position=1000.0))
+        clean_db.commit()
+
+        fav = client.get('/detail/90060')
+        assert fav.status_code == 200
+        assert 'is_favorite": true' in fav.get_data(as_text=True) or '"is_favorite": true' in fav.get_data(as_text=True)
+        plain = client.get('/detail/90061')
+        assert plain.status_code == 200
+        assert '"is_favorite": false' in plain.get_data(as_text=True)
 
     def test_favorite_get_returns_membership(self, client, clean_db):
         import models

@@ -192,7 +192,7 @@
   <!-- Image -->
   <div class="image-area" id="imageArea">
     {% set page_count = illust.page_count or 1 %}
-    {% set is_downloaded = illust.download_status == 'done' and illust.local_paths %}
+    {% set is_downloaded = illust.download_status == 'done' %}
     {% set has_images = is_downloaded %}
 
     <img id="mainImage" src="" alt="">

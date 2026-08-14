@@ -1,4 +1,4 @@
-from models import Illust, safe_commit
+from models import Illust, DownloadLog, safe_commit
 
 
 class TestIllustCreate:
@@ -62,7 +62,7 @@ class TestIllustToDict:
         expected_keys = {
             'id', 'pixiv_id', 'title', 'user_id', 'user_name', 'tags',
             'page_count', 'bookmark_count', 'upload_date', 'thumb_url',
-            'original_urls', 'local_paths', 'download_status',
+            'original_urls', 'download_status',
             'downloaded_at', 'file_size', 'is_favorite', 'created_at',
         }
         assert set(d.keys()) == expected_keys
@@ -75,15 +75,16 @@ class TestIllustToDict:
         assert d['page_count'] == 3
         assert d['bookmark_count'] == 1500
         assert d['download_status'] is None
-        assert d['local_paths'] is None
         assert d['is_favorite'] is False
 
-    def test_to_dict_includes_local_paths_when_set(self, clean_db, sample_illust):
+    def test_to_dict_omits_local_paths(self, clean_db, sample_illust):
+        """回归：磁盘绝对路径不应出现在序列化输出中（仅模型属性保留）。"""
         sample_illust.local_paths_list = ['/data/a.jpg']
         sample_illust.download_status = 'done'
         safe_commit(clean_db)
         d = sample_illust.to_dict()
-        assert d['local_paths'] == ['/data/a.jpg']
+        assert 'local_paths' not in d
+        assert 'local_dir' not in d
         assert d['download_status'] == 'done'
 
 
@@ -245,3 +246,65 @@ class TestDescriptionPrefetchMigration:
             cols = [r[1] for r in conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()]
         assert 'description' not in cols
         assert 'prefetch_source' in cols
+
+
+class TestSafeCommitLocked:
+    def test_locked_raises_and_rolls_back(self, clean_db, monkeypatch):
+        """回归：commit 遇 database is locked 必须 rollback 恢复 session（曾抛 PendingRollbackError）。"""
+        import models
+        import pytest
+        from sqlalchemy.exc import OperationalError
+        rollback_called = []
+
+        def fake_commit():
+            raise OperationalError('stmt', {}, Exception('database is locked'))
+
+        monkeypatch.setattr(clean_db, 'commit', fake_commit)
+        monkeypatch.setattr(clean_db, 'rollback', lambda: rollback_called.append(1))
+        with pytest.raises(OperationalError):
+            models.safe_commit(clean_db)
+        assert rollback_called == [1]
+
+    def test_session_usable_after_locked(self, clean_db, monkeypatch):
+        """回归：locked 失败后 session 已恢复可用，不再抛 PendingRollbackError。"""
+        import models
+        import pytest
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        def fake_commit():
+            raise OperationalError('stmt', {}, Exception('database is locked'))
+
+        monkeypatch.setattr(clean_db, 'commit', fake_commit)
+        with pytest.raises(OperationalError):
+            models.safe_commit(clean_db)
+        assert clean_db.execute(text('SELECT 1')).scalar() == 1
+
+
+class TestDownloadLog:
+    def test_defaults_and_to_dict(self, clean_db):
+        log = DownloadLog(pixiv_id=123, action='start', message='测试')
+        clean_db.add(log)
+        clean_db.commit()
+        d = log.to_dict()
+        assert d['pixiv_id'] == 123
+        assert d['action'] == 'start'
+        assert d['message'] == '测试'
+        assert d['created_at'] is not None
+
+
+class TestRebuildIllustsTable:
+    def test_rebuild_preserves_data_and_schema(self, clean_db, sample_illust):
+        """SQLite<3.35 的重建路径（高危未测）：数据与索引必须保留。"""
+        import models as m
+        from sqlalchemy import text
+        m._rebuild_illusts_table(set())
+        with m.get_session() as s:
+            row = s.query(Illust).filter(Illust.pixiv_id == 12345678).first()
+            assert row is not None
+            assert row.title == 'テスト作品'
+            assert row.bookmark_count == 1500
+        with m.engine.connect() as conn:
+            idx = [r[1] for r in conn.exec_driver_sql('PRAGMA index_list(illusts)').fetchall()]
+        assert 'ix_illusts_pixiv_id' in idx
+        assert 'ix_illusts_dl_status_created' in idx

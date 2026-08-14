@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import platform
 import secrets
@@ -120,6 +121,12 @@ if os.path.exists(_settings_path):
         }
         for _json_key, _const_name in _key_map.items():
             if _json_key in _overrides and _overrides[_json_key] != '':
-                globals()[_const_name] = _overrides[_json_key]
-    except Exception:
-        print(f'[config] settings.json 读取失败，使用默认配置')
+                _val = _overrides[_json_key]
+                if _json_key == 'cookie_secure':
+                    # 统一布尔化：手改 settings.json 为字符串 "false" 时不能变成
+                    # 真值字符串（否则 Session Cookie 被标记 Secure，本地 HTTP 登录失效）
+                    _val = str(_val).lower() in ('1', 'true', 'yes', 'on')
+                globals()[_const_name] = _val
+    except Exception as _e:
+        logging.getLogger(__name__).warning(
+            f'[config] settings.json 读取失败，已回退默认配置: {_e!r}')

@@ -126,17 +126,6 @@ function updateDlDone(pixivId) {
     }
     return;
   }
-  // 图库页卡片
-  const gCard = document.querySelector(`[data-pid="${pixivId}"]`);
-  if (gCard && gCard.closest('.gallery-card')) {
-    gCard.textContent = '已下载';
-    gCard.className = 'btn btn-dl-done btn-sm dl-file-btn';
-    gCard.addEventListener('click', (e) => {
-      e.stopPropagation();
-      downloadFile(pixivId);
-    });
-    return;
-  }
   // 按钮式 UI（detail.html 详情页）
   const btn = document.getElementById('downloadBtn');
   if (btn) {
@@ -159,17 +148,6 @@ function resetDlBtn(pixivId) {
         triggerDownload(pixivId, this);
       });
     }
-    return;
-  }
-  // 图库页卡片
-  const gCard = document.querySelector(`[data-pid="${pixivId}"]`);
-  if (gCard && gCard.closest('.gallery-card')) {
-    gCard.textContent = '下载';
-    gCard.className = 'btn btn-soft btn-sm dl-btn';
-    gCard.addEventListener('click', function(e) {
-      e.stopPropagation();
-      triggerDownload(pixivId, this);
-    });
     return;
   }
   // 按钮式 UI（detail.html 详情页）

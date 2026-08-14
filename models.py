@@ -30,16 +30,23 @@ def set_sqlite_pragma(dbapi_connection: Any, connection_record: Any) -> None:
 
 
 def safe_commit(db_session: Session, max_retries: int = 3) -> None:
-    """带重试的 commit，处理 database is locked 错误."""
-    for attempt in range(max_retries):
-        try:
-            db_session.commit()
-            return
-        except OperationalError as e:
-            if 'database is locked' in str(e) and attempt < max_retries - 1:
-                time.sleep(1 + attempt)
-            else:
-                raise
+    """带重试的 commit，处理 database is locked 错误。
+
+    注意：flush/COMMIT 失败时 SQLAlchemy 已自动回滚事务并 expire 全部
+    对象，本次未提交的修改随之丢失——内部重试只会得到一次空提交（静默
+    掩盖数据丢失）。正确语义：失败后先 rollback() 恢复 session 可用状态
+    （否则后续任何数据库操作都会抛 PendingRollbackError），再抛出原始
+    错误；调用方需要时捕获异常、重建变更后重新调用本函数。
+    （PRAGMA busy_timeout=10000 已提供 10 秒等锁窗口，locked 罕见。）
+    """
+    try:
+        db_session.commit()
+    except OperationalError as e:
+        db_session.rollback()
+        raise
+    except Exception as e:
+        db_session.rollback()
+        raise
 
 
 class Base(DeclarativeBase):
@@ -122,7 +129,8 @@ class Illust(Base):
             'upload_date': self.upload_date.isoformat() if self.upload_date else None,
             'thumb_url': self.thumb_url,
             'original_urls': self.original_urls_list,
-            'local_paths': self.local_paths_list,
+            # 注意：不输出 local_paths/local_dir（磁盘绝对路径）。前端判断
+            # 已下载用 download_status，取图用 local_urls /api/image/...
             'download_status': self.download_status,
             'downloaded_at': self.downloaded_at.isoformat() if self.downloaded_at else None,
             'file_size': self.file_size,
@@ -323,3 +331,12 @@ def init_db() -> None:
 
 def get_session() -> Session:
     return Session(engine)
+
+
+def get_favorite_pids(session: Session) -> set[int]:
+    """'我的收藏'收藏夹中的全部 pixiv_id（is_favorite 语义的唯一来源）。"""
+    dc = session.query(Collection).filter(Collection.name == '我的收藏').first()
+    if not dc:
+        return set()
+    return {p[0] for p in session.query(CollectionItem.pixiv_id)
+            .filter(CollectionItem.collection_id == dc.id).all()}

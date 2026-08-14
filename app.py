@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 import zipfile
+import atexit
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from flask import (
     send_file, abort, Response, redirect, url_for,
 )
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from config import (
     DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
@@ -34,7 +36,7 @@ from config import (
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
     ITEMS_PER_PAGE,
 )
-from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
+from models import init_db, get_session, get_favorite_pids, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
 import fetcher
 from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, _is_r18, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
 
@@ -58,7 +60,15 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 _secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', '.secret_key')
 if os.path.exists(_secret_path):
     with open(_secret_path) as f:
-        app.config['SECRET_KEY'] = f.read().strip()
+        _secret = f.read().strip()
+    if not _secret:
+        # 空密钥文件（写入中断等残留）：重新生成，避免空 SECRET_KEY
+        # 导致会话签名可预测。
+        _secret = secrets.token_hex(32)
+        with open(_secret_path, 'w') as f:
+            f.write(_secret)
+        logger.warning('.secret_key 内容为空，已重新生成')
+    app.config['SECRET_KEY'] = _secret
 else:
     app.config['SECRET_KEY'] = secrets.token_hex(32)
     os.makedirs(os.path.dirname(_secret_path), exist_ok=True)
@@ -85,8 +95,21 @@ def _get_download_dir(pixiv_id: int) -> str:
     return os.path.join(DOWNLOAD_DIR, str(pixiv_id))
 
 
+def _page_sort_key(path: str) -> tuple[int, str]:
+    """按文件名页号排序：'xxx_p10.png' 应排在 '_p2' 之后（字典序会把 p10 排在 p2 前）。"""
+    m = re.search(r'_p(\d+)\.', os.path.basename(path))
+    return (int(m.group(1)), path) if m else (10 ** 9, path)
+
+
+_scan_cache: dict = {'ts': 0.0, 'data': {}}
+_SCAN_CACHE_TTL = 10.0  # 图库目录扫描缓存（秒）：避免每页请求全量重扫磁盘
+
+
 def _scan_local_downloads() -> dict[int, list[str]]:
-    """扫描 downloads/ 目录，返回 {pixiv_id: [file_paths]}。"""
+    """扫描 downloads/ 目录，返回 {pixiv_id: [file_paths]}（带 TTL 缓存）。"""
+    now = time.time()
+    if now - _scan_cache['ts'] < _SCAN_CACHE_TTL:
+        return _scan_cache['data']
     result: dict[int, list[str]] = {}
     if not os.path.isdir(DOWNLOAD_DIR):
         return result
@@ -99,11 +122,14 @@ def _scan_local_downloads() -> dict[int, list[str]]:
         except ValueError:
             continue
         files = sorted(
-            os.path.join(subdir, f) for f in os.listdir(subdir)
-            if os.path.isfile(os.path.join(subdir, f))
+            (os.path.join(subdir, f) for f in os.listdir(subdir)
+             if os.path.isfile(os.path.join(subdir, f))),
+            key=_page_sort_key,
         )
         if files:
             result[pid] = files
+    _scan_cache['ts'] = now
+    _scan_cache['data'] = result
     return result
 
 
@@ -254,6 +280,7 @@ def _auto_follow_worker() -> None:
                 existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(Illust.pixiv_id.in_(pixiv_ids)).all()}
 
             new_illusts = []
+            download_pids: list[int] = []
             for r in unique:
                 if r['pixiv_id'] in existing_ids:
                     continue
@@ -267,13 +294,17 @@ def _auto_follow_worker() -> None:
                 illust.original_urls_list = r.get('original_urls', [])
                 new_illusts.append(illust)
                 if _auto_follow_state['auto_download'] and illust.original_urls_list:
-                    _queued_downloads.add(r['pixiv_id'])
-                    download_executor.submit(_download_illust, r['pixiv_id'])
+                    download_pids.append(r['pixiv_id'])
 
             if new_illusts:
                 with get_session() as db:
                     db.add_all(new_illusts)
                     safe_commit(db)
+            # 先 commit 再提交下载任务：_download_illust 需要能查到已持久化的
+            # Illust 行，否则会在"行不存在"时静默跳过下载（竞态）。
+            for pid in download_pids:
+                _queued_downloads.add(pid)
+                download_executor.submit(_download_illust, pid)
             new_count = len(new_illusts)
             _auto_follow_state['last_check'] = datetime.now(timezone.utc).isoformat()
             _auto_follow_state['last_count'] = new_count
@@ -376,7 +407,7 @@ def _prefetch_capacity_cleanup() -> None:
         fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
         candidates: list[Illust] = []
         for i in db.query(Illust).filter(Illust.prefetch_source == 1).all():
-            if i.download_status == 'done' or i.local_paths_list:
+            if i.download_status in ('done', 'downloading') or i.local_paths_list:
                 continue
             if i.pixiv_id in fav_ids:
                 continue
@@ -505,7 +536,13 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     has_more = (offset + limit) < total
     next_offset = offset + limit if has_more else 0
 
-    return [i.to_dict() for i in page], has_more, next_offset, total
+    page_dicts = [i.to_dict() for i in page]
+    if page_dicts:
+        with get_session() as fav_db:
+            fav = get_favorite_pids(fav_db)
+        for d in page_dicts:
+            d['is_favorite'] = d.get('pixiv_id') in fav
+    return page_dicts, has_more, next_offset, total
 
 
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)
@@ -515,6 +552,15 @@ _queued_downloads: set[int] = set()
 _download_progress: dict[int, dict] = {}
 
 
+def _shutdown_background_threads() -> None:
+    """进程退出时优雅停止后台线程（gunicorn worker 退出 / 测试进程结束）。"""
+    _auto_follow_stop.set()
+    download_executor.shutdown(wait=False)
+
+
+atexit.register(_shutdown_background_threads)
+
+
 
 def _download_illust(pixiv_id: int) -> None:
     """后台任务：下载作品的所有原图。"""
@@ -522,7 +568,13 @@ def _download_illust(pixiv_id: int) -> None:
     if not lock.acquire(blocking=False):
         return  # 正在下载中，跳过
     try:
+        if pixiv_id in download_cancellations:
+            # 任务被取消/重置后才轮到本线程启动（queued 场景）：不再开始下载。
+            # 取消标记由 finally 清理。
+            _queued_downloads.discard(pixiv_id)
+            return
         _download_progress[pixiv_id] = {'current': 0, 'total': 0}
+        session_obj = None
         with get_session() as db:
             illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if not illust:
@@ -533,7 +585,15 @@ def _download_illust(pixiv_id: int) -> None:
             db.add(DownloadLog(pixiv_id=pixiv_id, action='start', message=f'开始下载: {illust.title or pixiv_id}'))
             safe_commit(db)
 
-            urls = illust.original_urls_list
+            urls = illust.original_urls_list or []
+            if not urls:
+                # 无原图来源（详情未拉取到）：不能把"空下载"固化为 done，
+                # 否则该作品将永远不再重试且磁盘无文件。
+                illust.download_status = None
+                db.add(DownloadLog(pixiv_id=pixiv_id, action='failed',
+                                   message='无原图地址，跳过下载（请刷新详情后重试）'))
+                safe_commit(db)
+                return
             _download_progress[pixiv_id]['total'] = len(urls)
             work_dir = _get_download_dir(pixiv_id)
             os.makedirs(work_dir, exist_ok=True)
@@ -580,7 +640,7 @@ def _download_illust(pixiv_id: int) -> None:
                     try:
                         os.remove(p)
                     except OSError:
-                        pass
+                        pass  # reset 可能已删除这些文件
                 try:
                     os.rmdir(work_dir)
                 except OSError:
@@ -596,6 +656,8 @@ def _download_illust(pixiv_id: int) -> None:
                 db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
             safe_commit(db)
     finally:
+        if session_obj is not None:
+            session_obj.close()  # 释放连接池，防止长驻进程累积 socket
         _download_progress.pop(pixiv_id, None)
         lock.release()
         download_locks.pop(pixiv_id, None)
@@ -646,6 +708,20 @@ def _get_csrf_token() -> str:
     return session['_csrf_token']
 
 
+def _get_json_body() -> dict:
+    """安全解析请求 JSON：非法 JSON / 非对象（list、标量、null）一律返回空 dict。"""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """安全整数解析：None / 空 / 非数字一律返回 default，不抛异常。"""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _csrf_required(f: Callable) -> Callable:
     """装饰器：POST 接口要求携带有效的 X-CSRF-Token 请求头。"""
     @wraps(f)
@@ -681,7 +757,11 @@ def _require_login():
 
 def _safe_next(url: str) -> str:
     """防开放重定向：只允许站内相对路径。"""
-    if not url or not url.startswith('/') or url.startswith('//'):
+    if not url or not url.startswith('/'):
+        return '/'
+    # 拒绝协议相对地址（//...）及其反斜杠变体：浏览器会把首字符 \ 规整为 /，
+    # 使 "/\evil.com" 变成 "//evil.com" 协议相对 URL；控制字符一律拒绝。
+    if url.startswith('//') or '\\' in url or any(ord(c) < 0x20 for c in url):
         return '/'
     return url
 
@@ -694,10 +774,10 @@ def login_page():
 
 
 @app.route('/login', methods=['POST'])
-@_rate_limit(max_attempts=5, window=60)
 @_csrf_required
+@_rate_limit(max_attempts=5, window=60)
 def login_submit():
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     password = str(body.get('password', ''))
     if ACCESS_PASSWORD and hmac.compare_digest(password.encode(), ACCESS_PASSWORD.encode()):
         session['authed'] = True
@@ -712,10 +792,12 @@ def _security_headers(resp: Response) -> Response:
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['Referrer-Policy'] = 'no-referrer'
-    # 宽松版 CSP：内联 script 抽离到 static/（批次 C）后收紧为 script-src 'self'
+    # 宽松版 CSP：模板仍含大量内联 script（未抽离到 static/ 前不能收紧
+    # script-src 为 'self'，否则所有页面脚本失效）；其余指令做纵深加固。
     resp.headers['Content-Security-Policy'] = (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )
     return resp
 
@@ -738,7 +820,10 @@ def _proxy_thumb(url: str) -> str:
 def _fetch_original_urls(pixiv_id: int) -> list[str]:
     """按需拉取 Pixiv 详情，返回 original_urls。用于惰性详情场景。"""
     session = build_pixiv_session()
-    detail = _get_illust_detail(session, pixiv_id)
+    try:
+        detail = _get_illust_detail(session, pixiv_id)
+    finally:
+        session.close()
     return detail.get('original_urls', []) if detail else []
 
 
@@ -953,19 +1038,13 @@ def cache_items() -> Response:
     if not tag:
         return jsonify({'error': '缺少标签参数'}), 400
 
-    try:
-        min_bookmarks = max(0, int(request.args.get('min_bookmarks', '0') or 0))
-    except (ValueError, TypeError):
-        min_bookmarks = 0
+    min_bookmarks = max(0, _safe_int(request.args.get('min_bookmarks'), 0))
 
     sort_order = request.args.get('sort', 'date_d')
     if sort_order not in ('popular_d', 'date_d'):
         sort_order = 'date_d'
 
-    try:
-        offset = max(0, int(request.args.get('offset', '0') or 0))
-    except (ValueError, TypeError):
-        offset = 0
+    offset = max(0, _safe_int(request.args.get('offset'), 0))
 
     with get_session() as db:
         sc = db.query(SearchCache).filter(SearchCache.tag == tag).first()
@@ -1039,7 +1118,7 @@ def trigger_download(pixiv_id: int) -> Response:
 @app.route('/api/download/batch', methods=['POST'])
 @_csrf_required
 def batch_download() -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     pixiv_ids = body.get('ids', [])
     if not pixiv_ids or not isinstance(pixiv_ids, list):
         return jsonify({'error': '请提供作品ID列表'}), 400
@@ -1093,8 +1172,9 @@ def _cancel_download_internal(pixiv_id: int, reset: bool = False) -> Response:
             illust.download_status = None
             db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message='下载已手动重置'))
             safe_commit(db)
-            download_cancellations.discard(pixiv_id)
-            _queued_downloads.discard(pixiv_id)
+            # 不在此处清除取消标记：若 worker 仍在下载，须让它感知取消并自行
+            # 清理（_download_illust 的 finally 会 discard）；若任务仅 queued 未
+            # 启动，worker 启动时的取消检查也会走 finally 清理。
             return jsonify({'status': 'reset', 'message': '已重置'}), 200
 
         return jsonify({'status': 'cancelling', 'message': '正在取消...'}), 200
@@ -1210,19 +1290,30 @@ def thumb_proxy(url_b64: str) -> Response:
         return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
 
     try:
-        resp = build_pixiv_session().get(url, timeout=(10, 30))
-        resp.raise_for_status()
+        session = build_pixiv_session()
+        try:
+            resp = session.get(url, timeout=(10, 30))
+            resp.raise_for_status()
+        finally:
+            session.close()
     except requests.RequestException:
         return abort(502)
 
     mimetype = resp.headers.get('Content-Type', 'image/jpeg')
     try:
-        with open(cache_path, 'wb') as f:
+        # 原子写：先写唯一临时文件再 rename，避免并发/半程中断留下损坏缓存
+        tmp_path = f'{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp'
+        with open(tmp_path, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
+        os.replace(tmp_path, cache_path)
         with open(meta_path, 'w') as f:
             f.write(mimetype)
     except OSError:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return Response(resp.iter_content(chunk_size=8192), mimetype=mimetype)
 
     return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
@@ -1242,8 +1333,9 @@ def serve_image(pixiv_id: int, index: int) -> Response:
     if not os.path.isdir(ddir):
         abort(404)
     files = sorted(
-        os.path.join(ddir, f) for f in os.listdir(ddir)
-        if os.path.isfile(os.path.join(ddir, f))
+        (os.path.join(ddir, f) for f in os.listdir(ddir)
+         if os.path.isfile(os.path.join(ddir, f))),
+        key=_page_sort_key,
     )
     if 0 <= index < len(files) and os.path.isfile(files[index]):
         return send_file(files[index])
@@ -1257,7 +1349,7 @@ def detail_page(pixiv_id: int) -> str:
         if not illust:
             abort(404)
 
-        data = illust.to_dict()
+        data = illust.to_dict(favorite=(pixiv_id in get_favorite_pids(db)))
         paths = illust.local_paths_list or []
         local_urls = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
 
@@ -1271,30 +1363,38 @@ def detail_page(pixiv_id: int) -> str:
         ).order_by(Illust.created_at.desc()).limit(6).all()
         related = [r.to_dict() for r in related]
 
-        if not illust.original_urls_list:
-            urls = _fetch_original_urls(pixiv_id)
-            if urls:
-                illust.original_urls_list = urls
-                safe_commit(db)
+        need_fetch_urls = not illust.original_urls_list
 
-        medium_urls = []
-        original_proxied = []
-        for url in illust.original_urls_list or []:
-            medium_urls.append(_proxy_thumb(_original_to_resized(url)))
-            original_proxied.append(_proxy_thumb(url))
+    # 网络请求放到 DB session 之外（避免事务随网络往返长时间占用连接）
+    if need_fetch_urls:
+        urls = _fetch_original_urls(pixiv_id)
+        if urls:
+            with get_session() as db:
+                row = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+                if row:
+                    row.original_urls_list = urls
+                    safe_commit(db)
+    else:
+        urls = illust.original_urls_list or []
 
-        return render_template(
-            'detail.html',
-            illust=data,
-            local_urls=local_urls,
-            medium_urls=medium_urls,
-            original_proxied=original_proxied,
-            file_size=file_size,
-            related=related,
-            proxy_thumb=_proxy_thumb,
-            fmt_num=_fmt_num,
-            csrf_token=_get_csrf_token(),
-        )
+    medium_urls = []
+    original_proxied = []
+    for url in urls:
+        medium_urls.append(_proxy_thumb(_original_to_resized(url)))
+        original_proxied.append(_proxy_thumb(url))
+
+    return render_template(
+        'detail.html',
+        illust=data,
+        local_urls=local_urls,
+        medium_urls=medium_urls,
+        original_proxied=original_proxied,
+        file_size=file_size,
+        related=related,
+        proxy_thumb=_proxy_thumb,
+        fmt_num=_fmt_num,
+        csrf_token=_get_csrf_token(),
+    )
 
 
 @app.route('/api/detail/<int:pixiv_id>')
@@ -1355,9 +1455,16 @@ def api_gallery() -> Response:
                 default_fav_set = {p[0] for p in pids}
 
         if local_pids:
-            pid_phs = ','.join(f':local_pid_{i}' for i in range(len(local_pids)))
-            wheres = [f"(illusts.download_status = 'done' OR illusts.pixiv_id IN ({pid_phs}))"]
-            params = {f'local_pid_{i}': pid for i, pid in enumerate(local_pids)}
+            # 本地 pid 可能数千：分片拼 IN，避免超过 SQLite 绑定变量上限
+            #（旧版本默认 999，现代版本 32766；分片后对两者都安全）。
+            or_clauses = ["illusts.download_status = 'done'"]
+            params = {}
+            for ci, chunk in enumerate(local_pids[i:i + 500] for i in range(0, len(local_pids), 500)):
+                phs = ','.join(f':local_pid_{ci}_{j}' for j in range(len(chunk)))
+                or_clauses.append(f'illusts.pixiv_id IN ({phs})')
+                for j, pid in enumerate(chunk):
+                    params[f'local_pid_{ci}_{j}'] = pid
+            wheres = ['(' + ' OR '.join(or_clauses) + ')']
         else:
             wheres = ["illusts.download_status = 'done'"]
             params = {}
@@ -1379,38 +1486,55 @@ def api_gallery() -> Response:
 
         where_clause = ' AND '.join(wheres)
 
-        page_params = {**params, 'lim': limit, 'off': offset}
-        if is_collection_view:
-            params['collection_id'] = collection_id
-            page_params['collection_id'] = collection_id
-            row = db.execute(
-                text(f'SELECT COUNT(*) FROM illusts '
-                     f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
-                     f'WHERE collection_items.collection_id = :collection_id AND {where_clause}'),
-                params
-            ).one()
-            total = row[0] or 0
-            fav_total = 0
-            pk_ids = db.execute(
-                text(f'SELECT illusts.id FROM illusts '
-                     f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
-                     f'WHERE collection_items.collection_id = :collection_id AND {where_clause} '
-                     f'ORDER BY collection_items.position ASC '
-                     f'LIMIT :lim OFFSET :off'),
-                page_params
-            ).scalars().all()
-        else:
-            row = db.execute(
-                text(f'SELECT COUNT(*) AS total FROM illusts WHERE {where_clause}'),
-                params
-            ).one()
-            total = row[0] or 0
-            fav_total = 0
-            order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
-            pk_ids = db.execute(
-                text(f'SELECT id FROM illusts WHERE {where_clause} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
-                page_params
-            ).scalars().all()
+        total: int = 0
+        fav_total: int = 0
+        pk_ids: list[int] = []
+
+        # 查询执行闭包：COUNT + 本页 pk_ids。
+        # json_each(illusts.tags) 遇到单条非法 JSON 会抛 OperationalError，
+        # 外层捕获后降级去掉标签相关过滤重试（数据损坏兜底，不让整页 500）。
+        def _run_gallery_queries(wc: str, p: dict) -> None:
+            nonlocal total, fav_total, pk_ids
+            page_params = {**p, 'lim': limit, 'off': offset}
+            if is_collection_view:
+                p['collection_id'] = collection_id
+                page_params['collection_id'] = collection_id
+                row = db.execute(
+                    text(f'SELECT COUNT(*) FROM illusts '
+                         f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
+                         f'WHERE collection_items.collection_id = :collection_id AND {wc}'),
+                    p
+                ).one()
+                total = row[0] or 0
+                fav_total = 0
+                pk_ids = db.execute(
+                    text(f'SELECT illusts.id FROM illusts '
+                         f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
+                         f'WHERE collection_items.collection_id = :collection_id AND {wc} '
+                         f'ORDER BY collection_items.position ASC '
+                         f'LIMIT :lim OFFSET :off'),
+                    page_params
+                ).scalars().all()
+            else:
+                row = db.execute(
+                    text(f'SELECT COUNT(*) AS total FROM illusts WHERE {wc}'),
+                    p
+                ).one()
+                total = row[0] or 0
+                fav_total = 0
+                order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
+                pk_ids = db.execute(
+                    text(f'SELECT id FROM illusts WHERE {wc} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
+                    page_params
+                ).scalars().all()
+
+        try:
+            _run_gallery_queries(where_clause, params)
+        except OperationalError:
+            logger.warning('图库查询因 tags 数据异常失败，降级跳过标签过滤重试')
+            wc = ' AND '.join(w for w in wheres if 'json_each' not in w)
+            _run_gallery_queries(wc, {k: v for k, v in params.items()
+                                      if not k.startswith('blk_') and k != 'tag_filter'})
 
         # 获取完整 ORM 对象并保持排序
         illusts = db.query(Illust).filter(Illust.id.in_(pk_ids)).all()
@@ -1427,10 +1551,8 @@ def api_gallery() -> Response:
                 if total_size:
                     i.file_size = total_size
             d = i.to_dict(favorite=(i.pixiv_id in default_fav_set))
-            d['local_paths'] = paths
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
-            d['local_dir'] = os.path.abspath(_get_download_dir(i.pixiv_id)) if paths else None
             results.append(d)
             seen_pids.add(i.pixiv_id)
             if i.bookmark_count == 0 and not i.original_urls_list:
@@ -1512,7 +1634,7 @@ def delete_gallery(pixiv_id: int) -> Response:
 @app.route('/api/gallery/batch-delete', methods=['POST'])
 @_csrf_required
 def batch_delete_gallery() -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     ids = body.get('ids', [])
     if not ids or not isinstance(ids, list):
         return jsonify({'error': '请提供作品ID列表'}), 400
@@ -1549,7 +1671,7 @@ def auto_follow_status() -> Response:
 @app.route('/api/auto-follow/config', methods=['POST'])
 @_csrf_required
 def auto_follow_config() -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     if 'interval' in body:
         try:
             _auto_follow_state['interval'] = max(0, int(body['interval']))
@@ -1582,7 +1704,7 @@ def prefetch_config_get() -> Response:
 @app.route('/api/prefetch/config', methods=['POST'])
 @_csrf_required
 def prefetch_config_post() -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     updates: dict[str, int] = {}
     for key in _PREFETCH_SETTINGS_KEYS:
         if key in body:
@@ -1627,7 +1749,7 @@ def prefetch_tags_get() -> Response:
 @app.route('/api/prefetch/tags', methods=['POST'])
 @_csrf_required
 def prefetch_tags_post() -> Response:
-    tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
+    tag = _get_json_body().get('tag', '').strip()
     if not tag:
         return jsonify({'error': '标签不能为空'}), 400
     with get_session() as db:
@@ -1662,7 +1784,7 @@ def prefetch_tags_delete(tag: str) -> Response:
             illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
             if illust is None or not illust.prefetch_source:
                 continue
-            if illust.download_status == 'done' or illust.local_paths_list:
+            if illust.download_status in ('done', 'downloading') or illust.local_paths_list:
                 continue
             if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
                 continue
@@ -1687,7 +1809,7 @@ def prefetch_status_get() -> Response:
 @app.route('/api/prefetch/refresh', methods=['POST'])
 @_csrf_required
 def prefetch_refresh_post() -> Response:
-    tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
+    tag = _get_json_body().get('tag', '').strip()
     if not tag:
         return jsonify({'error': '标签不能为空'}), 400
     with get_session() as db:
@@ -1707,106 +1829,125 @@ _bulk_tasks: dict[str, dict] = {}
 def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, max_pages: int, r18_mode: str = 'all') -> None:
     task = _bulk_tasks[task_id]
     page = 1
-    while page <= max_pages and not task['cancelled']:
-        task['current_page'] = page
-        task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索第 {page} 页...'))
-        try:
-            results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or',
-                                              r18_mode=r18_mode, limiter=fetcher._bulk_limiter)
-        except Exception as e:
-            task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索失败: {e}'))
-            break
-        task['log'].append((datetime.now(timezone.utc).isoformat(), f'第 {page} 页找到 {len(results)} 件'))
-        pixiv_ids = [r['pixiv_id'] for r in results]
-        with get_session() as db:
-            existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(Illust.pixiv_id.in_(pixiv_ids)).all()}
-            for r in results:
-                pixiv_id = r['pixiv_id']
-                if pixiv_id in existing_ids:
-                    continue
-                illust = Illust(
-                    pixiv_id=pixiv_id, title=r['title'], user_id=r['user_id'],
-                    user_name=r['user_name'], page_count=r['page_count'],
-                    bookmark_count=r['bookmark_count'], thumb_url=r['thumb_url'],
-                    upload_date=r['upload_date'],
-                )
-                illust.tags_list = r.get('tags', [])
-                illust.original_urls_list = r.get('original_urls', [])
-                db.add(illust)
-            safe_commit(db)
-
-        # 已完成的直接处理，剩余的提交并发下载
-        futures = {}
-        id_result_map = {}
-        for r in results:
-            if task['cancelled']:
-                break
-            pixiv_id = r['pixiv_id']
-            id_result_map[pixiv_id] = r
-            if r.get('download_status') == 'done':
-                task['downloaded'] += 1
-                task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {r.get("title","")[:30]}'))
-            else:
-                futures[download_executor.submit(_download_illust, pixiv_id)] = pixiv_id
-
-        processed_ids = []
-        for future in as_completed(futures):
-            pixiv_id = futures[future]
+    search_failed = False
+    try:
+        while page <= max_pages and not task['cancelled']:
+            task['current_page'] = page
+            task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索第 {page} 页...'))
             try:
-                future.result()
+                results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or',
+                                                  r18_mode=r18_mode, limiter=fetcher._bulk_limiter)
             except Exception as e:
-                logger.error(f'批量下载失败 #{pixiv_id}: {e}')
-            processed_ids.append(pixiv_id)
-            if task['cancelled']:
+                task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索失败: {e}'))
+                search_failed = True
                 break
-
-        # 批量查询：一次往返获取所有已处理项目的状态
-        if processed_ids:
+            task['log'].append((datetime.now(timezone.utc).isoformat(), f'第 {page} 页找到 {len(results)} 件'))
+            pixiv_ids = [r['pixiv_id'] for r in results]
             with get_session() as db:
-                status_map = {
-                    i.pixiv_id: i.download_status
-                    for i in db.query(Illust).filter(Illust.pixiv_id.in_(processed_ids)).all()
-                }
-                for pixiv_id in processed_ids:
-                    r = id_result_map.get(pixiv_id)
-                    title = r.get('title', '')[:30] if r else ''
-                    if status_map.get(pixiv_id) == 'done':
-                        task['downloaded'] += 1
-                        task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {title}'))
-                    else:
-                        task['failed'] += 1
-                        task['log'].append((datetime.now(timezone.utc).isoformat(), f'✗ #{pixiv_id} 下载失败'))
-        if not has_more:
-            break
-        page += 1
-        time.sleep(2)
-    task['status'] = 'stopped' if task['cancelled'] else 'done'
-    task['log'].append((datetime.now(timezone.utc).isoformat(),
-        f'完成: 下载 {task["downloaded"]} 件, 失败 {task["failed"]} 件'))
-    # 5 分钟后清理任务记录，防止内存泄漏
-    threading.Timer(300, lambda: _bulk_tasks.pop(task_id, None)).start()
+                existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(Illust.pixiv_id.in_(pixiv_ids)).all()}
+                for r in results:
+                    pixiv_id = r['pixiv_id']
+                    if pixiv_id in existing_ids:
+                        continue
+                    illust = Illust(
+                        pixiv_id=pixiv_id, title=r['title'], user_id=r['user_id'],
+                        user_name=r['user_name'], page_count=r['page_count'],
+                        bookmark_count=r['bookmark_count'], thumb_url=r['thumb_url'],
+                        upload_date=r['upload_date'],
+                    )
+                    illust.tags_list = r.get('tags', [])
+                    illust.original_urls_list = r.get('original_urls', [])
+                    db.add(illust)
+                safe_commit(db)
+
+            # 已完成的直接处理，剩余的提交并发下载
+            futures = {}
+            id_result_map = {}
+            for r in results:
+                if task['cancelled']:
+                    break
+                pixiv_id = r['pixiv_id']
+                id_result_map[pixiv_id] = r
+                if r.get('download_status') == 'done':
+                    task['downloaded'] += 1
+                    task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {r.get("title","")[:30]}'))
+                else:
+                    futures[download_executor.submit(_download_illust, pixiv_id)] = pixiv_id
+
+            processed_ids = []
+            for future in as_completed(futures):
+                pixiv_id = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f'批量下载失败 #{pixiv_id}: {e}')
+                processed_ids.append(pixiv_id)
+                if task['cancelled']:
+                    break
+
+            # 批量查询：一次往返获取所有已处理项目的状态
+            if processed_ids:
+                with get_session() as db:
+                    status_map = {
+                        i.pixiv_id: i.download_status
+                        for i in db.query(Illust).filter(Illust.pixiv_id.in_(processed_ids)).all()
+                    }
+                    for pixiv_id in processed_ids:
+                        r = id_result_map.get(pixiv_id)
+                        title = r.get('title', '')[:30] if r else ''
+                        st = status_map.get(pixiv_id)
+                        if st == 'done':
+                            task['downloaded'] += 1
+                            task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {title}'))
+                        elif st == 'downloading':
+                            # 已被其他来源（手动/自动关注等）占用：非失败，单列跳过
+                            task['skipped'] += 1
+                            task['log'].append((datetime.now(timezone.utc).isoformat(), f'… #{pixiv_id} 跳过（已在下载中）'))
+                        else:
+                            task['failed'] += 1
+                            task['log'].append((datetime.now(timezone.utc).isoformat(), f'✗ #{pixiv_id} 下载失败'))
+            if not has_more:
+                break
+            page += 1
+            time.sleep(2)
+    except Exception as e:
+        # 循环内任何未预期异常：终止任务并记录，而不是让线程静默退出
+        # （否则 task 永久卡在 running、300s 清理也永远不会注册）。
+        logger.error(f'批量任务 {task_id} 异常终止: {e}')
+        task['log'].append((datetime.now(timezone.utc).isoformat(), f'任务异常终止: {e}'))
+    finally:
+        if task['cancelled']:
+            task['status'] = 'stopped'
+        elif search_failed:
+            task['status'] = 'failed'
+        else:
+            task['status'] = 'done'
+        task['log'].append((datetime.now(timezone.utc).isoformat(),
+            f'完成: 下载 {task["downloaded"]} 件, 失败 {task["failed"]} 件, 跳过 {task["skipped"]} 件'))
+        # 5 分钟后清理任务记录，防止内存泄漏（异常路径也必须注册）
+        threading.Timer(300, lambda: _bulk_tasks.pop(task_id, None)).start()
 
 
 @app.route('/api/bulk/start', methods=['POST'])
 @_csrf_required
 def bulk_start() -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     tag = body.get('tag', '').strip()
     if not tag:
         return jsonify({'error': '请输入标签'}), 400
-    min_bookmarks = max(0, int(body.get('min_bookmarks', 0) or 0))
+    min_bookmarks = max(0, _safe_int(body.get('min_bookmarks'), 0))
     sort_order = body.get('sort', 'date_d')
     if sort_order not in ('popular_d', 'date_d'):
         sort_order = 'date_d'
     r18_mode = body.get('r18_mode', 'all')
     if r18_mode not in ('all', 'safe'):
         r18_mode = 'all'
-    max_pages = max(1, min(100, int(body.get('max_pages', 10) or 10)))
+    max_pages = max(1, min(100, _safe_int(body.get('max_pages'), 10)))
     task_id = secrets.token_hex(8)
     _bulk_tasks[task_id] = {
         'tag': tag, 'min_bookmarks': min_bookmarks, 'sort': sort_order,
         'max_pages': max_pages, 'current_page': 0, 'downloaded': 0, 'failed': 0,
-        'status': 'running', 'cancelled': False, 'r18_mode': r18_mode, 'log': [],
+        'skipped': 0, 'status': 'running', 'cancelled': False, 'r18_mode': r18_mode, 'log': [],
     }
     _bulk_tasks[task_id]['log'].append((datetime.now(timezone.utc).isoformat(),
         f'开始: 标签={tag}, 收藏≥{min_bookmarks}, 排序={sort_order}, 最多{max_pages}页'))
@@ -1898,7 +2039,7 @@ def list_blocked_tags() -> Response:
 @app.route('/api/blocked-tags', methods=['POST'])
 @_csrf_required
 def add_blocked_tag() -> Response:
-    tag = (request.get_json(silent=True) or {}).get('tag', '').strip()
+    tag = _get_json_body().get('tag', '').strip()
     if not tag:
         return jsonify({'error': '标签不能为空'}), 400
     with get_session() as db:
@@ -1972,12 +2113,12 @@ def settings_page() -> str:
 
 
 @app.route('/api/settings/unlock', methods=['POST'])
-@_rate_limit(max_attempts=5, window=60)
 @_csrf_required
+@_rate_limit(max_attempts=5, window=60)
 def settings_unlock() -> Response:
     if session.get('authed') or not SETTINGS_PASSWORD:
         return jsonify({'ok': True})
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     if hmac.compare_digest(str(body.get('password', '')).encode(), SETTINGS_PASSWORD.encode()):
         session['settings_unlocked'] = True
         return jsonify({'ok': True})
@@ -1988,7 +2129,12 @@ def settings_unlock() -> Response:
 def api_settings_get() -> Response:
     if _settings_locked():
         return jsonify({'error': '需要密码访问'}), 403
-    return jsonify(_load_settings())
+    data = _load_settings()
+    # 脱敏：密码类与 Cookie 字段不回传明文（纵深防御，前端 FIELD_MAP 不消费这些键）
+    for k in list(data):
+        if k.endswith('_password') or k == 'cookie':
+            data[k] = ''
+    return jsonify(data)
 
 
 @app.route('/api/settings', methods=['POST'])
@@ -1997,16 +2143,23 @@ def api_settings_post() -> Response:
     if _settings_locked():
         return jsonify({'error': '需要密码访问'}), 403
 
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     current = _load_settings()
 
     # Cookie 字段特殊处理：写入项目根目录 cookies.txt，立即更新内存状态
     cookie_val = body.pop('cookie', '').strip()
     if cookie_val:
+        # 剔除换行/控制字符，防止向 cookies.txt 注入多行破坏鉴权
+        clean_val = re.sub(r'[\r\n\t\x00-\x1f\x7f]', '', cookie_val).strip()
+        if not clean_val:
+            return jsonify({'error': 'Cookie 内容无效'}), 400
         cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
-        with open(cookie_path, 'w') as f:
-            f.write(f'PHPSESSID={cookie_val}\n')
-        fetcher._cookie_value = cookie_val
+        try:
+            with open(cookie_path, 'w') as f:
+                f.write(f'PHPSESSID={clean_val}\n')
+        except OSError as e:
+            return jsonify({'error': f'cookies.txt 写入失败: {e}'}), 500
+        fetcher._cookie_value = clean_val
         fetcher._cookie_mtime = os.path.getmtime(cookie_path)
         logger.info('cookies.txt 已通过设置页更新')
 
@@ -2030,6 +2183,12 @@ def api_settings_post() -> Response:
         os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
         with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
             json.dump(current, f, ensure_ascii=False, indent=2)
+        # prefetch_* 键与 /api/prefetch/config 保持同构：保存成功后同步内存态
+        #（interval 即时生效，不再需要重启）
+        _prefetch_state.update({
+            k: current[k] for k in ('prefetch_interval', 'prefetch_pages', 'prefetch_max_illusts')
+            if k in current
+        })
         return jsonify(current)
     except Exception as e:
         return jsonify({'error': f'保存失败: {e}'}), 500
@@ -2053,7 +2212,7 @@ def list_collections() -> Response:
 @app.route('/api/collections', methods=['POST'])
 @_csrf_required
 def create_collection() -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     name = body.get('name', '').strip()
     if not name or len(name) > 50:
         return jsonify({'error': '收藏夹名称不能为空且不超过50字'}), 400
@@ -2069,7 +2228,7 @@ def create_collection() -> Response:
 @app.route('/api/collections/<int:collection_id>', methods=['PUT'])
 @_csrf_required
 def update_collection(collection_id: int) -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     name = body.get('name', '').strip()
     if not name or len(name) > 50:
         return jsonify({'error': '收藏夹名称不能为空且不超过50字'}), 400
@@ -2119,10 +2278,17 @@ def list_collection_items(collection_id: int) -> Response:
         })
 
 
+def _next_collection_position(db, collection_id: int) -> float:
+    """计算收藏夹下一个可用位置：当前最大位置 + 1000（单语句，统一三处调用）。"""
+    return float(db.execute(text(
+        'SELECT COALESCE(MAX(position), 0) + 1000.0 FROM collection_items WHERE collection_id = :cid'
+    ), {'cid': collection_id}).scalar() or 1000.0)
+
+
 @app.route('/api/collections/<int:collection_id>/items', methods=['POST'])
 @_csrf_required
 def add_collection_item(collection_id: int) -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     pixiv_id = body.get('pixiv_id')
     if not pixiv_id:
         return jsonify({'error': '请提供作品ID'}), 400
@@ -2135,11 +2301,10 @@ def add_collection_item(collection_id: int) -> Response:
         ).first()
         if existing:
             return jsonify({'error': '作品已在收藏夹中'}), 409
-        max_row = db.query(CollectionItem).filter(
-            CollectionItem.collection_id == collection_id
-        ).order_by(CollectionItem.position.desc()).first()
-        next_pos = (max_row.position + 1000.0) if max_row else 1000.0
-        item = CollectionItem(collection_id=collection_id, pixiv_id=pixiv_id, position=next_pos)
+        item = CollectionItem(
+            collection_id=collection_id, pixiv_id=pixiv_id,
+            position=_next_collection_position(db, collection_id),
+        )
         db.add(item)
         safe_commit(db)
         data = item.to_dict()
@@ -2173,18 +2338,16 @@ def illust_collections(pixiv_id: int) -> Response:
 @app.route('/api/collections/<int:collection_id>/items/batch', methods=['POST'])
 @_csrf_required
 def batch_add_collection_items(collection_id: int) -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     pixiv_ids = body.get('pixiv_ids', [])
     if not pixiv_ids or not isinstance(pixiv_ids, list):
         return jsonify({'error': '请提供作品ID列表'}), 400
-    pixiv_ids = [int(pid) for pid in pixiv_ids]
+    pixiv_ids = [int(pid) for pid in pixiv_ids
+                 if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())]
     with get_session() as db:
         if not db.query(Collection).filter(Collection.id == collection_id).first():
             return jsonify({'error': '收藏夹不存在'}), 404
-        max_row = db.query(CollectionItem).filter(
-            CollectionItem.collection_id == collection_id
-        ).order_by(CollectionItem.position.desc()).first()
-        next_pos = (max_row.position + 1000.0) if max_row else 1000.0
+        next_pos = _next_collection_position(db, collection_id)
         added = 0
         for pid in pixiv_ids:
             existing = db.query(CollectionItem).filter(
@@ -2202,11 +2365,12 @@ def batch_add_collection_items(collection_id: int) -> Response:
 @app.route('/api/collections/<int:collection_id>/items/batch', methods=['DELETE'])
 @_csrf_required
 def batch_remove_collection_items(collection_id: int) -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     pixiv_ids = body.get('pixiv_ids', [])
     if not pixiv_ids or not isinstance(pixiv_ids, list):
         return jsonify({'error': '请提供作品ID列表'}), 400
-    pixiv_ids = [int(pid) for pid in pixiv_ids]
+    pixiv_ids = [int(pid) for pid in pixiv_ids
+                 if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())]
     with get_session() as db:
         if not db.query(Collection).filter(Collection.id == collection_id).first():
             return jsonify({'error': '收藏夹不存在'}), 404
@@ -2252,7 +2416,7 @@ def _compute_move_position(items: list, idx: int, direction: str):
 @app.route('/api/collections/<int:collection_id>/items/<int:pixiv_id>/move', methods=['POST'])
 @_csrf_required
 def move_collection_item(collection_id: int, pixiv_id: int) -> Response:
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     direction = body.get('direction')
     if direction not in ('up', 'down'):
         return jsonify({'error': 'direction 必须是 up 或 down'}), 400
@@ -2293,7 +2457,9 @@ def move_collection_item(collection_id: int, pixiv_id: int) -> Response:
             idx = next((i for i, it in enumerate(items) if it[0] == current.id), None)
             new_pos, _, _ = _compute_move_position(items, idx, direction)
 
-        old_pos = current.position
+        # 用重查后的 items 里的 position 做乐观锁基准：rebalance 分支已重排
+        # 并 commit，current 的 ORM 缓存仍是重排前的旧值（否则误报 409）。
+        old_pos = items[idx][1]
         result = db.execute(text(
             'UPDATE collection_items SET position=:np '
             'WHERE collection_id=:cid AND pixiv_id=:pid AND position=:op'
@@ -2314,7 +2480,7 @@ def api_open_dir() -> Response:
     """打开本地文件夹（仅限本机浏览器访问时有效）。"""
     if request.remote_addr not in ('127.0.0.1', '::1'):
         return jsonify({'error': '该功能仅本机可用'}), 403
-    body = request.get_json(silent=True) or {}
+    body = _get_json_body()
     path = body.get('path', '')
     if not path or not os.path.isdir(path):
         return jsonify({'error': '目录不存在'}), 404
@@ -2362,11 +2528,10 @@ def api_favorite_post(pixiv_id: int) -> Response:
             safe_commit(db)
             return jsonify({'is_favorite': False})
         else:
-            max_row = db.query(CollectionItem).filter(
-                CollectionItem.collection_id == default.id
-            ).order_by(CollectionItem.position.desc()).first()
-            next_pos = (max_row.position + 1000.0) if max_row else 1000.0
-            db.add(CollectionItem(collection_id=default.id, pixiv_id=pixiv_id, position=next_pos))
+            db.add(CollectionItem(
+                collection_id=default.id, pixiv_id=pixiv_id,
+                position=_next_collection_position(db, default.id),
+            ))
             safe_commit(db)
             return jsonify({'is_favorite': True})
 

@@ -402,7 +402,7 @@ function renderGalleryData(data, pageNum) {
   const start = offset + 1;
   const end = Math.min(galleryTotal, offset + data.data.length);
   let statsText = `${start}-${end} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
-  if (activeTag) statsText += ` · 标签: ${escHtml(activeTag)}`;
+  if (activeTag) statsText += ` · 标签: ${activeTag}`;  // textContent 赋值天然安全，无需 escHtml
   if (!activeCollectionId && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
   $('#stats').textContent = statsText;
   renderGalleryPagination();

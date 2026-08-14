@@ -2,15 +2,12 @@
 :root {
   --accent: #d4436b;
   --accent-hover: #c0395e;
-  --accent-light: #e8788e;
   --accent-subtle: rgba(212, 67, 107, .08);
   --accent-focus: rgba(212, 67, 107, .2);
   --bg-page: #f5f5f0;
   --bg-elevated: #ffffff;
-  --bg-card: #ffffff;
   --bg-navbar: rgba(245, 245, 240, .88);
   --bg-input: #ffffff;
-  --bg-modal: #ffffff;
   --bg-thumb: #ecece7;
   --text-primary: #2b2b2b;
   --text-secondary: #8a8a82;

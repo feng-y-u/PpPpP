@@ -215,7 +215,7 @@ async function poll() {
     $('#progressBar').style.width = pct + '%';
     $('#progressText').textContent = `最多 ${t.max_pages || '?'} 页 · 标签: ${t.tag || ''}`;
 
-    const statusMap = { running: '运行中', stopped: '已停止', done: '已完成' };
+    const statusMap = { running: '运行中', stopped: '已停止', done: '已完成', failed: '失败' };
     $('#statStatus').textContent = statusMap[t.status] || t.status;
 
     if (t.log?.length) {
@@ -226,7 +226,7 @@ async function poll() {
       $('#logPanel').scrollTop = 0;
     }
 
-    if (t.status === 'stopped' || t.status === 'done') {
+    if (t.status === 'stopped' || t.status === 'done' || t.status === 'failed') {
       clearInterval(pollTimer);
       pollTimer = null;
       resetUI();

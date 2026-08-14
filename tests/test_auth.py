@@ -79,6 +79,27 @@ class TestLogin:
         assert resp.status_code == 403
 
 
+class TestSafeNext:
+    def test_relative_path_allowed(self):
+        import app
+        assert app._safe_next('/detail/123') == '/detail/123'
+
+    def test_protocol_relative_rejected(self):
+        import app
+        assert app._safe_next('//evil.com') == '/'
+
+    def test_backslash_variant_rejected(self):
+        """回归：/\\evil.com 会被浏览器规整为 //evil.com（开放重定向）。"""
+        import app
+        assert app._safe_next('/\\evil.com') == '/'
+        assert app._safe_next('\\evil.com') == '/'
+
+    def test_control_chars_rejected(self):
+        import app
+        assert app._safe_next('/a\r\nb') == '/'
+        assert app._safe_next('') == '/'
+
+
 class TestSettingsCompat:
     def test_authed_session_skips_settings_lock(self, client, auth_enabled, monkeypatch):
         monkeypatch.setattr('app.SETTINGS_PASSWORD', 'settings-pw')
