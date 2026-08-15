@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -332,3 +332,100 @@ class TestPrefetchThreadLiveness:
         # interval=0 时走了 sleep(60) 暂停路径而非 break，随后重启用 interval=5 成功执行了 _prefetch_loop
         assert 60 in sleeps
         assert loops == [1]
+
+
+class TestPrefetchRefreshBookmarks:
+    """最终收藏数刷新：满 1 天刷新一次，<10 删除，保护已下载/已收藏。"""
+
+    def _old_illust(self, clean_db, pid, days=2, **kw):
+        import models
+        old = datetime.now(timezone.utc) - timedelta(days=days)
+        illust = Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,
+                        bookmark_count=0, created_at=old, **kw)
+        clean_db.add(illust)
+        return illust
+
+    def _mock_detail(self, monkeypatch, bookmark_count):
+        class _FakeSession:
+            def close(self):
+                pass
+
+        calls = []
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail',
+                            lambda s, pid, limiter=None: (calls.append(pid) or
+                                                          {'bookmark_count': bookmark_count}))
+        return calls
+
+    def test_refresh_updates_bookmark_once(self, clean_db, monkeypatch):
+        from datetime import timedelta
+        self._old_illust(clean_db, 5001)
+        clean_db.add(SearchCache(tag='t', illust_ids='[5001]', status='done'))
+        safe_commit(clean_db)
+        calls = self._mock_detail(monkeypatch, 250)
+
+        app._prefetch_refresh_bookmarks()
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5001).first()
+        assert illust.bookmark_count == 250
+        assert illust.prefetch_refresh_at is not None
+        assert calls == [5001]
+
+        # 只刷新一次：第二次调用不再请求详情
+        app._prefetch_refresh_bookmarks()
+        assert calls == [5001]
+
+    def test_refresh_deletes_low_bookmark(self, clean_db, monkeypatch):
+        self._old_illust(clean_db, 5002)
+        clean_db.add(SearchCache(tag='t', illust_ids='[5002]', status='done'))
+        safe_commit(clean_db)
+        self._mock_detail(monkeypatch, 3)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5002).first() is None
+        sc = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert json.loads(sc.illust_ids) == []
+
+    def test_refresh_keeps_downloaded_low_bookmark(self, clean_db, monkeypatch):
+        self._old_illust(clean_db, 5003, download_status='done')
+        clean_db.add(SearchCache(tag='t', illust_ids='[5003]', status='done'))
+        safe_commit(clean_db)
+        self._mock_detail(monkeypatch, 3)
+
+        app._prefetch_refresh_bookmarks()
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5003).first()
+        assert illust is not None  # 已下载保护，不删
+        assert illust.bookmark_count == 3
+        assert illust.prefetch_refresh_at is not None
+
+    def test_refresh_skips_fresh_illusts(self, clean_db, monkeypatch):
+        from datetime import timedelta
+        self._old_illust(clean_db, 5004, days=0)  # 今天入库 → 不满足满 1 天
+        safe_commit(clean_db)
+        calls = self._mock_detail(monkeypatch, 100)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert calls == []
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5004).first()
+        assert illust.prefetch_refresh_at is None
+
+    def test_refresh_failure_keeps_candidate_for_retry(self, clean_db, monkeypatch):
+        self._old_illust(clean_db, 5005)
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail',
+                            lambda s, pid, limiter=None: None)  # 详情失败
+
+        app._prefetch_refresh_bookmarks()
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5005).first()
+        assert illust is not None
+        assert illust.prefetch_refresh_at is None  # 未标记，下轮重试

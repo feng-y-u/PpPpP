@@ -180,6 +180,9 @@ function renderCard(r) {
   if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
   else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
   else btnHtml = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>`;
+  // 删除按钮：仅未下载/未下载中显示
+  const delBtnHtml = (isDl || isDone) ? '' :
+    `<button class="btn btn-soft btn-sm cache-del-btn" data-pid="${r.pixiv_id}" title="从缓存删除">删除</button>`;
 
   const badges = [];
   badges.push(`<span class="photo-badge">♥ ${fmtNum(r.bookmark_count)}</span>`);
@@ -200,7 +203,7 @@ function renderCard(r) {
         <div class="photo-card-title">${escHtml(r.title)}</div>
         <div class="photo-card-artist">${escHtml(r.user_name)}</div>
         <div class="photo-tags">${tags}</div>
-        <div class="photo-card-actions">${btnHtml}</div>
+        <div class="photo-card-actions">${btnHtml}${delBtnHtml}</div>
       </div>
     </div>`;
   $('#masonryGrid').appendChild(item);
@@ -220,6 +223,36 @@ function renderCard(r) {
     e.stopPropagation();
     downloadFile(r.pixiv_id);
   });
+
+  // 删除按钮
+  item.querySelector('.cache-del-btn')?.addEventListener('click', function(e) {
+    e.stopPropagation();
+    deleteCacheItem(r.pixiv_id, r.title, this);
+  });
+}
+
+// 从缓存删除单条作品
+async function deleteCacheItem(pixivId, title, btn) {
+  if (!confirm(`确定从缓存中删除「${title || pixivId}」吗？\n（不会删除已下载的文件）`)) return;
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/api/cache/items/${pixivId}/delete`, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken },
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showToast(data.error || '删除失败', true);
+      btn.disabled = false;
+      return;
+    }
+    const card = btn.closest('.photo-card');
+    card?.closest('.masonry-item')?.remove();
+    showToast('已从缓存删除');
+  } catch {
+    showToast('删除失败', true);
+    btn.disabled = false;
+  }
 }
 
 // ── Lazy Load ──

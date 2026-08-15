@@ -395,6 +395,69 @@ def _collect_other_tag_pids(db, exclude_tag: str) -> set[int]:
     return result
 
 
+def _remove_pids_from_search_caches(db, pids: list[int]) -> None:
+    """从所有 SearchCache 的 illust_ids 中移除指定作品（不 commit）。"""
+    pid_set = set(pids)
+    if not pid_set:
+        return
+    for sc in db.query(SearchCache).all():
+        try:
+            ids = json.loads(sc.illust_ids) if sc.illust_ids else []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        new_ids = [p for p in ids if p not in pid_set]
+        if len(new_ids) != len(ids):
+            sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
+
+
+def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
+    """最终收藏数刷新：入库满 1 天、尚未最终刷新的预取作品，拉详情更新收藏数一次。
+
+    规则（用户需求）：
+    - 拉取的作品给足一天时间涨收藏，之后只刷新这一次（prefetch_refresh_at 标记）；
+    - 刷新后的最终收藏数 < 10 且未下载未收藏的，直接从缓存删除；
+    - 详情拉取失败跳过，等下一轮重试。
+    每轮预取执行一次，最多处理 max_items 条，避免单轮耗时过长。
+    """
+    deadline = datetime.now(timezone.utc) - timedelta(days=1)
+    with get_session() as db:
+        candidates = db.query(Illust).filter(
+            Illust.prefetch_source == 1,
+            Illust.prefetch_refresh_at.is_(None),
+            Illust.created_at < deadline,
+        ).order_by(Illust.created_at.asc()).limit(max_items).all()
+        if not candidates:
+            return
+        pids = [c.pixiv_id for c in candidates]
+        fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
+
+    # 网络请求放在 DB session 外
+    session = build_pixiv_session()
+    try:
+        for pid in pids:
+            detail = fetcher._get_illust_detail(session, pid, limiter=fetcher._fill_limiter)
+            if detail is None:
+                continue
+            bookmark_count = detail.get('bookmark_count', 0)
+            now = datetime.now(timezone.utc)
+            with get_session() as db:
+                illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+                if not illust or illust.prefetch_refresh_at is not None:
+                    continue
+                illust.bookmark_count = bookmark_count
+                illust.bookmark_updated_at = now
+                illust.prefetch_refresh_at = now
+                protected = (illust.download_status in ('done', 'downloading')
+                             or illust.local_paths_list or pid in fav_ids)
+                if bookmark_count < 10 and not protected:
+                    _remove_pids_from_search_caches(db, [pid])
+                    db.delete(illust)
+                    logger.info(f'[prefetch] 最终收藏数 {bookmark_count} < 10，删除缓存作品 {pid}')
+                safe_commit(db)
+    finally:
+        session.close()
+
+
 def _prefetch_capacity_cleanup() -> None:
     """容量清理：超出上限时优先删除收藏数最低的未下载未收藏预取作品。"""
     with get_session() as db:
@@ -420,14 +483,7 @@ def _prefetch_capacity_cleanup() -> None:
             return
 
         to_delete_set = set(to_delete)
-        for sc in db.query(SearchCache).all():
-            try:
-                ids = json.loads(sc.illust_ids) if sc.illust_ids else []
-            except (json.JSONDecodeError, TypeError):
-                continue
-            new_ids = [p for p in ids if p not in to_delete_set]
-            if len(new_ids) != len(ids):
-                sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
+        _remove_pids_from_search_caches(db, to_delete)
         safe_commit(db)
 
         db.query(Illust).filter(Illust.pixiv_id.in_(to_delete)).delete(synchronize_session=False)
@@ -452,6 +508,8 @@ def _prefetch_loop() -> None:
         try:
             for tag in tags:
                 _prefetch_one_tag(tag)
+            # 先刷新最终收藏数（满 1 天的作品），再按新收藏数做容量清理
+            _prefetch_refresh_bookmarks()
             _prefetch_capacity_cleanup()
             _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
         except Exception as e:
@@ -1069,6 +1127,24 @@ def cache_items() -> Response:
         'results': results,
         'has_more': has_more,
     })
+
+
+@app.route('/api/cache/items/<int:pixiv_id>/delete', methods=['POST'])
+@_csrf_required
+def cache_item_delete(pixiv_id: int) -> Response:
+    """从预取缓存删除单条作品（移除 SearchCache 引用 + Illust 行）。"""
+    with get_session() as db:
+        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+        if not illust or not illust.prefetch_source:
+            return jsonify({'error': '作品不在预取缓存中'}), 404
+        if illust.download_status in ('done', 'downloading') or illust.local_paths_list:
+            return jsonify({'error': '已下载/下载中的作品请在图库中处理'}), 400
+        if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).first():
+            return jsonify({'error': '已收藏的作品不能从缓存删除'}), 400
+        _remove_pids_from_search_caches(db, [pixiv_id])
+        db.delete(illust)
+        safe_commit(db)
+    return jsonify({'status': 'deleted'})
 
 
 @app.route('/api/following')

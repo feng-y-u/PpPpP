@@ -76,6 +76,8 @@ class Illust(Base):
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     prefetch_source: Mapped[int] = mapped_column(Integer, default=0)
+    # 预取作品"最终收藏数"刷新标记：入库满 1 天后刷新一次收藏数并写入该时间戳
+    prefetch_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -315,6 +317,11 @@ def init_db() -> None:
     if 'prefetch_source' not in columns:
         with engine.connect() as conn:
             conn.execute(text('ALTER TABLE illusts ADD COLUMN prefetch_source INTEGER DEFAULT 0'))
+            conn.commit()
+
+    if 'prefetch_refresh_at' not in columns:
+        with engine.connect() as conn:
+            conn.execute(text('ALTER TABLE illusts ADD COLUMN prefetch_refresh_at DATETIME'))
             conn.commit()
 
     has_desc = any(c == 'description' for c in columns)

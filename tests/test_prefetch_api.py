@@ -291,3 +291,46 @@ class TestPrefetchRefreshAPI:
         resp = client.post('/api/prefetch/refresh', data=json.dumps({'tag': 'x'}),
                            content_type='application/json')
         assert resp.status_code == 403
+
+
+class TestCacheItemDelete:
+    def _setup(self, clean_db, pid=6001, **illust_kw):
+        clean_db.add_all([
+            Illust(pixiv_id=pid, title='x', prefetch_source=1, **illust_kw),
+            Illust(pixiv_id=6002, title='y', prefetch_source=1),
+            SearchCache(tag='t', illust_ids=json.dumps([pid, 6002]), status='done'),
+        ])
+        safe_commit(clean_db)
+
+    def test_delete_removes_illust_and_cache_ref(self, client, clean_db):
+        self._setup(clean_db)
+        token = _get_token(client)
+        resp = client.post('/api/cache/items/6001/delete',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert resp.get_json()['status'] == 'deleted'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 6001).first() is None
+        sc = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert json.loads(sc.illust_ids) == [6002]
+        # 其他作品不受影响
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 6002).first() is not None
+
+    def test_delete_downloaded_rejected(self, client, clean_db):
+        self._setup(clean_db, download_status='done')
+        token = _get_token(client)
+        resp = client.post('/api/cache/items/6001/delete',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 400
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 6001).first() is not None
+
+    def test_delete_non_prefetch_404(self, client, clean_db):
+        clean_db.add(Illust(pixiv_id=6003, title='z', prefetch_source=0))
+        safe_commit(clean_db)
+        token = _get_token(client)
+        resp = client.post('/api/cache/items/6003/delete',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 404
+
+    def test_delete_without_csrf_403(self, client, clean_db):
+        resp = client.post('/api/cache/items/6001/delete')
+        assert resp.status_code == 403
