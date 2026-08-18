@@ -142,6 +142,68 @@ class TestQueryCachedTag:
         results, _, _, _ = app.query_cached_tag('x', 0, 'date_d', 'or', 'all')
         assert [r['pixiv_id'] for r in results] == [2, 1]
 
+    def test_filter_tag(self, clean_db):
+        a = Illust(pixiv_id=1, title='a', bookmark_count=5)
+        a.tags_list = ['猫', '日常']
+        b = Illust(pixiv_id=2, title='b', bookmark_count=5)
+        b.tags_list = ['风景']
+        clean_db.add_all([
+            SearchCache(tag='x', illust_ids='[1, 2]', status='done'),
+            a, b,
+        ])
+        safe_commit(clean_db)
+
+        # 命中：只返回含该标签的作品
+        results, _, _, filtered_total = app.query_cached_tag(
+            'x', 0, 'date_d', 'or', 'all', filter_tag='猫')
+        assert [r['pixiv_id'] for r in results] == [1]
+        assert filtered_total == 1
+
+        # 未命中：空结果
+        results, _, _, filtered_total = app.query_cached_tag(
+            'x', 0, 'date_d', 'or', 'all', filter_tag='不存在')
+        assert results == []
+        assert filtered_total == 0
+
+        # 空 filter_tag = 不过滤
+        results, _, _, filtered_total = app.query_cached_tag(
+            'x', 0, 'date_d', 'or', 'all', filter_tag='')
+        assert [r['pixiv_id'] for r in results] == [1, 2]
+
+
+class TestCacheTagsAPI:
+    def test_cache_tags_lists_prefetch_illust_tags(self, client, clean_db):
+        a = Illust(pixiv_id=1, title='a', prefetch_source=1)
+        a.tags_list = ['猫', '日常']
+        b = Illust(pixiv_id=2, title='b', prefetch_source=1)
+        b.tags_list = ['猫', '风景']
+        c = Illust(pixiv_id=3, title='c', prefetch_source=0)  # 非预取来源不列出
+        c.tags_list = ['私人']
+        clean_db.add_all([a, b, c])
+        safe_commit(clean_db)
+
+        resp = client.get('/api/cache/tags')
+        assert resp.status_code == 200
+        tags = resp.get_json()
+        assert '猫' in tags and '日常' in tags and '风景' in tags
+        assert '私人' not in tags
+
+    def test_cache_items_filter_tag(self, client, clean_db):
+        a = Illust(pixiv_id=1, title='a', prefetch_source=1)
+        a.tags_list = ['猫']
+        clean_db.add_all([
+            SearchCache(tag='x', illust_ids='[1, 2]', status='done'),
+            a,
+            Illust(pixiv_id=2, title='b', prefetch_source=1),
+        ])
+        safe_commit(clean_db)
+
+        resp = client.get('/api/cache/items?tag=x&filter_tag=猫')
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert [r['pixiv_id'] for r in data['results']] == [1]
+        assert data['filtered_total'] == 1
+
 
 class TestSearchAlwaysLive:
     def test_search_route_always_live_even_for_cached_tag(self, clean_db, client, monkeypatch):

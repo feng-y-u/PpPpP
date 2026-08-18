@@ -546,10 +546,11 @@ _start_prefetch_thread()
 
 def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
                      tag_mode: str, r18_mode: str, offset: int = 0,
-                     limit: int = 24) -> tuple[list[dict], bool, int, int]:
+                     limit: int = 24, filter_tag: str = '') -> tuple[list[dict], bool, int, int]:
     """从 SearchCache + Illust 表查询预取结果，支持库内过滤排序分页。
 
     不限制 SearchCache.status（fetching/error 时也能查看已累积的缓存数据）。
+    filter_tag: 按作品标签（Illust.tags）精确过滤，空串不过滤。
 
     Returns:
         (results_dicts, has_more, next_offset, filtered_total)
@@ -579,6 +580,8 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
         if illust.bookmark_count < min_bookmarks:
             continue
         if r18_mode == 'safe' and _is_r18(illust.tags_list):
+            continue
+        if filter_tag and filter_tag not in (illust.tags_list or []):
             continue
         # tag_mode：预取是单标签搜索，or/and 均命中该标签，无需额外过滤
         filtered.append(illust)
@@ -1103,6 +1106,7 @@ def cache_items() -> Response:
         sort_order = 'date_d'
 
     offset = max(0, _safe_int(request.args.get('offset'), 0))
+    filter_tag = request.args.get('filter_tag', '').strip()
 
     with get_session() as db:
         sc = db.query(SearchCache).filter(SearchCache.tag == tag).first()
@@ -1114,7 +1118,7 @@ def cache_items() -> Response:
 
     results, has_more, _next, filtered_total = query_cached_tag(
         tag, min_bookmarks, sort_order, 'or', 'all',
-        offset=offset, limit=ITEMS_PER_PAGE,
+        offset=offset, limit=ITEMS_PER_PAGE, filter_tag=filter_tag,
     )
     return jsonify({
         'tag': tag,
@@ -1127,6 +1131,25 @@ def cache_items() -> Response:
         'results': results,
         'has_more': has_more,
     })
+
+
+@app.route('/api/cache/tags')
+def api_cache_tags() -> Response:
+    """缓存作品（预取来源）中出现过的标签列表，供前端 datalist 提示。"""
+    try:
+        with get_session() as db:
+            rows = db.execute(text("""
+                SELECT DISTINCT j.value AS tag
+                FROM illusts, json_each(illusts.tags) AS j
+                WHERE illusts.prefetch_source = 1
+                ORDER BY tag
+                LIMIT 500
+            """)).all()
+            return jsonify([row[0] for row in rows])
+    except OperationalError:
+        # 单条损坏 tags JSON 会让 json_each 抛错：降级返回空列表
+        logger.warning('缓存标签列表查询失败（可能含损坏 tags），返回空列表')
+        return jsonify([])
 
 
 @app.route('/api/cache/items/<int:pixiv_id>/delete', methods=['POST'])

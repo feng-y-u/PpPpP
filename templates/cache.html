@@ -137,6 +137,8 @@
       <option value="date_d">最新发布</option>
       <option value="popular_d">人气（收藏数）</option>
     </select>
+    <input class="form-control form-control-sm" id="cacheFilterTag" type="text" list="cacheTagList" placeholder="按作品标签过滤..." style="max-width:180px;" autocomplete="off">
+    <datalist id="cacheTagList"></datalist>
     <button class="btn btn-primary btn-sm" id="cacheBrowseBtn">浏览</button>
     <button class="btn btn-soft btn-sm" id="cacheRefreshBtn" disabled>刷新</button>
   </div>
@@ -290,6 +292,13 @@ async function loadCacheTags() {
   } catch { $('#cacheTagSelect').innerHTML = '<option value="">加载失败</option>'; }
 }
 
+async function loadCacheTagList() {
+  try {
+    const tags = await fetch('/api/cache/tags').then(r => r.json());
+    $('#cacheTagList').innerHTML = tags.map(t => `<option value="${escAttr(t)}">`).join('');
+  } catch { /* 提示列表加载失败不影响浏览 */ }
+}
+
 function updateCacheMeta() {
   const tag = $('#cacheTagSelect').value;
   const t = cacheTags.find(x => x.tag === tag);
@@ -304,7 +313,8 @@ async function browseCache() {
   if (!tag) return;
   const minBookmarks = parseInt($('#cacheMinBookmarks').value) || 0;
   const sort = $('#cacheSortOrder').value;
-  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&offset=0`);
+  const filterTag = $('#cacheFilterTag').value.trim();
+  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&filter_tag=${encodeURIComponent(filterTag)}&offset=0`);
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     showToast(err.error || '加载失败', true);
@@ -353,6 +363,7 @@ function jumpToPage() {
 
 $('#pageJumpBtn').addEventListener('click', jumpToPage);
 $('#pageJumpInput').addEventListener('keydown', e => { if (e.key === 'Enter') jumpToPage(); });
+$('#cacheFilterTag').addEventListener('keydown', e => { if (e.key === 'Enter') browseCache(); });
 
 $('#cacheBrowseBtn').addEventListener('click', browseCache);
 $('#cacheTagSelect').addEventListener('change', () => { updateCacheMeta(); browseCache(); });
@@ -368,7 +379,8 @@ async function browseCacheWithOffset(offset) {
   const tag = $('#cacheTagSelect').value;
   const minBookmarks = parseInt($('#cacheMinBookmarks').value) || 0;
   const sort = $('#cacheSortOrder').value;
-  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&offset=${offset}`);
+  const filterTag = $('#cacheFilterTag').value.trim();
+  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&filter_tag=${encodeURIComponent(filterTag)}&offset=${offset}`);
   if (!resp.ok) { showToast('加载失败', true); return; }
   const data = await resp.json();
   currentOffset = data.offset;
@@ -398,6 +410,7 @@ $('#cacheRefreshBtn').addEventListener('click', async () => {
 });
 
 loadCacheTags();
+loadCacheTagList();
 </script>
 <footer class="site-footer">
   <a href="https://github.com/feng-y-u/PpPpP" target="_blank" style="color:inherit;text-decoration:none;">github.com/feng-y-u/PpPpP</a>

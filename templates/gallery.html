@@ -228,10 +228,13 @@
   </div>
   <div id="stats" class="small mb-3" style="display:none;"></div>
   <div id="paginationBar" style="display:none; text-align:center; padding: 1rem 0;">
-    <div style="display:flex; align-items:center; justify-content:center; gap:6px;">
+    <div style="display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap;">
       <button id="prevPageBtn" class="btn btn-sm btn-outline-secondary" disabled>上一页</button>
       <div id="pageNumbers" style="display:flex; gap:4px;"></div>
       <button id="nextPageBtn" class="btn btn-sm btn-outline-primary">下一页</button>
+      <span style="color:var(--text-muted); font-size:0.8rem;">跳至</span>
+      <input id="pageJumpInput" type="number" min="1" style="width:64px; font-size:0.8rem; padding:2px 6px;">
+      <button id="pageJumpBtn" class="btn btn-sm btn-soft">跳转</button>
     </div>
     <div id="paginationStatus" style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;"></div>
   </div>
@@ -414,14 +417,23 @@ function renderGalleryPagination() {
   if (total <= 1) { bar.style.display = 'none'; return; }
   bar.style.display = 'block';
 
+  // 页码窗口化：当前页 ±2 + 首尾页 + 省略号（作品多时避免一长串按钮）
+  const cur = galleryCurrentPage;
+  const pages = new Set([1, total]);
+  for (let p = cur - 2; p <= cur + 2; p++) {
+    if (p >= 1 && p <= total) pages.add(p);
+  }
+  const sorted = [...pages].sort((a, b) => a - b);
   let html = '';
-  for (let i = 0; i < total && i < 20; i++) {
-    const num = i + 1;
-    if (num === galleryCurrentPage) {
+  let prev = 0;
+  for (const num of sorted) {
+    if (prev && num - prev > 1) html += '<span style="padding:0 4px;color:var(--text-muted);">…</span>';
+    if (num === cur) {
       html += `<span style="padding:2px 10px;border-radius:4px;background:var(--accent);color:#fff;font-size:0.8rem;font-weight:600;">${num}</span>`;
     } else {
       html += `<button class="btn btn-sm btn-soft gallery-page-btn" data-page="${num}" style="min-width:32px;font-size:0.75rem;padding:2px 8px;">${num}</button>`;
     }
+    prev = num;
   }
   container.innerHTML = html;
 
@@ -437,6 +449,20 @@ function renderGalleryPagination() {
   $('#nextPageBtn').disabled = galleryCurrentPage >= total;
   $('#paginationStatus').textContent = `第 ${galleryCurrentPage} 页 · 共 ${total} 页`;
 }
+
+function jumpGalleryPage() {
+  const total = galleryTotalPages;
+  const p = parseInt($('#pageJumpInput').value);
+  if (!p || p < 1 || p > total) {
+    showToast(`页码需在 1-${total} 之间`, true);
+    return;
+  }
+  loadGallery(p);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+$('#pageJumpBtn').addEventListener('click', jumpGalleryPage);
+$('#pageJumpInput').addEventListener('keydown', e => { if (e.key === 'Enter') jumpGalleryPage(); });
 
 $('#prevPageBtn').addEventListener('click', () => {
   if (galleryCurrentPage > 1) loadGallery(galleryCurrentPage - 1);
