@@ -13,7 +13,7 @@ import time
 import zipfile
 import atexit
 from base64 import urlsafe_b64decode, urlsafe_b64encode
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Callable
@@ -217,7 +217,7 @@ _reset_stuck_prefetch()
 # ── ⚠ 多进程限制 ─────────────────────────────────────
 # 以下状态变量（_auto_follow_state、download_locks、
 # download_cancellations、_queued_downloads、_download_progress、
-# _bulk_tasks）存在于进程内存中。使用多个 gunicorn worker
+# _prefetch_state）存在于进程内存中。使用多个 gunicorn worker
 # （或任何多进程部署）时，每个 worker 拥有自己的副本，
 # 因此状态不在 worker 之间共享。worker A 启动的下载
 # 对 worker B 不可见。
@@ -1898,172 +1898,7 @@ def prefetch_refresh_post() -> Response:
     return jsonify({'tag': tag, 'status': 'refreshing'})
 
 
-# ── 批量下载 ──
-
-_bulk_tasks: dict[str, dict] = {}
-
-def _bulk_worker(task_id: str, tag: str, min_bookmarks: int, sort_order: str, max_pages: int, r18_mode: str = 'all') -> None:
-    task = _bulk_tasks[task_id]
-    page = 1
-    search_failed = False
-    try:
-        while page <= max_pages and not task['cancelled']:
-            task['current_page'] = page
-            task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索第 {page} 页...'))
-            try:
-                results, has_more = search_by_tag(tag, min_bookmarks, page, sort_order, 9999, 'or',
-                                                  r18_mode=r18_mode, limiter=fetcher._bulk_limiter)
-            except Exception as e:
-                task['log'].append((datetime.now(timezone.utc).isoformat(), f'搜索失败: {e}'))
-                search_failed = True
-                break
-            task['log'].append((datetime.now(timezone.utc).isoformat(), f'第 {page} 页找到 {len(results)} 件'))
-            pixiv_ids = [r['pixiv_id'] for r in results]
-            with get_session() as db:
-                existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(Illust.pixiv_id.in_(pixiv_ids)).all()}
-                for r in results:
-                    pixiv_id = r['pixiv_id']
-                    if pixiv_id in existing_ids:
-                        continue
-                    illust = Illust(
-                        pixiv_id=pixiv_id, title=r['title'], user_id=r['user_id'],
-                        user_name=r['user_name'], page_count=r['page_count'],
-                        bookmark_count=r['bookmark_count'], thumb_url=r['thumb_url'],
-                        upload_date=r['upload_date'],
-                    )
-                    illust.tags_list = r.get('tags', [])
-                    illust.original_urls_list = r.get('original_urls', [])
-                    db.add(illust)
-                safe_commit(db)
-
-            # 已完成的直接处理，剩余的提交并发下载
-            futures = {}
-            id_result_map = {}
-            for r in results:
-                if task['cancelled']:
-                    break
-                pixiv_id = r['pixiv_id']
-                id_result_map[pixiv_id] = r
-                if r.get('download_status') == 'done':
-                    task['downloaded'] += 1
-                    task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {r.get("title","")[:30]}'))
-                else:
-                    futures[download_executor.submit(_download_illust, pixiv_id)] = pixiv_id
-
-            processed_ids = []
-            for future in as_completed(futures):
-                pixiv_id = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f'批量下载失败 #{pixiv_id}: {e}')
-                processed_ids.append(pixiv_id)
-                if task['cancelled']:
-                    break
-
-            # 批量查询：一次往返获取所有已处理项目的状态
-            if processed_ids:
-                with get_session() as db:
-                    status_map = {
-                        i.pixiv_id: i.download_status
-                        for i in db.query(Illust).filter(Illust.pixiv_id.in_(processed_ids)).all()
-                    }
-                    for pixiv_id in processed_ids:
-                        r = id_result_map.get(pixiv_id)
-                        title = r.get('title', '')[:30] if r else ''
-                        st = status_map.get(pixiv_id)
-                        if st == 'done':
-                            task['downloaded'] += 1
-                            task['log'].append((datetime.now(timezone.utc).isoformat(), f'✓ #{pixiv_id} {title}'))
-                        elif st == 'downloading':
-                            # 已被其他来源（手动/自动关注等）占用：非失败，单列跳过
-                            task['skipped'] += 1
-                            task['log'].append((datetime.now(timezone.utc).isoformat(), f'… #{pixiv_id} 跳过（已在下载中）'))
-                        else:
-                            task['failed'] += 1
-                            task['log'].append((datetime.now(timezone.utc).isoformat(), f'✗ #{pixiv_id} 下载失败'))
-            if not has_more:
-                break
-            page += 1
-            time.sleep(2)
-    except Exception as e:
-        # 循环内任何未预期异常：终止任务并记录，而不是让线程静默退出
-        # （否则 task 永久卡在 running、300s 清理也永远不会注册）。
-        logger.error(f'批量任务 {task_id} 异常终止: {e}')
-        task['log'].append((datetime.now(timezone.utc).isoformat(), f'任务异常终止: {e}'))
-    finally:
-        if task['cancelled']:
-            task['status'] = 'stopped'
-        elif search_failed:
-            task['status'] = 'failed'
-        else:
-            task['status'] = 'done'
-        task['log'].append((datetime.now(timezone.utc).isoformat(),
-            f'完成: 下载 {task["downloaded"]} 件, 失败 {task["failed"]} 件, 跳过 {task["skipped"]} 件'))
-        # 5 分钟后清理任务记录，防止内存泄漏（异常路径也必须注册）
-        threading.Timer(300, lambda: _bulk_tasks.pop(task_id, None)).start()
-
-
-@app.route('/api/bulk/start', methods=['POST'])
-@_csrf_required
-def bulk_start() -> Response:
-    body = _get_json_body()
-    tag = body.get('tag', '').strip()
-    if not tag:
-        return jsonify({'error': '请输入标签'}), 400
-    min_bookmarks = max(0, _safe_int(body.get('min_bookmarks'), 0))
-    sort_order = body.get('sort', 'date_d')
-    if sort_order not in ('popular_d', 'date_d'):
-        sort_order = 'date_d'
-    r18_mode = body.get('r18_mode', 'all')
-    if r18_mode not in ('all', 'safe'):
-        r18_mode = 'all'
-    max_pages = max(1, min(100, _safe_int(body.get('max_pages'), 10)))
-    task_id = secrets.token_hex(8)
-    _bulk_tasks[task_id] = {
-        'tag': tag, 'min_bookmarks': min_bookmarks, 'sort': sort_order,
-        'max_pages': max_pages, 'current_page': 0, 'downloaded': 0, 'failed': 0,
-        'skipped': 0, 'status': 'running', 'cancelled': False, 'r18_mode': r18_mode, 'log': [],
-    }
-    _bulk_tasks[task_id]['log'].append((datetime.now(timezone.utc).isoformat(),
-        f'开始: 标签={tag}, 收藏≥{min_bookmarks}, 排序={sort_order}, 最多{max_pages}页'))
-    threading.Thread(target=_bulk_worker, args=(task_id, tag, min_bookmarks, sort_order, max_pages, r18_mode), daemon=True).start()
-    return jsonify({'task_id': task_id})
-
-
-@app.route('/api/bulk/status/<task_id>')
-def bulk_status(task_id: str) -> Response:
-    task = _bulk_tasks.get(task_id)
-    if not task:
-        return jsonify({'error': '任务不存在'}), 404
-    return jsonify({k: v for k, v in task.items() if k != 'cancelled'})
-
-
-@app.route('/api/bulk/running')
-def bulk_running() -> Response:
-    """返回当前正在运行的任务（如果有）。"""
-    for task_id, task in _bulk_tasks.items():
-        if task['status'] == 'running':
-            return jsonify({'task_id': task_id, **{k: v for k, v in task.items() if k != 'cancelled'}})
-    return jsonify({'task_id': None})
-
-
-@app.route('/api/bulk/stop/<task_id>', methods=['POST'])
-@_csrf_required
-def bulk_stop(task_id: str) -> Response:
-    task = _bulk_tasks.get(task_id)
-    if not task:
-        return jsonify({'error': '任务不存在'}), 404
-    task['cancelled'] = True
-    return jsonify({'status': 'stopping'})
-
-
 # ── 下载管理 ──
-
-@app.route('/bulk')
-def bulk_page() -> str:
-    return render_template('bulk.html', csrf_token=_get_csrf_token())
-
 
 @app.route('/downloads')
 def downloads_page() -> str:

@@ -232,10 +232,6 @@ class TestRoutes:
         resp = client.get('/downloads')
         assert resp.status_code == 200
 
-    def test_bulk_page(self, client):
-        resp = client.get('/bulk')
-        assert resp.status_code == 200
-
 
 class TestDbIsolation:
     def test_engine_uses_temp_db(self):

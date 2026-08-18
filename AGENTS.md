@@ -32,7 +32,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 | `fetcher.py` | Pixiv API 封装：Cookie/OAuth 认证、搜索、作品详情 |
 | `models.py` | SQLAlchemy ORM：Illust、BlockedTag、DownloadLog、Collection、CollectionItem |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
-| `templates/*.html` | 9 个 Jinja2 模板（搜索、图库、批量、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
+| `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（cron 磁盘清理，30 天 / 收藏 < 100） |
 | `pixiv-api-http-main/` | 内置的第三方 Node.js Pixiv API 参考实现（含 `search/no-premium.js` 等），作为接口格式对照参考，不参与运行 |
@@ -45,7 +45,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 ## 关键注意事项
 
 ### 进程与状态
-- **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_bulk_tasks`、`_search_tasks`、`_rate_limit_store`、`_prefetch_state`。多 worker 不共享。详见 `app.py:170-181` 注释。
+- **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_search_tasks`、`_rate_limit_store`、`_prefetch_state`。多 worker 不共享。详见 `app.py:170-181` 注释。
 - **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login`（`app.py:664`）和 `/api/settings/unlock`（`app.py:1976`）。
 
 ### 配置与重启
@@ -81,7 +81,6 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - **Werkzeug 请求日志被设为 WARNING** 级别以防止 Cookie 泄露到日志（`app.py:48`）。
 
 ### 下载
-- **5 分钟清理批量任务**：完成的批量任务 300 秒后从 `_bulk_tasks` 移除（`threading.Timer`，`app.py:1789`）。
 - **SSL 验证默认关闭**（`config.py` 中 `SSL_VERIFY = False`）。生产环境如已安装 CA 证书可设为 `True`。
 
 ### 目录

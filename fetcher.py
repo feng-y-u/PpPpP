@@ -325,11 +325,9 @@ class _TokenBucket:
 # 两个桶之上再设总速率闸，防止双桶并发时峰值超限重新触发 403。
 DETAIL_RATE_PER_MINUTE = 45
 FILL_RATE_PER_MINUTE = 20
-BULK_RATE_PER_MINUTE = 15
 TOTAL_RATE_PER_MINUTE = 60
 _detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
 _fill_limiter = _TokenBucket(FILL_RATE_PER_MINUTE)
-_bulk_limiter = _TokenBucket(BULK_RATE_PER_MINUTE)
 _total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
 
 # 最近一次搜索的详情拉取统计（供前端展示"为什么慢"）
@@ -555,8 +553,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             仅适用于 illust_factory 接受 detail=None 的工厂（如 _illust_from_item）。
         max_results: 收集到该数量的通过结果后提前停止拉取详情（0 = 不限制）。
             用于搜索流式过滤，凑够一页就停，避免拉取整页详情拖慢搜索。
-        limiter: 详情请求限速器；不传用前台高速桶（搜索）。批量下载应传
-            _bulk_limiter，避免大任务抢占交互搜索带宽。
+        limiter: 详情请求限速器；不传用前台高速桶（搜索）。后台任务应传
+            对应的低速桶（如 _fill_limiter），避免抢占交互搜索带宽。
 
     Returns: 可直接用于 API 响应的 illust 字典列表
     """
@@ -748,7 +746,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
     """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。
 
     max_results: 流式过滤目标数量，凑够即提前停止拉取详情（0 = 不限制）。
-    limiter: 详情请求限速器；批量下载传 _bulk_limiter 隔离带宽。
+    limiter: 详情请求限速器；不传用前台高速桶（搜索）。
     """
     if page > max_pages:
         return [], False
