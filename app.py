@@ -551,11 +551,13 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
 
     不限制 SearchCache.status（fetching/error 时也能查看已累积的缓存数据）。
     filter_tag: 按作品标签（Illust.tags）精确过滤，空串不过滤。
+    全局屏蔽标签（BlockedTag）同搜索/图库一致生效。
 
     Returns:
         (results_dicts, has_more, next_offset, filtered_total)
     """
     with get_session() as db:
+        blocked = {t.tag for t in db.query(BlockedTag).all()}
         sc = db.query(SearchCache).filter(
             SearchCache.tag == tag,
         ).first()
@@ -580,6 +582,8 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
         if illust.bookmark_count < min_bookmarks:
             continue
         if r18_mode == 'safe' and _is_r18(illust.tags_list):
+            continue
+        if blocked and (set(illust.tags_list or []) & blocked):
             continue
         if filter_tag and filter_tag not in (illust.tags_list or []):
             continue

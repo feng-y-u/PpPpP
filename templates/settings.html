@@ -100,6 +100,18 @@
   </div>
 
   <div class="card shadow-sm mb-3">
+    <div class="card-header py-2 fw-semibold small">屏蔽标签<span id="blockedCount" class="badge bg-secondary ms-2" style="display:none;"></span></div>
+    <div class="card-body">
+      <div class="d-flex gap-2 mb-2">
+        <input id="newBlockedTag" class="form-control form-control-sm" placeholder="输入要屏蔽的标签（全局生效：搜索/图库/缓存）" autocomplete="off">
+        <button id="addBlockedBtn" class="btn btn-outline-danger btn-sm" style="flex-shrink:0;">添加</button>
+      </div>
+      <div id="blockedTagList" class="d-flex flex-wrap gap-1"></div>
+      <div class="form-text mt-1">屏蔽的标签会在搜索结果、图库和预取缓存中统一过滤，全局生效</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
     <div class="card-header py-2 fw-semibold small">搜索预取</div>
     <div class="card-body">
       <div class="mb-3">
@@ -459,7 +471,54 @@ $('#confirmDeleteCollectionBtn').addEventListener('click', async function() {
   }
 });
 
+// ── 屏蔽标签（全局：搜索/图库/缓存）──
+let blockedTags = [];
+async function loadBlockedTags() {
+  try { blockedTags = await fetch('/api/blocked-tags').then(r => r.json()); renderBlockedTags(); } catch {}
+}
+function renderBlockedTags() {
+  const list = $('#blockedTagList');
+  const c = (blockedTags || []).length;
+  const cnt = $('#blockedCount');
+  cnt.style.display = c ? '' : 'none';
+  cnt.textContent = c ? `${c} 个` : '';
+  list.innerHTML = (blockedTags || []).map(t =>
+    `<span class="badge" style="background:rgba(196,74,74,.1);color:var(--danger);padding:6px 10px;font-weight:500;display:inline-flex;align-items:center;gap:6px;">${escHtml(t.tag)}
+       <span style="cursor:pointer;font-size:1rem;line-height:1;" data-tag="${escAttr(t.tag)}" title="移除屏蔽">×</span></span>`
+  ).join('');
+  list.querySelectorAll('[data-tag]').forEach(el => {
+    el.addEventListener('click', () => removeBlockedTag(el.dataset.tag));
+  });
+}
+async function addBlockedTag(tag) {
+  try {
+    const r = await fetch('/api/blocked-tags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ tag }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) { loadBlockedTags(); showToast('已屏蔽：' + tag); }
+    else showToast(d.error || '添加失败', true);
+  } catch { showToast('网络错误', true); }
+}
+async function removeBlockedTag(tag) {
+  try {
+    const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': csrfToken },
+    });
+    if (r.ok) { loadBlockedTags(); showToast('已取消屏蔽'); }
+  } catch { showToast('网络错误', true); }
+}
+$('#addBlockedBtn').addEventListener('click', () => {
+  const t = $('#newBlockedTag').value.trim();
+  if (t) { addBlockedTag(t); $('#newBlockedTag').value = ''; }
+});
+$('#newBlockedTag').addEventListener('keydown', e => { if (e.key === 'Enter') $('#addBlockedBtn').click(); });
+
 loadCollections();
+loadBlockedTags();
 </script>
 </div>
 <footer class="site-footer">

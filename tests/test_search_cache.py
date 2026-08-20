@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timezone
 
 import app
-from models import SearchCache, Illust, safe_commit
+from models import SearchCache, Illust, BlockedTag, safe_commit
 
 
 class TestQueryCachedTag:
@@ -228,6 +228,26 @@ class TestCacheTagsAPI:
         data = resp.get_json()
         assert [r['pixiv_id'] for r in data['results']] == [1, 2]
         assert data['filtered_total'] == 2
+
+    def test_cache_items_respects_global_blocked_tags(self, client, clean_db):
+        """回归：全局屏蔽标签应在缓存页生效（与搜索/图库一致）。"""
+        a = Illust(pixiv_id=1, title='a', prefetch_source=1)
+        a.tags_list = ['猫']
+        b = Illust(pixiv_id=2, title='b', prefetch_source=1)
+        b.tags_list = ['猫', 'R-18']
+        clean_db.add_all([
+            SearchCache(tag='x', illust_ids='[1, 2]', status='done'),
+            a, b,
+            BlockedTag(tag='猫'),
+        ])
+        safe_commit(clean_db)
+
+        resp = client.get('/api/cache/items?tag=x&r18=all')
+        assert resp.status_code == 200
+        data = resp.get_json()
+        # 两个作品都含被屏蔽标签'猫' → 全部被过滤
+        assert data['results'] == []
+        assert data['filtered_total'] == 0
 
 
 class TestSearchAlwaysLive:

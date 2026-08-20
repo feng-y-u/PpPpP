@@ -361,7 +361,18 @@ $('#prevBtn').addEventListener('click', () => showPage(currentPage - 1));
 $('#nextBtn').addEventListener('click', () => showPage(currentPage + 1));
 
 // ── Back button ──
-$('#backBtn').addEventListener('click', () => history.back());
+// history.back() 在移动端 WebView / 直接打开详情页（无历史栈）时不可靠：
+// 优先显式跳转来源页，来源不可知时兜底回首页
+$('#backBtn').addEventListener('click', () => {
+  const ref = document.referrer;
+  if (ref && ref.startsWith(location.origin)) {
+    location.href = ref;
+  } else if (history.length > 1) {
+    history.back();
+  } else {
+    location.href = '/';
+  }
+});
 
 document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); showPage(currentPage - 1); }

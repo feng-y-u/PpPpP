@@ -331,14 +331,6 @@
         <option value="safe">隐藏R18</option>
       </select>
       <span class="r18-notice" title="R18选项是没用的，因为我压根就没有打开账号的显示R18内容设置，嘿嘿">⚠</span>
-      <button id="toggleBlockedBtn" class="btn btn-outline-secondary btn-sm">屏蔽标签 ▾</button>
-      <span id="blockedCount" style="color:var(--text-muted);display:none;"></span>
-    </div>
-
-    <div id="blockedPanel" class="blocked-panel justify-content-center" style="display:none;">
-      <input id="newBlockedTag" class="form-control form-control-sm" placeholder="输入要屏蔽的标签..." style="max-width:180px;">
-      <button id="addBlockedBtn" class="btn btn-outline-danger btn-sm">添加</button>
-      <div id="blockedTagList" class="d-flex flex-wrap gap-1"></div>
     </div>
   </div>
 </div>
@@ -737,55 +729,17 @@ function updateSearchUI() {
   });
   $$('.filters-row label').forEach(l => l.style.display = show ? '' : 'none');
   if (!show) {
-    ['#sortOrder','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = 'none');
+    ['#sortOrder','#minBookmarks'].forEach(id => $(id).style.display = 'none');
   } else {
-    ['#sortOrder','#minBookmarks','#toggleBlockedBtn'].forEach(id => $(id).style.display = '');
+    ['#sortOrder','#minBookmarks'].forEach(id => $(id).style.display = '');
   }
 }
 $('#searchType').addEventListener('change', updateSearchUI);
-
-// ── Blocked Tags ──
-let blockedTags = [];
-async function loadBlockedTags() {
-  try { blockedTags = await fetch('/api/blocked-tags').then(r => r.json()); renderBlockedTags(); } catch {}
-}
-function renderBlockedTags() {
-  const list = $('#blockedTagList');
-  list.innerHTML = blockedTags.map(t =>
-    `<span class="badge bg-danger" style="font-size:0.7rem;">${escHtml(t)} <span data-untag="${escAttr(t)}" style="cursor:pointer;opacity:.6;">&times;</span></span>`
-  ).join('');
-  list.querySelectorAll('[data-untag]').forEach(el => el.addEventListener('click', () => removeBlockedTag(el.dataset.untag)));
-  const c = blockedTags.length;
-  $('#blockedCount').style.display = c ? '' : 'none';
-  $('#blockedCount').textContent = c ? `${c} 个已屏蔽` : '';
-}
-async function addBlockedTag(tag) {
-  const r = await fetch('/api/blocked-tags', { method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}, body:JSON.stringify({tag}) });
-  if (r.ok) { blockedTags.push(tag); renderBlockedTags(); refreshCurrentSearch(); }
-  else if (r.status !== 409) showToast(((await r.json().catch(()=>({}))).error) || '添加失败');
-}
-async function removeBlockedTag(tag) {
-  const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, { method:'DELETE', headers:{'X-CSRF-Token':csrfToken} });
-  if (r.ok) { blockedTags = blockedTags.filter(t => t !== tag); renderBlockedTags(); refreshCurrentSearch(); }
-}
-function refreshCurrentSearch() { doSearch(); }
 
 $('#r18Mode').addEventListener('change', () => {
   sessionStorage.setItem(R18_STATE_KEY, $('#r18Mode').value);
   doSearch();
 });
-
-$('#toggleBlockedBtn').addEventListener('click', () => {
-  const p = $('#blockedPanel');
-  const s = p.style.display === 'none';
-  p.style.display = s ? 'flex' : 'none';
-  $('#toggleBlockedBtn').textContent = s ? '屏蔽标签 ▴' : '屏蔽标签 ▾';
-});
-$('#addBlockedBtn').addEventListener('click', () => {
-  const t = $('#newBlockedTag').value.trim();
-  if (t) { addBlockedTag(t); $('#newBlockedTag').value = ''; }
-});
-$('#newBlockedTag').addEventListener('keydown', e => { if (e.key==='Enter') $('#addBlockedBtn').click(); });
 
 // ── Render Card ──
 function renderCard(r) {
@@ -943,7 +897,6 @@ function loadR18Mode() {
 }
 
 // ── Init ──
-loadBlockedTags();
 loadR18Mode();
 
 $('#searchBtn').addEventListener('click', () => doSearch());
