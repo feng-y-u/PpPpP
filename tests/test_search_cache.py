@@ -204,6 +204,31 @@ class TestCacheTagsAPI:
         assert [r['pixiv_id'] for r in data['results']] == [1]
         assert data['filtered_total'] == 1
 
+    def test_cache_items_r18_default_safe(self, client, clean_db):
+        """回归：缓存页默认不含 R18（r18 参数缺省 = safe）。"""
+        r18_illust = Illust(pixiv_id=1, title='r', prefetch_source=1)
+        r18_illust.tags_list = ['R-18', 'original']
+        safe_illust = Illust(pixiv_id=2, title='s', prefetch_source=1)
+        safe_illust.tags_list = ['original']
+        clean_db.add_all([
+            SearchCache(tag='x', illust_ids='[1, 2]', status='done'),
+            r18_illust, safe_illust,
+        ])
+        safe_commit(clean_db)
+
+        resp = client.get('/api/cache/items?tag=x')
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert [r['pixiv_id'] for r in data['results']] == [2]
+        assert data['filtered_total'] == 1
+
+        # 显式 r18=all 时包含 R18
+        resp = client.get('/api/cache/items?tag=x&r18=all')
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert [r['pixiv_id'] for r in data['results']] == [1, 2]
+        assert data['filtered_total'] == 2
+
 
 class TestSearchAlwaysLive:
     def test_search_route_always_live_even_for_cached_tag(self, clean_db, client, monkeypatch):

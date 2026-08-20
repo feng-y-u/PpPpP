@@ -1108,6 +1108,11 @@ def cache_items() -> Response:
     offset = max(0, _safe_int(request.args.get('offset'), 0))
     filter_tag = request.args.get('filter_tag', '').strip()
 
+    # R18 过滤：默认 safe（不含 R18）；显式 r18=all 才包含
+    r18_mode = request.args.get('r18', 'safe')
+    if r18_mode not in ('all', 'safe'):
+        r18_mode = 'safe'
+
     with get_session() as db:
         sc = db.query(SearchCache).filter(SearchCache.tag == tag).first()
         if not sc:
@@ -1117,7 +1122,7 @@ def cache_items() -> Response:
         sc_total = sc.total
 
     results, has_more, _next, filtered_total = query_cached_tag(
-        tag, min_bookmarks, sort_order, 'or', 'all',
+        tag, min_bookmarks, sort_order, 'or', r18_mode,
         offset=offset, limit=ITEMS_PER_PAGE, filter_tag=filter_tag,
     )
     return jsonify({

@@ -137,6 +137,10 @@
       <option value="date_d">最新发布</option>
       <option value="popular_d">人气（收藏数）</option>
     </select>
+    <select class="form-select form-select-sm" id="cacheR18" style="max-width:120px;">
+      <option value="safe">不含R18</option>
+      <option value="all">包含R18</option>
+    </select>
     <input class="form-control form-control-sm" id="cacheFilterTag" type="text" list="cacheTagList" placeholder="按作品标签过滤..." style="max-width:180px;" autocomplete="off">
     <datalist id="cacheTagList"></datalist>
     <button class="btn btn-primary btn-sm" id="cacheBrowseBtn">浏览</button>
@@ -313,8 +317,9 @@ async function browseCache() {
   if (!tag) return;
   const minBookmarks = parseInt($('#cacheMinBookmarks').value) || 0;
   const sort = $('#cacheSortOrder').value;
+  const r18 = $('#cacheR18').value;
   const filterTag = $('#cacheFilterTag').value.trim();
-  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&filter_tag=${encodeURIComponent(filterTag)}&offset=0`);
+  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&r18=${r18}&filter_tag=${encodeURIComponent(filterTag)}&offset=0`);
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     showToast(err.error || '加载失败', true);
@@ -379,8 +384,9 @@ async function browseCacheWithOffset(offset) {
   const tag = $('#cacheTagSelect').value;
   const minBookmarks = parseInt($('#cacheMinBookmarks').value) || 0;
   const sort = $('#cacheSortOrder').value;
+  const r18 = $('#cacheR18').value;
   const filterTag = $('#cacheFilterTag').value.trim();
-  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&filter_tag=${encodeURIComponent(filterTag)}&offset=${offset}`);
+  const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&r18=${r18}&filter_tag=${encodeURIComponent(filterTag)}&offset=${offset}`);
   if (!resp.ok) { showToast('加载失败', true); return; }
   const data = await resp.json();
   currentOffset = data.offset;
