@@ -158,3 +158,11 @@ def test_pytest_configuration_declares_defaults_and_integration_marker():
     assert "testpaths = tests" in pytest_ini
     assert "addopts = -ra" in pytest_ini
     assert "integration" in pytest_ini
+
+
+def test_live_pixiv_fixture_is_opt_in_and_skips_without_cookie():
+    conftest = (PROJECT_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+
+    assert "def live_pixiv_required" in conftest
+    assert "pytest.skip" in conftest
+    assert "config.COOKIE_PATH" in conftest

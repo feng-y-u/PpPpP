@@ -15,8 +15,11 @@ python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
 # 开发
 flask run --debug
 
-# 测试（需要有效的 cookies.txt 才能通过集成测试）
-pytest -v
+# 默认测试（离线，不要求真实 Pixiv Cookie）
+powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
+
+# 未来的真实 Pixiv 集成测试（必须显式标记 integration，并使用 live_pixiv_required fixture）
+powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -m integration
 
 # 生产部署（必须 -w 1 — 见下）
 gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
@@ -94,7 +97,8 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - 测试文件：`tests/test_app.py`（路由/API/CSRF）、`tests/test_auth.py`（认证）、`tests/test_models.py`（模型）、`tests/test_fetcher.py`（Pixiv API 封装）、`tests/test_prefetch.py`（预取引擎/容量清理）、`tests/test_search_cache.py`（库内缓存查询）、`tests/test_prefetch_api.py`（预取管理 API）、`tests/test_cache_page.py`（缓存浏览 API/页面）
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件并设 `AUTO_FOLLOW_INTERVAL=0`（事后覆盖无效，会连到生产库）
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）
-- 需要有效 `cookies.txt` 才能通过集成测试（涉及真实 Pixiv API 调用的测试）
+- 当前默认测试通过 mock/monkeypatch 隔离网络，不需要有效 `cookies.txt`。
+- 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时测试会 skip。
 - `clean_db` fixture 在每次测试前清空所有表
 
 ---
