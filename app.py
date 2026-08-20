@@ -1646,7 +1646,6 @@ def api_gallery() -> Response:
         illusts.sort(key=lambda x: id_order.get(x.id, 0))
 
         results = []
-        seen_pids = set()
         fill_ids: list[int] = []
         for i in illusts:
             paths = local_items.get(i.pixiv_id) or i.local_paths_list or []
@@ -1658,17 +1657,19 @@ def api_gallery() -> Response:
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
-            seen_pids.add(i.pixiv_id)
             if i.bookmark_count == 0 and not i.original_urls_list:
                 fill_ids.append(i.pixiv_id)
 
         if fill_ids:
             fetcher._kick_background_fill(fill_ids)
 
-        # 补充不在 DB 的本地文件（收藏夹/收藏筛选时不补孤儿，因其不在任何收藏夹中）
+        # 补充真正不在 DB 的本地文件（孤儿：磁盘有文件但 DB 无记录）。
+        # 注意：必须排除【全部】DB 记录而非仅当前页（seen_pids）——否则其他页
+        # 或未通过过滤条件的 DB 作品会被误判为孤儿，生成"只有作品号"的简陋卡片，
+        # 与正常卡片重复展示（同一作品两张卡片），且 total 被重复计算。
         if not collection_id and not favorites_only:
-            local_pid_set = set(local_pids)
-            orphan_pids = sorted(local_pid_set - seen_pids, reverse=True)
+            db_pid_set = {r[0] for r in db.query(Illust.pixiv_id).all()}
+            orphan_pids = sorted(set(local_pids) - db_pid_set, reverse=True)
             orphan_results = _build_orphan_dicts(orphan_pids, local_items)
             total += len(orphan_results)
             results.extend(orphan_results[:max(0, limit - len(results))])
