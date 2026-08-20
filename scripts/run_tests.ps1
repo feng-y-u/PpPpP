@@ -15,18 +15,47 @@
 # 用法：scripts\run_tests.ps1 [pytest 参数…]   （等价 pytest，可传文件/用例名）
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$work = $env:PIXIV_TEST_TMP
-if ([string]::IsNullOrWhiteSpace($work)) {
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        $work = Join-Path $env:TEMP 'pixiv-viewer-test-tmp'
-    } else {
-        $work = Join-Path $env:LOCALAPPDATA 'pixiv-viewer-test-tmp'
+function Resolve-PixivTestTempRoot {
+    $work = $env:PIXIV_TEST_TMP
+    if ([string]::IsNullOrWhiteSpace($work)) {
+        $parent = $env:LOCALAPPDATA
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            $parent = $env:TEMP
+        }
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            $parent = $env:TMP
+        }
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            $parent = [IO.Path]::GetTempPath()
+        }
+        if ([string]::IsNullOrWhiteSpace($parent)) {
+            throw 'Unable to determine a temporary directory: PIXIV_TEST_TMP, LOCALAPPDATA, TEMP, TMP, and [IO.Path]::GetTempPath() are empty.'
+        }
+        $work = Join-Path $parent 'pixiv-viewer-test-tmp'
     }
+    return $work
 }
-New-Item -ItemType Directory -Force -Path $work | Out-Null
-$run = Join-Path $work ('run-{0}-{1}' -f $PID, [DateTime]::Now.ToString('yyyyMMddHHmmss'))
-$env:TEMP = $work
-$env:TMP = $work
-$py = Join-Path $root 'venv\Scripts\python.exe'
-& $py -m pytest "--basetemp=$run" @args
-exit $LASTEXITCODE
+
+function Get-PixivPytestArguments {
+    param(
+        [Parameter(Mandatory)] [string] $BaseTemp,
+        [Parameter(ValueFromRemainingArguments)] [string[]] $PytestArgs
+    )
+    return @('-m', 'pytest', "--basetemp=$BaseTemp") + $PytestArgs
+}
+
+function New-PixivTestRunDirectory {
+    param([Parameter(Mandatory)] [string] $Root)
+    return Join-Path $Root ('run-{0}-{1}' -f $PID, [Guid]::NewGuid().ToString('N'))
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    $work = Resolve-PixivTestTempRoot
+    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $run = New-PixivTestRunDirectory -Root $work
+    $env:TEMP = $work
+    $env:TMP = $work
+    $py = Join-Path $root 'venv\Scripts\python.exe'
+    & $py (Get-PixivPytestArguments -BaseTemp $run -PytestArgs $args)
+    exit $LASTEXITCODE
+}
