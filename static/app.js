@@ -162,3 +162,15 @@ function resetDlBtn(pixivId) {
 function downloadFile(pixivId) {
   window.open(`/download_file/${pixivId}`, '_blank');
 }
+
+// ── 全局兜底 ──
+// CSP script-src 'self' 会禁用内联 onclick/onerror 属性，这里统一用事件绑定替代。
+// 移动端导航切换（模板 nav-toggle 不再用内联 onclick）
+document.querySelector('.nav-toggle')?.addEventListener('click', function () {
+  this.nextElementSibling.classList.toggle('open');
+});
+// 任意 <img> 加载失败时自动隐藏（capture 阶段捕获，替代各处内联 onerror）
+document.addEventListener('error', function (e) {
+  const t = e.target;
+  if (t && t.tagName === 'IMG') t.style.display = 'none';
+}, true);

@@ -31,7 +31,7 @@ function renderActive(items) {
   container.innerHTML = items.map(i => `
     <div class="dl-item">
       <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
-           onerror="this.style.display='none'" loading="lazy">
+           loading="lazy">
       <div class="dl-info">
         <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
         <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P${progressText(i)}</div>
@@ -90,7 +90,7 @@ function renderQueued(items) {
   container.innerHTML = items.map(i => `
     <div class="dl-item">
       <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
-           onerror="this.style.display='none'" loading="lazy">
+           loading="lazy">
       <div class="dl-info">
         <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
         <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)} · ${i.page_count}P · 等待中</div>
@@ -132,7 +132,7 @@ function renderCompleted(items) {
   container.innerHTML = items.map(i => `
     <div class="dl-item">
       <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
-           onerror="this.style.display='none'" loading="lazy">
+           loading="lazy">
       <div class="dl-info">
         <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title || '#' + i.pixiv_id)}</div>
         <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)}</div>

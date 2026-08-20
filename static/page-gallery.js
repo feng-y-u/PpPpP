@@ -238,7 +238,7 @@ function renderCard(r) {
       <div class="card-img-wrap">
         <input type="checkbox" class="card-checkbox" data-pid="${r.pixiv_id}">
         <button class="card-fav-btn${r.is_favorite ? ' favorited' : ''}" data-pid="${r.pixiv_id}" title="${r.is_favorite ? '取消收藏' : '收藏'}">${r.is_favorite ? '❤' : '♡'}</button>
-        <img src="${thumbUrl}" loading="lazy" onerror="this.style.display='none'">
+        <img src="${thumbUrl}" loading="lazy" >
         <span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
       <div class="card-body">

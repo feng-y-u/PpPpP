@@ -38,14 +38,17 @@ $('#prevBtn').addEventListener('click', () => showPage(currentPage - 1));
 $('#nextBtn').addEventListener('click', () => showPage(currentPage + 1));
 
 // ── Back button ──
-// history.back() 在移动端 WebView / 直接打开详情页（无历史栈）时不可靠：
-// 优先显式跳转来源页，来源不可知时兜底回首页
+// 优先 history.back()：从图库/搜索等站内页进入时会保留来源页状态
+//（前端缓存、当前页、滚动位置）。仅当无历史栈可回退（如外部直接打开
+// 详情页）时才用 referrer 显式跳转，最后兜底回首页。
 $('#backBtn').addEventListener('click', () => {
+  if (history.length > 1) {
+    history.back();
+    return;
+  }
   const ref = document.referrer;
   if (ref && ref.startsWith(location.origin)) {
     location.href = ref;
-  } else if (history.length > 1) {
-    history.back();
   } else {
     location.href = '/';
   }

@@ -176,7 +176,7 @@
       <span class="navbar-brand-dot"></span>
       PpPpP
     </a>
-    <button class="nav-toggle" aria-label="菜单" onclick="this.nextElementSibling.classList.toggle('open')">☰</button>
+    <button class="nav-toggle" aria-label="菜单" >☰</button>
     <div class="navbar-links">
       <a class="navbar-link" href="/">搜索</a>
       <a class="navbar-link" href="/gallery">图库</a>
@@ -278,7 +278,7 @@
     <div class="related-grid" id="relatedGrid">
       {% for r in related[:4] %}
       <a class="related-item" href="/detail/{{ r.pixiv_id }}">
-        <img src="{{ proxy_thumb(r.thumb_url) }}" loading="lazy" onerror="this.style.display='none'" alt="">
+        <img src="{{ proxy_thumb(r.thumb_url) }}" loading="lazy"  alt="">
         <div class="related-overlay">
           <div class="related-overlay-title">{{ r.title }}</div>
           <div class="related-overlay-artist">{{ r.user_name }}</div>
