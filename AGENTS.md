@@ -75,7 +75,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - **搜索预取缓存**：手动在设置页配置预取标签，后台线程按 interval 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）定时预取并写入 `Illust` + `SearchCache` 表。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果通过独立 `/cache` 页面浏览（`GET /api/cache/items`，库内按收藏数/排序过滤分页，`query_cached_tag`）。`popular_d` 排序为 `bookmark_count` 降序的库内近似。
 
 ### 数据库
-- **没有迁移系统**：启动时 `SQLAlchemy create_all()` + `init_db()` 中的手动 `ALTER TABLE` 逻辑（`models.py:240`）负责全部 schema 变更。当前会补加 `file_size`、`downloaded_at`、`bookmark_updated_at`、`prefetch_source`（预取来源标记）列与 `collection_items.position`（拖拽排序），通过 `PRAGMA user_version` 一次性回填 position 初值，并新增 `SearchCache` 表（tag→illust_ids 映射，预取缓存）。**`description` 列已彻底移除**（模型、`to_dict`、fetcher、模板均不再有，init_db 会 DROP）。**`is_favorite` / `favorited_at` 列已废弃，init_db 会将其 DROP**。SQLite < 3.35 时用 `_rebuild_illusts_table`（`models.py:213`）建表重建，保留 PK/UNIQUE/NOT NULL。其他 schema 变更需手动添加类似逻辑。
+- **轻量迁移系统**：启动时 `SQLAlchemy create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行 `migrations/versions.py` 中的版本函数。当前会补加 `file_size`、`downloaded_at`、`bookmark_updated_at`、`prefetch_source`（预取来源标记）列与 `collection_items.position`（拖拽排序），并一次性回填 position 初值；`SearchCache` 表（tag→illust_ids 映射，预取缓存）由 metadata 创建。**`description` 列已彻底移除**（模型、`to_dict`、fetcher、模板均不再有，迁移会 DROP）。**`is_favorite` / `favorited_at` 列已废弃，迁移会将其 DROP**。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。新增 schema 变更必须追加新版本，不得修改已发布版本。
 - **写入必须用 `safe_commit()`**（`models.py:32`）而不是直接 `db.commit()`：它带重试处理 `database is locked`。
 - **获取 session 用 `get_session()`**（`models.py:324`），不要直接创建 `Session(engine)`，除非在 `init_db()` 等启动逻辑中。
 - **启动时重置卡死下载**：模块导入时 `_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件（`app.py:143`）。
