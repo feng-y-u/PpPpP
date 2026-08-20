@@ -166,3 +166,18 @@ def test_live_pixiv_fixture_is_opt_in_and_skips_without_cookie():
     assert "def live_pixiv_required" in conftest
     assert "pytest.skip" in conftest
     assert "config.COOKIE_PATH" in conftest
+
+
+def test_dependency_files_separate_runtime_development_and_locking():
+    runtime = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    development = (PROJECT_ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    locked = (PROJECT_ROOT / "requirements-lock.txt").read_text(encoding="utf-8-sig")
+
+    assert "pytest" not in runtime.lower()
+    assert "Flask>=3.1,<3.2" in runtime
+    assert "SQLAlchemy>=2.0,<2.1" in runtime
+    assert "-r requirements.txt" in development
+    assert "pytest>=8,<10" in development
+    assert "Flask==" in locked
+    assert "SQLAlchemy==" in locked
+    assert "requests==" in locked

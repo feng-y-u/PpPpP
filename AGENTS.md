@@ -9,8 +9,11 @@ Flask Web 应用，通过 Pixiv 内部 Ajax API（非官方）搜索/浏览/下�
 ## 命令
 
 ```bash
-# 初始化
-python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
+# 初始化开发环境
+python -m venv venv && venv\Scripts\activate && pip install -r requirements-dev.txt
+
+# 可复现部署（使用已验证的精确版本）
+pip install -r requirements-lock.txt
 
 # 开发
 flask run --debug
