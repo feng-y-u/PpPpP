@@ -220,3 +220,54 @@ input[type="number"] { -moz-appearance: textfield; }
   .search-bar-wrap { padding: 16px 12px; }
   .btn-search { margin-top: 6px; width: 100%; }
 }
+
+/* ── Mobile 增强（触控目标 ≥44px / 工具栏换行 / 防 iOS 缩放）── */
+@media (max-width: 640px) {
+  /* 触控目标：按钮/输入框不小于 40px 高 */
+  .btn { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+  .btn-sm { min-height: 36px; padding: 0.2rem 0.6rem; }
+  .form-control, .form-select { min-height: 40px; font-size: 16px; } /* 16px 防止 iOS 聚焦自动缩放 */
+  input[type="checkbox"] { width: 20px; height: 20px; }
+  .card-checkbox { width: 22px; height: 22px; }
+  .card-fav-btn { width: 36px; height: 36px; font-size: 1rem; }
+
+  /* 页头工具栏：换行 + 控件自适应占满 */
+  .toolbar-actions { width: 100%; margin-left: 0 !important; flex-wrap: wrap; }
+  .filters-row { gap: 0.4rem; }
+  .filters-row select, .filters-row input, .filters-row .form-select, .filters-row .form-control { font-size: 16px; min-height: 40px; width: auto; }
+  .tag-filter-wrap { flex-wrap: wrap; }
+  .tag-filter-input { flex: 1 1 auto; min-width: 0; }
+
+  /* 缓存页筛选控件占满整行 */
+  #cacheMinBookmarks, #cacheSortOrder, #cacheR18, #cacheFilterTag, #cacheTagSelect { flex: 1 1 auto; min-width: 0; }
+  #cacheBrowseBtn { flex: 1 1 100%; margin-top: 4px; }
+
+  /* 分页：换行 + 按钮加高 */
+  #paginationBar > div { flex-wrap: wrap; }
+  #paginationBar .btn { min-height: 36px; }
+  #pageJumpInput { height: 36px; font-size: 16px; }
+
+  /* 批量操作条：全宽贴底 + safe-area */
+  .batch-float-bar {
+    left: 8px; right: 8px; transform: none;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    flex-wrap: wrap; justify-content: center;
+    padding: 8px 10px;
+  }
+  .batch-float-bar .batch-collection-select { max-width: 140px; }
+
+  /* 详情页：图片区域更高、信息区 padding 加大 */
+  .image-area { min-height: 45vh; }
+  .info-area { padding: 16px 14px; }
+
+  /* 收藏夹选择弹窗：紧凑 */
+  .collection-check-item { padding: 10px 4px; }
+}
+
+@media (max-width: 480px) {
+  .card-title { font-size: 0.8rem; }
+  .card-info { font-size: 0.68rem; }
+  .photo-card-title { font-size: 0.75rem; }
+  .photo-card-artist { font-size: 0.68rem; }
+  .navbar-brand { font-size: 0.9rem; }
+}

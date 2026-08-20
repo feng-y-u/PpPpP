@@ -204,7 +204,7 @@
 <div class="container mt-3">
   <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
     <h5 class="mb-0" id="pageTitle">已下载作品</h5>
-    <div class="d-flex gap-1 ms-auto">
+    <div class="d-flex gap-1 ms-auto toolbar-actions">
       <select id="sortSelect" class="form-select form-select-sm" style="width:auto;">
         <option value="created">按收录时间</option>
         <option value="downloaded">按下载时间</option>
@@ -514,7 +514,7 @@ function renderCard(r) {
   const thumbUrl = proxyThumb(r.thumb_url);
 
   const col = document.createElement('div');
-  col.className = 'col-lg-3 col-md-4 col-sm-6 col-12 mb-3';
+  col.className = 'col-lg-3 col-md-4 col-sm-6 col-6 mb-3';
   col.innerHTML = `
     <div class="gallery-card" data-pid="${r.pixiv_id}" style="cursor:pointer;">
       <div class="card-img-wrap">
