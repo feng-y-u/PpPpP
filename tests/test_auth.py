@@ -146,7 +146,10 @@ class TestSecurityHeaders:
         assert resp.headers['X-Content-Type-Options'] == 'nosniff'
         assert resp.headers['X-Frame-Options'] == 'DENY'
         assert resp.headers['Referrer-Policy'] == 'no-referrer'
-        assert "script-src 'self' 'unsafe-inline'" in resp.headers['Content-Security-Policy']
+        # 脚本已全部抽离到 static/，script-src 收紧为 'self'（不含 unsafe-inline）
+        csp = resp.headers['Content-Security-Policy']
+        assert "script-src 'self';" in csp
+        assert "'unsafe-inline'" not in csp.split('script-src')[1].split(';')[0]
 
     def test_csp_allows_self_and_data_images(self, client):
         resp = client.get('/')

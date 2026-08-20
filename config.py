@@ -96,30 +96,35 @@ COOKIE_SECURE = os.environ.get('COOKIE_SECURE', 'true').lower() != 'false'
 # settings.json 必须在模块首次被 import 前存在。import 之后修改
 # settings.json 需要重启进程才能生效。
 # 未来可改为 Config 类延迟加载，消除 import 时副作用。
+
+# 统一设置键定义：settings.json 键 → (生效常量名, 默认值)。
+# config.py（import 时覆盖常量）与 app.py（设置页白名单/默认值）
+# 共用这一份，新增/改名设置键只改这里，避免两处失步。
+SETTINGS_KEYS: dict[str, tuple[str, object]] = {
+    'proxy': ('PROXY', ''),
+    'settings_password': ('SETTINGS_PASSWORD', ''),
+    'access_password': ('ACCESS_PASSWORD', ''),
+    'cookie_secure': ('COOKIE_SECURE', True),
+    'download_max_workers': ('DOWNLOAD_MAX_WORKERS', 2),
+    'per_page': ('PER_PAGE', 60),
+    'search_pages': ('SEARCH_PAGES', 10),
+    'max_bookmarks_default': ('MAX_BOOKMARKS_DEFAULT', 0),
+    'auto_follow_interval': ('AUTO_FOLLOW_INTERVAL', 600),
+    'auto_follow_download': ('AUTO_FOLLOW_DOWNLOAD', False),
+    'fetch_detail_workers': ('FETCH_DETAIL_WORKERS', 5),
+    'medium_image_size': ('MEDIUM_IMAGE_SIZE', 600),
+    'items_per_page': ('ITEMS_PER_PAGE', 24),
+    'prefetch_interval': ('PREFETCH_INTERVAL', 3600),
+    'prefetch_pages': ('PREFETCH_PAGES', 3),
+    'prefetch_max_illusts': ('PREFETCH_MAX_ILLUSTS', 10000),
+}
+
 _settings_path = os.path.join(BASE_DIR, 'instance', 'settings.json')
 if os.path.exists(_settings_path):
     try:
         with open(_settings_path, 'r', encoding='utf-8') as _f:
             _overrides = json.load(_f)
-        _key_map = {
-            'proxy': 'PROXY',
-            'settings_password': 'SETTINGS_PASSWORD',
-            'access_password': 'ACCESS_PASSWORD',
-            'cookie_secure': 'COOKIE_SECURE',
-            'download_max_workers': 'DOWNLOAD_MAX_WORKERS',
-            'per_page': 'PER_PAGE',
-            'search_pages': 'SEARCH_PAGES',
-            'max_bookmarks_default': 'MAX_BOOKMARKS_DEFAULT',
-            'auto_follow_interval': 'AUTO_FOLLOW_INTERVAL',
-            'auto_follow_download': 'AUTO_FOLLOW_DOWNLOAD',
-            'fetch_detail_workers': 'FETCH_DETAIL_WORKERS',
-            'medium_image_size': 'MEDIUM_IMAGE_SIZE',
-            'items_per_page': 'ITEMS_PER_PAGE',
-            'prefetch_interval': 'PREFETCH_INTERVAL',
-            'prefetch_pages': 'PREFETCH_PAGES',
-            'prefetch_max_illusts': 'PREFETCH_MAX_ILLUSTS',
-        }
-        for _json_key, _const_name in _key_map.items():
+        for _json_key, (_const_name, _default) in SETTINGS_KEYS.items():
             if _json_key in _overrides and _overrides[_json_key] != '':
                 _val = _overrides[_json_key]
                 if _json_key == 'cookie_secure':

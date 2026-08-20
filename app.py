@@ -36,6 +36,7 @@ from config import (
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
     ITEMS_PER_PAGE,
 )
+import config as config_module
 from models import init_db, get_session, get_favorite_pids, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
 import fetcher
 from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, _is_r18, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
@@ -857,10 +858,10 @@ def _security_headers(resp: Response) -> Response:
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['Referrer-Policy'] = 'no-referrer'
-    # 宽松版 CSP：模板仍含大量内联 script（未抽离到 static/ 前不能收紧
-    # script-src 为 'self'，否则所有页面脚本失效）；其余指令做纵深加固。
+    # CSP：脚本已全部抽离到 static/，script-src 收紧为 'self'；
+    # style 仍允许 unsafe-inline（模板大量 style 属性），img 放行 data:
     resp.headers['Content-Security-Policy'] = (
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "default-src 'self'; script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )
@@ -2012,20 +2013,11 @@ def remove_blocked_tag(tag: str) -> Response:
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'settings.json')
 
+# 设置页可编辑键与默认值：由 config.SETTINGS_KEYS（唯一来源）派生，
+# 排除密码类与 cookie_secure（这些只通过 settings.json/环境变量管理）。
 _SETTINGS_DEFAULTS = {
-    'proxy': '',
-    'download_max_workers': 2,
-    'per_page': 60,
-    'search_pages': 10,
-    'max_bookmarks_default': 0,
-    'auto_follow_interval': 600,
-    'auto_follow_download': False,
-    'fetch_detail_workers': 2,
-    'medium_image_size': 600,
-    'items_per_page': 24,
-    'prefetch_interval': 3600,
-    'prefetch_pages': 3,
-    'prefetch_max_illusts': 10000,
+    k: v for k, (_, v) in config_module.SETTINGS_KEYS.items()
+    if not k.endswith('_password') and k != 'cookie_secure'
 }
 
 

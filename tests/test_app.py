@@ -222,7 +222,8 @@ class TestRoutes:
     def test_gallery_page(self, client):
         resp = client.get('/gallery')
         assert resp.status_code == 200
-        assert b'pvCache' in resp.data or b'loadGallery' in resp.data
+        # 页面逻辑已抽离到静态 JS，验证外部脚本被正确引用
+        assert b'page-gallery.js' in resp.data
 
     def test_settings_page(self, client):
         resp = client.get('/settings')
