@@ -1,13 +1,40 @@
 import pytest
 from sqlalchemy import create_engine
 
-from migrations.runner import run_migrations
+from migrations.runner import backup_database, run_migrations
 from migrations.versions import LATEST_SCHEMA_VERSION, MIGRATIONS
 
 
 def _user_version(engine):
     with engine.connect() as conn:
         return conn.exec_driver_sql("PRAGMA user_version").scalar()
+
+
+def test_backup_database_copies_existing_database_with_unique_timestamp(tmp_path):
+    database = tmp_path / "pixiv.db"
+    database.write_bytes(b"sqlite backup")
+
+    first = backup_database(database, tmp_path / "backups")
+    second = backup_database(database, tmp_path / "backups")
+
+    assert first != second
+    assert first.parent == tmp_path / "backups"
+    assert first.read_bytes() == database.read_bytes()
+    assert second.read_bytes() == database.read_bytes()
+
+
+def test_runner_backs_up_file_database_only_when_versions_are_pending(tmp_path):
+    database = tmp_path / "pixiv.db"
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE existing (id INTEGER PRIMARY KEY)")
+
+    run_migrations(engine, ((1, lambda conn: None),))
+    backup_dir = tmp_path / "backups"
+    assert len(list(backup_dir.iterdir())) == 1
+
+    run_migrations(engine, ((1, lambda conn: None),))
+    assert len(list(backup_dir.iterdir())) == 1
 
 
 def test_runner_applies_pending_versions_once_in_order():
