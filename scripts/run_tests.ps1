@@ -9,6 +9,10 @@
 # TEMP/TMP 指到 .pytest-tmp 本身（conftest.py 的测试数据库落在其中，由测试
 # 自身清理），全程只接触当前令牌创建/可访问的目录，规避遗留目录。
 #
+# 沙箱的第二个坑：os.mkdir(path, mode=0o700) 生成的目录会带上"仅属主"ACL，
+# 进程自身反而无法枚举（WinError 5）。借 pytest 插件 sandbox_pytest_shim
+# 剥掉 mode；该插件只在检测到沙箱时加载，conftest.py 保持干净。
+#
 # 注意：TEMP 不能指向 basetemp 本身——pytest 在会话结束删除 basetemp 时
 # 早于 session 级 fixture 的 teardown，会撞上仍被 SQLite 占用的测试库文件
 # （WinError 32）。
@@ -19,8 +23,23 @@ $root = Split-Path -Parent $PSScriptRoot
 $work = Join-Path $root '.pytest-tmp'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $run = Join-Path $work ('run-{0}-{1}' -f $PID, [DateTime]::Now.ToString('yyyyMMddHHmmss'))
+
+# 探测 DSH 沙箱：沙箱把本进程 TEMP 设为 ...\Temp\dsh-<token>（须在覆盖 TEMP 前判断）；
+# 命中后置 PIXIV_DSH_SANDBOX 标记并加载沙箱插件（TEMP 随后被覆盖，插件不能靠 TEMP 判断）
+$isDshSandbox = $env:TEMP -match '\\dsh-[^\\]+$'
+$pluginArgs = @()
+if ($isDshSandbox) {
+    $env:PIXIV_DSH_SANDBOX = '1'
+    if ($env:PYTHONPATH) {
+        $env:PYTHONPATH = $root + '\scripts;' + $env:PYTHONPATH
+    } else {
+        $env:PYTHONPATH = Join-Path $root 'scripts'
+    }
+    $pluginArgs = @('-p', 'sandbox_pytest_shim')
+}
+
 $env:TEMP = $work
 $env:TMP = $work
 $py = Join-Path $root 'venv\Scripts\python.exe'
-& $py -m pytest "--basetemp=$run" @args
+& $py -m pytest $pluginArgs "--basetemp=$run" @args
 exit $LASTEXITCODE
