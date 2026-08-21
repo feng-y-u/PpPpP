@@ -19,6 +19,13 @@ import pytest
 from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Collection, CollectionItem, SearchCache
 
 
+@pytest.fixture
+def live_pixiv_required():
+    """Skip opt-in live Pixiv tests when credentials are not configured."""
+    if not os.path.exists(config.COOKIE_PATH):
+        pytest.skip(f'live Pixiv test requires {config.COOKIE_PATH}')
+
+
 @pytest.fixture(scope='session')
 def app():
     from app import app as flask_app
