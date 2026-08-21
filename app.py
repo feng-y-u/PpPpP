@@ -1517,7 +1517,15 @@ def detail_page(pixiv_id: int) -> str:
 
     # 网络请求放到 DB session 之外（避免事务随网络往返长时间占用连接）
     if need_fetch_urls:
-        urls = _fetch_original_urls(pixiv_id)
+        try:
+            urls = _fetch_original_urls(pixiv_id)
+        except fetcher.PixivAuthError as e:
+            # 认证失效：不 500，按"未拉到原图"降级（仍可看缩略图等）
+            logger.warning(f'详情原图拉取认证失效 {pixiv_id}: {e}')
+            urls = []
+        except Exception as e:
+            logger.warning(f'详情原图拉取失败 {pixiv_id}: {e}')
+            urls = []
         if urls:
             with get_session() as db:
                 row = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()

@@ -6,25 +6,41 @@ const pageCount = d.pageCount;
 const localUrls = d.localUrls;
 const mediumUrls = d.mediumUrls;
 const originalProxied = d.originalProxied;
-const imgSources = !isDownloaded || !localUrls.length
-  ? (mediumUrls.length ? mediumUrls : (originalProxied.length ? originalProxied : [(d.thumbFallback || '') ]))
-  : localUrls;
-let currentPage = 0;
-
-function showPage(index) {
-  if (!imgSources.length || !imgSources[0]) {
-    $('#fallback').textContent = '[ 无可用图片 ]';
-    return;
+// 每页一个"候选链"：中图 -> 原图代理 -> 缩略图。某个源加载失败时自动
+// 切到下一个候选，而不是直接空白（中图拉不稳时仍能降级显示）。
+let imgSources;
+if (isDownloaded && localUrls.length) {
+  imgSources = localUrls.map(u => [u]);
+} else {
+  const chains = [];
+  const n = Math.max(mediumUrls.length, originalProxied.length, 1);
+  for (let i = 0; i < n; i++) {
+    const chain = [];
+    if (mediumUrls[i]) chain.push(mediumUrls[i]);
+    if (originalProxied[i]) chain.push(originalProxied[i]);
+    if (i === 0 && d.thumbFallback) chain.push(d.thumbFallback);
+    chains.push(chain);
   }
-  currentPage = Math.max(0, Math.min(index, imgSources.length - 1));
-  const img = $('#mainImage');
-  img.src = imgSources[currentPage];
-  img.style.display = 'block';
-  $('#fallback').style.display = 'none';
+  imgSources = chains.filter(c => c.length);
+}
+let currentPage = 0;
+let sourceIndex = 0;
 
+function renderCurrentSource() {
+  const img = $('#mainImage');
+  const chain = imgSources[currentPage] || [];
+  const fallback = $('#fallback');
+  if (sourceIndex < chain.length) {
+    img.src = chain[sourceIndex];
+    img.style.display = 'block';
+    fallback.style.display = 'none';
+  } else {
+    img.style.display = 'none';
+    fallback.textContent = '[ 图片加载失败 ]';
+    fallback.style.display = 'block';
+  }
   $('#prevBtn').disabled = currentPage === 0;
   $('#nextBtn').disabled = currentPage >= imgSources.length - 1;
-
   if (imgSources.length > 1) {
     const pi = $('#pageIndicator');
     pi.textContent = `${currentPage + 1} / ${imgSources.length}`;
@@ -33,6 +49,31 @@ function showPage(index) {
     $('#pageIndicator').classList.remove('show');
   }
 }
+
+function showPage(index) {
+  if (!imgSources.length) {
+    $('#fallback').textContent = '[ 无可用图片 ]';
+    $('#fallback').style.display = 'block';
+    return;
+  }
+  currentPage = Math.max(0, Math.min(index, imgSources.length - 1));
+  sourceIndex = 0;
+  renderCurrentSource();
+}
+
+// 当前候选源加载失败：切到本页下一个候选；耗尽则显示失败占位
+function onImageError() {
+  const chain = imgSources[currentPage] || [];
+  sourceIndex += 1;
+  if (sourceIndex < chain.length) {
+    $('#mainImage').src = chain[sourceIndex];
+  } else {
+    $('#mainImage').style.display = 'none';
+    $('#fallback').textContent = '[ 图片加载失败 ]';
+    $('#fallback').style.display = 'block';
+  }
+}
+$('#mainImage').addEventListener('error', onImageError);
 
 $('#prevBtn').addEventListener('click', () => showPage(currentPage - 1));
 $('#nextBtn').addEventListener('click', () => showPage(currentPage + 1));

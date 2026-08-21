@@ -169,8 +169,12 @@ function downloadFile(pixivId) {
 document.querySelector('.nav-toggle')?.addEventListener('click', function () {
   this.nextElementSibling.classList.toggle('open');
 });
-// 任意 <img> 加载失败时自动隐藏（capture 阶段捕获，替代各处内联 onerror）
+// 任意 <img> 加载失败时自动隐藏（capture 阶段捕获，替代各处内联 onerror）。
+// 详情页主图除外——由 page-detail.js 走"中图→原图→缩略图"候选链降级。
 document.addEventListener('error', function (e) {
   const t = e.target;
-  if (t && t.tagName === 'IMG') t.style.display = 'none';
+  if (t && t.tagName === 'IMG') {
+    if (t.id === 'mainImage') return;
+    t.style.display = 'none';
+  }
 }, true);
