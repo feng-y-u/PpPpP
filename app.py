@@ -103,7 +103,12 @@ def _page_sort_key(path: str) -> tuple[int, str]:
 
 
 _scan_cache: dict = {'ts': 0.0, 'data': {}}
-_SCAN_CACHE_TTL = 10.0  # 图库目录扫描缓存（秒）：避免每页请求全量重扫磁盘
+_SCAN_CACHE_TTL = 30.0  # 图库目录扫描缓存（秒）：避免每页请求全量重扫磁盘（省 IOPS）
+
+# 图库孤儿判定用的"全部 DB pixiv_id 集合"缓存：避免每次图库请求全表加载
+#（illusts 表可能远大于已下载数，含搜索/预取记录）
+_db_pids_cache: dict = {'ts': 0.0, 'data': set()}
+_DB_PIDS_CACHE_TTL = 30.0
 
 
 def _scan_local_downloads() -> dict[int, list[str]]:
@@ -545,6 +550,18 @@ def _start_prefetch_thread() -> None:
 _start_prefetch_thread()
 
 
+def _pid_in_clause(all_ids: list[int]) -> tuple[str, dict]:
+    """把 illust_ids 分片拼进 IN 子句，避免触碰 SQLite 绑定变量上限。"""
+    clauses: list[str] = []
+    params: dict[str, int] = {}
+    for ci, chunk in enumerate(all_ids[i:i + 500] for i in range(0, len(all_ids), 500)):
+        phs = ','.join(f':pid_{ci}_{j}' for j in range(len(chunk)))
+        clauses.append(f'illusts.pixiv_id IN ({phs})')
+        for j, pid in enumerate(chunk):
+            params[f'pid_{ci}_{j}'] = pid
+    return '(' + ' OR '.join(clauses) + ')', params
+
+
 def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
                      tag_mode: str, r18_mode: str, offset: int = 0,
                      limit: int = 24, filter_tag: str = '') -> tuple[list[dict], bool, int, int]:
@@ -553,6 +570,9 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     不限制 SearchCache.status（fetching/error 时也能查看已累积的缓存数据）。
     filter_tag: 按作品标签（Illust.tags）精确过滤，空串不过滤。
     全局屏蔽标签（BlockedTag）同搜索/图库一致生效。
+
+    过滤/排序/分页/计数全部下推 SQLite，只取本页几行对象回内存——
+    避免按标签总量全量加载（省内存，适配低内存机器）。
 
     Returns:
         (results_dicts, has_more, next_offset, filtered_total)
@@ -572,42 +592,63 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
         if not all_ids:
             return [], False, 0, 0
 
-        id_map = {i.pixiv_id: i for i in db.query(Illust).filter(Illust.pixiv_id.in_(all_ids)).all()}
+        wheres: list[str] = []
+        params: dict = {}
+        pid_clause, pid_params = _pid_in_clause(all_ids)
+        wheres.append(pid_clause)
+        params.update(pid_params)
+        if min_bookmarks > 0:
+            wheres.append('illusts.bookmark_count >= :min_bookmarks')
+            params['min_bookmarks'] = min_bookmarks
+        if r18_mode == 'safe':
+            r18_phs = ','.join(f':r18_{i}' for i in range(len(fetcher.R18_TAGS)))
+            wheres.append(f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({r18_phs}))')
+            params.update({f'r18_{i}': t for i, t in enumerate(fetcher.R18_TAGS)})
+        if blocked:
+            blk_phs = ','.join(f':blk_{i}' for i in range(len(blocked)))
+            wheres.append(f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({blk_phs}))')
+            params.update({f'blk_{i}': t for i, t in enumerate(blocked)})
+        if filter_tag:
+            wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value = :filter_tag)')
+            params['filter_tag'] = filter_tag
 
-    # 按预取顺序过滤（缺失的 Illust 行跳过）
-    filtered: list[Illust] = []
-    for pid in all_ids:
-        illust = id_map.get(pid)
-        if not illust:
-            continue
-        if illust.bookmark_count < min_bookmarks:
-            continue
-        if r18_mode == 'safe' and _is_r18(illust.tags_list):
-            continue
-        if blocked and (set(illust.tags_list or []) & blocked):
-            continue
-        if filter_tag and filter_tag not in (illust.tags_list or []):
-            continue
-        # tag_mode：预取是单标签搜索，or/and 均命中该标签，无需额外过滤
-        filtered.append(illust)
+        # 排序：date_d 时 SQLite DESC 下 NULL 沉底（与旧 Python 实现"无日期排最后"一致）
+        order = 'bookmark_count DESC, illusts.id ASC' if sort_order == 'popular_d' \
+            else 'upload_date DESC, illusts.id ASC'
+        where_clause = ' AND '.join(wheres)
 
-    # 排序
-    if sort_order == 'popular_d':
-        filtered.sort(key=lambda x: x.bookmark_count, reverse=True)
-    else:  # date_d
-        filtered.sort(key=lambda x: (x.upload_date is not None, x.upload_date or datetime.min), reverse=True)
+        def _run(wc: str, p: dict) -> tuple[int, list[int]]:
+            page_params = {**p, 'lim': limit, 'off': offset}
+            total = db.execute(text(f'SELECT COUNT(*) FROM illusts WHERE {wc}'), p).scalar() or 0
+            pk_ids = db.execute(
+                text(f'SELECT id FROM illusts WHERE {wc} ORDER BY {order} LIMIT :lim OFFSET :off'),
+                page_params,
+            ).scalars().all()
+            return total, pk_ids
 
-    total = len(filtered)
-    page = filtered[offset:offset + limit]
-    has_more = (offset + limit) < total
-    next_offset = offset + limit if has_more else 0
+        try:
+            total, pk_ids = _run(where_clause, params)
+        except OperationalError:
+            # 单条损坏 tags 会让 json_each 抛错：降级去掉标签相关过滤重查
+            logger.warning('缓存查询因 tags 数据异常降级（跳过标签过滤）')
+            wc2 = ' AND '.join(w for w in wheres if 'json_each' not in w)
+            params2 = {k: v for k, v in params.items()
+                       if k.startswith('pid_') or k == 'min_bookmarks'}
+            total, pk_ids = _run(wc2, params2)
 
-    page_dicts = [i.to_dict() for i in page]
+        illusts = db.query(Illust).filter(Illust.id.in_(pk_ids)).all()
+        id_order = {id_: i for i, id_ in enumerate(pk_ids)}
+        illusts.sort(key=lambda x: id_order.get(x.id, 0))
+        page_dicts = [i.to_dict() for i in illusts]
+
     if page_dicts:
         with get_session() as fav_db:
             fav = get_favorite_pids(fav_db)
         for d in page_dicts:
             d['is_favorite'] = d.get('pixiv_id') in fav
+
+    has_more = (offset + limit) < total
+    next_offset = offset + limit if has_more else 0
     return page_dicts, has_more, next_offset, total
 
 
@@ -1672,9 +1713,16 @@ def api_gallery() -> Response:
         # 注意：必须排除【全部】DB 记录而非仅当前页（seen_pids）——否则其他页
         # 或未通过过滤条件的 DB 作品会被误判为孤儿，生成"只有作品号"的简陋卡片，
         # 与正常卡片重复展示（同一作品两张卡片），且 total 被重复计算。
+        # 全表 pid 集合带 TTL 缓存：illusts 表总量通常远大于已下载数，避免每请求全表加载。
         if not collection_id and not favorites_only:
-            db_pid_set = {r[0] for r in db.query(Illust.pixiv_id).all()}
-            orphan_pids = sorted(set(local_pids) - db_pid_set, reverse=True)
+            now = time.time()
+            if now - _db_pids_cache['ts'] >= _DB_PIDS_CACHE_TTL:
+                with get_session() as cache_db:
+                    _db_pids_cache['ts'] = now
+                    _db_pids_cache['data'] = {
+                        r[0] for r in cache_db.query(Illust.pixiv_id).all()
+                    }
+            orphan_pids = sorted(set(local_pids) - _db_pids_cache['data'], reverse=True)
             orphan_results = _build_orphan_dicts(orphan_pids, local_items)
             total += len(orphan_results)
             results.extend(orphan_results[:max(0, limit - len(results))])
