@@ -105,6 +105,11 @@ def _page_sort_key(path: str) -> tuple[int, str]:
 _scan_cache: dict = {'ts': 0.0, 'data': {}}
 _SCAN_CACHE_TTL = 30.0  # 图库目录扫描缓存（秒）：避免每页请求全量重扫磁盘（省 IOPS）
 
+# 缩略图代理实时拉取：限速 + 失败 URL 冷却（防刷新/返回时并发打爆图床导致整批 502）
+_thumb_limiter = fetcher._TokenBucket(8)
+_thumb_failed: dict[str, float] = {}
+_THUMB_FAIL_COOLDOWN = 30.0
+
 # 图库孤儿判定用的"全部 DB pixiv_id 集合"缓存：避免每次图库请求全表加载
 #（illusts 表可能远大于已下载数，含搜索/预取记录）
 _db_pids_cache: dict = {'ts': 0.0, 'data': set()}
@@ -1439,6 +1444,13 @@ def thumb_proxy(url_b64: str) -> Response:
                 mimetype = f.read().strip()
         return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
 
+    # 实时拉取分流：并发限速 + 失败 URL 冷却，防止刷新/返回时把 Pixiv 图床打爆
+    #（大量未命中缓存的缩略图同时实时拉 → 超时/限流 → 整批 502 → 前端"全消失"）
+    now = time.time()
+    if now - _thumb_failed.get(url, 0.0) < _THUMB_FAIL_COOLDOWN:
+        return abort(502)  # 冷却期内直接失败，不重复发起网络请求
+    _thumb_limiter.wait()
+
     try:
         session = build_pixiv_session()
         try:
@@ -1447,7 +1459,13 @@ def thumb_proxy(url_b64: str) -> Response:
         finally:
             session.close()
     except requests.RequestException:
+        _thumb_failed[url] = now
+        # 顺手清理过期失败记录，防止集合无限增长
+        for failed_url in [k for k, v in _thumb_failed.items() if now - v >= _THUMB_FAIL_COOLDOWN]:
+            _thumb_failed.pop(failed_url, None)
         return abort(502)
+
+    _thumb_failed.pop(url, None)
 
     mimetype = resp.headers.get('Content-Type', 'image/jpeg')
     try:

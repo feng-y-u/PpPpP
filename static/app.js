@@ -169,12 +169,23 @@ function downloadFile(pixivId) {
 document.querySelector('.nav-toggle')?.addEventListener('click', function () {
   this.nextElementSibling.classList.toggle('open');
 });
-// 任意 <img> 加载失败时自动隐藏（capture 阶段捕获，替代各处内联 onerror）。
+// 卡片缩略图加载失败：显示占位背景，限次自动重试（避免整批"消失"）。
 // 详情页主图除外——由 page-detail.js 走"中图→原图→缩略图"候选链降级。
 document.addEventListener('error', function (e) {
   const t = e.target;
-  if (t && t.tagName === 'IMG') {
-    if (t.id === 'mainImage') return;
-    t.style.display = 'none';
+  if (!t || t.tagName !== 'IMG') return;
+  if (t.id === 'mainImage') return;
+  const tries = parseInt(t.dataset.retry || '0', 10);
+  if (tries < 2) {
+    t.dataset.retry = String(tries + 1);
+    t.classList.add('img-failed');
+    setTimeout(() => {
+      // 追加时间戳强制重新请求（不让浏览器走失败缓存）
+      const base = (t.src || '').split('?')[0];
+      if (base) t.src = base + '?t=' + Date.now();
+    }, 2000);
+  } else {
+    // 重试耗尽：保留占位布局，不彻底隐藏（避免页面"图全没了"）
+    t.classList.add('img-failed');
   }
 }, true);

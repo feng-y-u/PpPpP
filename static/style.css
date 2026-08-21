@@ -271,3 +271,10 @@ input[type="number"] { -moz-appearance: textfield; }
   .photo-card-artist { font-size: 0.68rem; }
   .navbar-brand { font-size: 0.9rem; }
 }
+
+/* 缩略图加载失败占位：网格布局不塌陷，视觉提示可重试 */
+img.img-failed {
+  background: var(--bg-thumb);
+  object-fit: cover;
+  opacity: 0.5;
+}
