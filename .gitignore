@@ -10,3 +10,5 @@ dist/
 build/
 .pytest_cache/
 .pytest-tmp/
+.wt-test-tmp/
+.worktree-patch/
