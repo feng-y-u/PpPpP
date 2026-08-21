@@ -40,7 +40,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
-| `scripts/` | `pixiv-cleanup.sh`（cron 磁盘清理，30 天 / 收藏 < 100） |
+| `scripts/` | `pixiv-cleanup.sh`（可选磁盘清理 cron：仅清理**已下载原图**，不参与预取缓存容量控制） |
 | `pixiv-api-http-main/` | 内置的第三方 Node.js Pixiv API 参考实现（含 `search/no-premium.js` 等），作为接口格式对照参考，不参与运行 |
 | `docs/superpowers/` | 近期变更的设计文档（plans/specs）：分页重设计、安全加固、收藏夹排序。改动前先读相关 spec |
 
@@ -52,6 +52,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 
 ### 进程与状态
 - **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_search_tasks`、`_rate_limit_store`、`_prefetch_state`。多 worker 不共享。详见 `app.py:170-181` 注释。
+- **单 Worker 进程内状态是个人自用的明确取舍**：不做 Redis/Celery/多 Worker 协调——所有后台任务与内存状态都依赖单进程常驻，这是本项目按单用户自用场景的有意设计，不是缺陷。
 - **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login`（`app.py:664`）和 `/api/settings/unlock`（`app.py:1976`）。
 
 ### 配置与重启
