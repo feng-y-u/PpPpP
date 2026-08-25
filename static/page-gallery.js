@@ -73,6 +73,7 @@ function loadGallery(pageNum) {
     renderGalleryData(cached, pageNum);
     return;
   }
+  showGallerySkeleton();
   const params = new URLSearchParams();
   if (activeTag) params.set('tag', activeTag);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
@@ -85,7 +86,22 @@ function loadGallery(pageNum) {
       pvCache.set(cacheKey, data);
       renderGalleryData(data, pageNum);
     })
-    .catch(() => showToast('加载图库失败', true));
+    .catch(() => {
+      showToast('加载图库失败', true);
+      $('#cardGrid').innerHTML = '';
+    });
+}
+
+// 骨架屏：数据到达前的灰块占位，避免空白等待
+function showGallerySkeleton() {
+  const grid = $('#cardGrid');
+  grid.innerHTML = '';
+  for (let i = 0; i < 12; i++) {
+    const col = document.createElement('div');
+    col.className = 'col-lg-3 col-md-4 col-sm-6 col-6 mb-3';
+    col.innerHTML = '<div class="skeleton-card"><div class="skeleton-card-inner"></div></div>';
+    grid.appendChild(col);
+  }
 }
 
 function renderGalleryData(data, pageNum) {
@@ -109,9 +125,15 @@ function renderGalleryData(data, pageNum) {
   }
   $('#emptyState').style.display = 'none';
   let totalSize = 0;
-  data.data.forEach(item => {
-    totalSize += item.file_size || 0;
-    renderCard(item);
+  data.data.forEach(item => { totalSize += item.file_size || 0; });
+  // 分帧渲染 50 张卡：每批 15 张，批间让出主线程，卡片依次浮现
+  const grid = $('#cardGrid');
+  renderInChunks(data.data, (item) => {
+    const col = renderCard(item);
+    grid.appendChild(col);
+    return col;
+  }, { chunk: 15, delay: 25 }).then(() => {
+    lazyLoad();
   });
   updateFloatBar();
   galleryCurrentPage = pageNum;
@@ -238,7 +260,8 @@ function renderCard(r) {
       <div class="card-img-wrap">
         <input type="checkbox" class="card-checkbox" data-pid="${r.pixiv_id}">
         <button class="card-fav-btn${r.is_favorite ? ' favorited' : ''}" data-pid="${r.pixiv_id}" title="${r.is_favorite ? '取消收藏' : '收藏'}">${r.is_favorite ? '❤' : '♡'}</button>
-        <img src="${thumbUrl}" loading="lazy" >
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23ecece7'%3E%3C/svg%3E"
+             data-src="${escAttr(thumbUrl)}" loading="lazy" class="img-fade" alt="">
         <span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
       <div class="card-body">
@@ -252,7 +275,6 @@ function renderCard(r) {
         </div>
       </div>
     </div>`;
-  $('#cardGrid').appendChild(col);
 
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
     if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a') || e.target.closest('.card-fav-btn') || e.target.closest('.card-move-btn')) return;
@@ -327,6 +349,8 @@ function renderCard(r) {
     else selectedPids.delete(pid);
     updateFloatBar();
   });
+
+  return col;
 }
 
 $('#confirmDeleteBtn').addEventListener('click', async () => {

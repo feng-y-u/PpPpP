@@ -26,7 +26,7 @@ function renderCard(r) {
   item.innerHTML = `
     <div class="photo-card" data-pixiv-id="${r.pixiv_id}">
       <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23ecece7'%3E%3C/svg%3E"
-           data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" alt="">
+           data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" class="img-fade" alt="">
       <div class="photo-badges">${badges.join('')}</div>
       <div class="photo-card-info">
         <div class="photo-card-title">${escHtml(r.title)}</div>
@@ -58,6 +58,8 @@ function renderCard(r) {
     e.stopPropagation();
     deleteCacheItem(r.pixiv_id, r.title, this);
   });
+
+  return item;
 }
 
 // 从缓存删除单条作品
@@ -82,21 +84,6 @@ async function deleteCacheItem(pixivId, title, btn) {
     showToast('删除失败', true);
     btn.disabled = false;
   }
-}
-
-// ── Lazy Load ──
-function lazyLoad() {
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        const img = entry.target;
-        img.src = img.dataset.src;
-        img.removeAttribute('data-src');
-        observer.unobserve(img);
-      }
-    });
-  }, { rootMargin: '200px' });
-  $$('img[data-src]').forEach(img => observer.observe(img));
 }
 
 // ── 缓存浏览 ──
@@ -139,6 +126,7 @@ function updateCacheMeta() {
 async function browseCache() {
   const tag = $('#cacheTagSelect').value;
   if (!tag) return;
+  showCacheSkeleton();
   const minBookmarks = parseInt($('#cacheMinBookmarks').value) || 0;
   const sort = $('#cacheSortOrder').value;
   const r18 = $('#cacheR18').value;
@@ -147,12 +135,25 @@ async function browseCache() {
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     showToast(err.error || '加载失败', true);
+    $('#masonryGrid').innerHTML = '';
     return;
   }
   const data = await resp.json();
   cacheHasMore = data.has_more;
   currentOffset = data.offset;
   renderCacheResults(data);
+}
+
+// 骨架屏：浏览/翻页请求期间的灰块占位，数据到达后无缝替换
+function showCacheSkeleton() {
+  const grid = $('#masonryGrid');
+  grid.innerHTML = '';
+  for (let i = 0; i < 12; i++) {
+    const item = document.createElement('div');
+    item.className = 'masonry-item';
+    item.innerHTML = '<div class="skeleton-card"><div class="skeleton-card-inner"></div></div>';
+    grid.appendChild(item);
+  }
 }
 
 function renderCacheResults(data) {
@@ -165,8 +166,14 @@ function renderCacheResults(data) {
     return;
   }
   $('#emptyState').style.display = 'none';
-  data.results.forEach(r => renderCard(r));
-  lazyLoad();
+  const grid = $('#masonryGrid');
+  renderInChunks(data.results, (r) => {
+    const node = renderCard(r);
+    grid.appendChild(node);
+    return node;
+  }, { chunk: 12, delay: 25 }).then(() => {
+    lazyLoad();
+  });
   updateCacheMeta();
   renderCachePagination();
 }
@@ -210,8 +217,9 @@ async function browseCacheWithOffset(offset) {
   const sort = $('#cacheSortOrder').value;
   const r18 = $('#cacheR18').value;
   const filterTag = $('#cacheFilterTag').value.trim();
+  showCacheSkeleton();
   const resp = await fetch(`/api/cache/items?tag=${encodeURIComponent(tag)}&min_bookmarks=${minBookmarks}&sort=${sort}&r18=${r18}&filter_tag=${encodeURIComponent(filterTag)}&offset=${offset}`);
-  if (!resp.ok) { showToast('加载失败', true); return; }
+  if (!resp.ok) { showToast('加载失败', true); $('#masonryGrid').innerHTML = ''; return; }
   const data = await resp.json();
   currentOffset = data.offset;
   cacheHasMore = data.has_more;

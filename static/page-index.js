@@ -100,9 +100,15 @@ function renderPaginationBar() {
 function renderPage(pageNum) {
   const page = loadedPages[pageNum - 1];
   if (!page) return;
-  $('#masonryGrid').innerHTML = '';
-  page.forEach(r => renderCard(r));
-  lazyLoad();
+  const grid = $('#masonryGrid');
+  grid.innerHTML = '';
+  renderInChunks(page, (r) => {
+    const node = renderCard(r);
+    grid.appendChild(node);
+    return node;
+  }, { chunk: 12, delay: 25 }).then(() => {
+    lazyLoad();
+  });
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -271,9 +277,16 @@ function finishSearch(data) {
   nextCursor = data.cursor || null;
   hasMore = data.has_more || false;
   currentPage = 1;
-  loadedPages[0].forEach(r => renderCard(r));
+  const grid = $('#masonryGrid');
+  const results = loadedPages[0];
+  renderInChunks(results, (r) => {
+    const node = renderCard(r);
+    grid.appendChild(node);
+    return node;
+  }, { chunk: 12, delay: 25 }).then(() => {
+    lazyLoad();
+  });
   renderPaginationBar();
-  lazyLoad();
   saveSearchState();
   maybeToastFetchStats(data.fetch_stats);
   showLoading(false);
@@ -366,7 +379,7 @@ function renderCard(r) {
   item.innerHTML = `
     <div class="photo-card" data-pixiv-id="${r.pixiv_id}">
       <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23ecece7'%3E%3C/svg%3E"
-           data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" alt="">
+           data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" class="img-fade" alt="">
       <div class="photo-badges">${badges.join('')}</div>
       <div class="photo-card-info">
         <div class="photo-card-title">${escHtml(r.title)}</div>
@@ -418,6 +431,8 @@ function renderCard(r) {
     e.stopPropagation();
     downloadFile(r.pixiv_id);
   });
+
+  return item;
 }
 
 // ── Batch Download ──
@@ -457,19 +472,6 @@ function pollBatch(ids) {
 }
 
 // ── Helpers ──
-function lazyLoad() {
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        const img = entry.target;
-        img.src = img.dataset.src;
-        img.removeAttribute('data-src');
-        observer.unobserve(img);
-      }
-    });
-  }, { rootMargin: '200px' });
-  $$('img[data-src]').forEach(img => observer.observe(img));
-}
 let loadingHintTimer = null;
 function showLoading(on) {
   $('#loadingIndicator').style.display = on ? 'block' : 'none';

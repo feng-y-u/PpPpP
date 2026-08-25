@@ -278,3 +278,71 @@ img.img-failed {
   object-fit: cover;
   opacity: 0.5;
 }
+
+/* ── 丝滑化：跨页过渡 / 页面进入动画 / 卡片浮现 / 骨架屏 / 图片淡入 ──
+
+   全部为渐进增强：不支持 @view-transition 或 prefers-reduced-motion
+   的浏览器自动降级为原有行为，不影响任何功能。 */
+
+/* 跨文档 View Transitions（Chrome/Edge 129+）：站内链接跳转自动淡出→淡入 */
+@view-transition {
+  navigation: auto;
+}
+.view-transition-old(root),
+.view-transition-new(root) {
+  animation-duration: 0.18s;
+}
+
+/* 页面进入动画：内容柔和上浮浮现（打开页面时的"进来"感） */
+@keyframes pageFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.full-page {
+  animation: pageFadeIn 0.25s ease;
+}
+
+/* 卡片逐个浮现：stagger 延迟由 JS 设置 animation-delay，
+   backwards fill-mode 保证延迟期间保持初始透明态（不闪） */
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.card-enter {
+  animation: cardIn 0.28s ease backwards;
+}
+
+/* 骨架屏卡片：灰块 + 轻微透明度呼吸（无渐变扫光） */
+.skeleton-card {
+  background: var(--bg-thumb);
+  border-radius: var(--radius-card);
+  aspect-ratio: 4 / 5;
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-card-inner {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-thumb);
+  animation: skeletonPulse 1.2s ease-in-out infinite;
+}
+@keyframes skeletonPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* 缩略图淡入：加载完成前透明（占位背景可见），完成后 0.25s 浮现 */
+img.img-fade {
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+img.img-fade.img-loaded {
+  opacity: 1;
+}
+
+/* 无障碍：用户系统开启"减少动态效果"时关闭所有动效 */
+@media (prefers-reduced-motion: reduce) {
+  .full-page, .card-enter { animation: none !important; }
+  img.img-fade { transition: none !important; opacity: 1 !important; }
+  .skeleton-card-inner { animation: none !important; }
+}

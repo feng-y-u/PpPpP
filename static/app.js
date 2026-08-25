@@ -163,6 +163,75 @@ function downloadFile(pixivId) {
   window.open(`/download_file/${pixivId}`, '_blank');
 }
 
+// ── 丝滑化公共能力 ──
+
+// 图片懒加载（IntersectionObserver）：data-src 占位 → 进入视口才加载。
+// 搜索页/图库/缓存页共用；渲染完卡片后调用一次即可。
+function lazyLoad() {
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const img = entry.target;
+        if (img.dataset.src) {
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+        }
+        observer.unobserve(img);
+      }
+    });
+  }, { rootMargin: '200px' });
+  $$('img[data-src]').forEach(img => observer.observe(img));
+}
+
+// 分帧渲染：把 items 按 chunks 分批用 requestAnimationFrame 渲染，
+// 批间让出主线程（避免长任务卡顿），并给每张卡加 stagger 浮现动画。
+// renderFn(item, i) 需返回创建的 DOM 元素（或 null 跳过动画）。
+// opts: { chunk=12, delay=30ms } — 返回 Promise，全部完成后 resolve。
+function renderInChunks(items, renderFn, opts) {
+  const { chunk = 12, delay = 30 } = opts || {};
+  let index = 0;
+  return new Promise((resolve) => {
+    function step() {
+      if (index >= items.length) { resolve(); return; }
+      const end = Math.min(index + chunk, items.length);
+      for (let i = index; i < end; i++) {
+        const node = renderFn(items[i], i);
+        if (node && node.addEventListener) {
+          node.classList.add('card-enter');
+          if (node.style) node.style.animationDelay = `${i * delay}ms`;
+          // 动画结束后清理内联 delay，避免影响后续 hover 过渡
+          node.addEventListener('animationend', function handler(ev) {
+            if (ev.animationName === 'cardIn') {
+              node.style.animationDelay = '';
+              node.removeEventListener('animationend', handler);
+            }
+          });
+        }
+      }
+      index = end;
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  });
+}
+
+// 全局图片加载完成监听：给 .img-fade 缩略图加 loaded 态（浮现动画）。
+// 捕获阶段监听，与 error 监听同模式；排除详情页主图（有独立候选链逻辑）。
+document.addEventListener('load', function (e) {
+  const t = e.target;
+  if (!t || t.tagName !== 'IMG') return;
+  if (t.id === 'mainImage') return;
+  if (t.classList.contains('img-fade')) t.classList.add('img-loaded');
+}, true);
+// 缓存命中场景：图片可能已在监听器绑定前加载完（complete 且非失败态）
+function markLoadedImages() {
+  $$('img.img-fade').forEach(img => {
+    if (img.complete && img.naturalWidth > 0) img.classList.add('img-loaded');
+  });
+}
+// 兜底：对后续动态插入且可能已加载完的图片做一次检查（渲染批次间隙调用）
+setInterval(markLoadedImages, 1000);
+
 // ── 全局兜底 ──
 // CSP script-src 'self' 会禁用内联 onclick/onerror 属性，这里统一用事件绑定替代。
 // 移动端导航切换（模板 nav-toggle 不再用内联 onclick）
