@@ -256,6 +256,7 @@ input[type="number"] { -moz-appearance: textfield; }
     flex-wrap: wrap; justify-content: center;
     padding: 8px 10px;
   }
+  .batch-float-bar.hidden { transform: translateY(12px); }
   .batch-float-bar .batch-collection-select { max-width: 140px; }
 
   /* 详情页：图片区域更高、信息区 padding 加大 */

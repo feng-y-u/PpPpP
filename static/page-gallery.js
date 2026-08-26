@@ -5,7 +5,8 @@ let selectedPids = new Set();
 let galleryCurrentPage = 1, galleryTotal = 0, galleryTotalPages = 0, galleryFavTotal = 0;
 let allTags = [];
 let activeCollectionId = '';
-let sortOrder = 'created';
+let sortOrder = 'downloaded';
+let currentResults = [];
 const PAGE_SIZE = 50;
 const GALLERY_CACHE_TTL = 30 * 60 * 1000; // 图库分页前端缓存 30 分钟
 
@@ -21,6 +22,7 @@ if (urlParams.has('tag')) {
 }
 activeCollectionId = urlParams.get('collection_id') || '';
 
+$('#sortSelect').value = 'downloaded';
 loadGallery(1);
 loadTags();
 loadCollections();
@@ -109,6 +111,7 @@ function renderGalleryData(data, pageNum) {
   $('#cardGrid').innerHTML = '';
   selectedPids.clear();
   updateFloatBar();
+  currentResults = data.data;
 
   if (data.data.length === 0) {
     $('#emptyState').style.display = 'block';
@@ -278,7 +281,13 @@ function renderCard(r) {
 
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
     if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a') || e.target.closest('.card-fav-btn') || e.target.closest('.card-move-btn')) return;
-    window.location.href = `/detail/${r.pixiv_id}`;
+    const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
+    lightbox.open(currentResults.map(x => ({
+      pixiv_id: x.pixiv_id,
+      thumbUrl: proxyThumb(x.thumb_url),
+      isFav: !!x.is_favorite,
+      collectionView: !!activeCollectionId,
+    })), idx >= 0 ? idx : 0);
   });
 
   col.querySelector('.card-fav-btn').addEventListener('click', async function(e) {
@@ -347,6 +356,7 @@ function renderCard(r) {
     const pid = parseInt(this.dataset.pid);
     if (this.checked) selectedPids.add(pid);
     else selectedPids.delete(pid);
+    col.querySelector('.gallery-card').classList.toggle('card-selected', this.checked);
     updateFloatBar();
   });
 
@@ -440,7 +450,10 @@ function updateFloatBar() {
 
 function clearSelection() {
   selectedPids.clear();
-  document.querySelectorAll('.card-checkbox').forEach(cb => cb.checked = false);
+  document.querySelectorAll('.card-checkbox').forEach(cb => {
+    cb.checked = false;
+    cb.closest('.gallery-card')?.classList.remove('card-selected');
+  });
   updateFloatBar();
 }
 
@@ -448,6 +461,7 @@ $('#btnFloatSelectAll').addEventListener('click', () => {
   document.querySelectorAll('.card-checkbox').forEach(cb => {
     cb.checked = true;
     selectedPids.add(parseInt(cb.dataset.pid));
+    cb.closest('.gallery-card')?.classList.add('card-selected');
   });
   updateFloatBar();
 });
@@ -541,3 +555,20 @@ $('#sortSelect').addEventListener('change', function() {
   sortOrder = this.value;
   loadGallery(1);
 });
+
+// lightbox 内收藏后同步卡片 ♥（只更新对应卡片的按钮/title，不重载页面）
+window.__lbSyncFav = (pid, isFav) => {
+  const card = document.querySelector(`.gallery-card[data-pid="${pid}"]`);
+  if (!card) return;
+  const btn = card.querySelector('.card-fav-btn');
+  if (btn) {
+    btn.classList.toggle('favorited', !!isFav);
+    btn.innerHTML = isFav ? '❤' : '♡';
+    btn.title = isFav ? '取消收藏' : '收藏';
+  }
+  const titleEl = card.querySelector('.card-title');
+  if (titleEl) {
+    const t = titleEl.childNodes[0]?.textContent || '';
+    titleEl.childNodes[0].textContent = (isFav ? '❤ ' : '') + t.replace(/^❤ /, '');
+  }
+};

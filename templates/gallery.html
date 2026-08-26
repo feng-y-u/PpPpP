@@ -135,8 +135,13 @@
   box-shadow: 0 4px 24px rgba(0,0,0,.15);
   z-index: 1050;
   font-size: 0.82rem;
+  transition: transform 0.22s ease, opacity 0.22s ease;
 }
-.batch-float-bar.hidden { display: none !important; }
+.batch-float-bar.hidden {
+  transform: translate(-50%, 12px);
+  opacity: 0;
+  pointer-events: none;
+}
 .batch-float-bar .btn { font-size: 0.78rem; }
 .batch-collection-select {
   font-size: 0.78rem;
@@ -290,6 +295,7 @@
 
 <script src="/static/vendor/bootstrap-5.3.3/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/lightbox.js"></script>
 <script src="/static/page-gallery.js"></script>
 
 </div>
