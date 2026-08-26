@@ -37,10 +37,14 @@ function renderCard(r) {
     </div>`;
   $('#masonryGrid').appendChild(item);
 
-  // Card click → detail page
-  item.querySelector('.photo-card').addEventListener('click', e => {
+  // Card click → lightbox（下载/删除按钮区域除外）
+  item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-card-actions')) return;
-    window.location.href = `/detail/${r.pixiv_id}`;
+    const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
+    lightbox.open(currentResults.map(x => ({
+      pixiv_id: x.pixiv_id,
+      thumbUrl: proxyThumb(x.thumb_url),
+    })), idx >= 0 ? idx : 0);
   });
 
   // Download button
@@ -92,6 +96,7 @@ let currentOffset = 0;
 let cacheHasMore = false;
 let cachePageSize = 24;
 let cacheFilteredTotal = 0;
+let currentResults = [];
 
 async function loadCacheTags() {
   try {
@@ -159,6 +164,7 @@ function showCacheSkeleton() {
 function renderCacheResults(data) {
   cachePageSize = data.page_size || cachePageSize;
   cacheFilteredTotal = data.filtered_total || 0;
+  currentResults = data.results;
   $('#masonryGrid').innerHTML = '';
   if (!data.results.length) {
     $('#emptyState').style.display = 'block';
