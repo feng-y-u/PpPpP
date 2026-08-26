@@ -1,7 +1,7 @@
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
 
 // ── Render Card ──
-// 简化版：标签/画师不可点击（无搜索集成），卡片点击进详情，下载按钮与搜索页一致
+// 简化版：标签/画师不可点击（无搜索集成），卡片点击弹 lightbox 预览，下载按钮与搜索页一致
 function renderCard(r) {
   const isDone = r.download_status === 'done';
   const isDl = r.download_status === 'downloading';
@@ -83,6 +83,7 @@ async function deleteCacheItem(pixivId, title, btn) {
     }
     const card = btn.closest('.photo-card');
     card?.closest('.masonry-item')?.remove();
+    currentResults = currentResults.filter(x => x.pixiv_id !== pixivId);
     showToast('已从缓存删除');
   } catch {
     showToast('删除失败', true);
