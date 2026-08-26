@@ -68,16 +68,17 @@ const lightbox = (() => {
         dlBtn.disabled = false;
         if (d.status === 'done') { dlBtn.textContent = '已下载'; return; }
         dlBtn.textContent = '下载中...';
-        pollTimer = setInterval(() => {
+        const iv = setInterval(() => {
           if (!items[index] || items[index].pixiv_id !== pollPid) return;
           fetch(`/download_status/${pollPid}`).then(r => r.json()).then(s => {
             if (!items[index] || items[index].pixiv_id !== pollPid) return;
-            if (s.status === 'done') { clearInterval(pollTimer); dlBtn.textContent = '已下载'; }
-            else if (s.status === 'failed') { clearInterval(pollTimer); dlBtn.textContent = '下载'; dlBtn.disabled = false; }
+            if (s.status === 'done') { clearInterval(iv); dlBtn.textContent = '已下载'; }
+            else if (s.status === 'failed') { clearInterval(iv); dlBtn.textContent = '下载'; dlBtn.disabled = false; }
           }).catch(() => {});
         }, 2000);
+        pollTimer = iv;  // 共享槽指向当前轮询：close() 与下次点击靠它清理
         setTimeout(() => {
-          clearInterval(pollTimer);
+          clearInterval(iv);   // 清理本下载自己的轮询（不误杀新下载的 pollTimer）
           if (items[index] && items[index].pixiv_id === pollPid && dlBtn.textContent === '下载中...') {
             dlBtn.disabled = false;
             dlBtn.textContent = '下载';
