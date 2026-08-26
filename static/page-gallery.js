@@ -35,6 +35,7 @@ if (activeTag) {
 }
 
 function setActiveTag(tag) {
+  if (tag === activeTag) return;   // 已处于该标签，跳过重复加载
   activeTag = tag;
   const el = $('#tagFilterActive');
   const input = $('#tagFilter');
@@ -266,7 +267,7 @@ function renderCard(r) {
         <button class="card-fav-btn${r.is_favorite ? ' favorited' : ''}" data-pid="${r.pixiv_id}" title="${r.is_favorite ? '取消收藏' : '收藏'}">${r.is_favorite ? '❤' : '♡'}</button>
         <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23ecece7'%3E%3C/svg%3E"
              data-src="${escAttr(thumbUrl)}" loading="lazy" class="img-fade" alt="">
-        <span class="page-badge">${r.page_count || r.file_count || 1} 张</span><span class="size-badge">${fmtSize(r.file_size || 0)}</span>
+        <span class="page-badge">${r.file_count || r.page_count || 1} 张</span><span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
       <div class="card-body">
         <div class="card-title" title="${escAttr(r.title)}">${r.is_favorite ? '❤ ' : ''}${escHtml(r.title)}</div>
@@ -549,7 +550,11 @@ function loadCollections() {
 $('#collectionSelect').addEventListener('change', function() {
   activeCollectionId = this.value;
   activeTag = '';
-  setActiveTag('');
+  // setActiveTag 已有同标签幂等守卫（无标签时对 '' 直接跳过），不能再依赖它触发加载；
+  // 这里直接清空标签 UI，并只做一次失效 + 加载
+  const tagActiveEl = $('#tagFilterActive');
+  if (tagActiveEl) tagActiveEl.style.display = 'none';
+  $('#tagFilter').value = '';
   const name = this.options[this.selectedIndex]?.text || '';
   $('#pageTitle').textContent = activeCollectionId ? `${name} - 收藏夹` : '已下载作品';
   clearSelection();
