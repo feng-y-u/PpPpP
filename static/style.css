@@ -256,6 +256,8 @@ input[type="number"] { -moz-appearance: textfield; }
     flex-wrap: wrap; justify-content: center;
     padding: 8px 10px;
   }
+  /* 注：此规则被 gallery.html 内联 .batch-float-bar.hidden 同权遮蔽（内联后加载）；
+     保留作为移动端意图文档，视觉效果由内联规则提供 */
   .batch-float-bar.hidden { transform: translateY(12px); }
   .batch-float-bar .batch-collection-select { max-width: 140px; }
 
