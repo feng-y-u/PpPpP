@@ -60,6 +60,9 @@
 }
 .st-tab:hover { color: var(--text-primary); }
 .st-tab.active { background: var(--accent); color: #fff; font-weight: 600; }
+@media (max-width: 640px) {
+  .st-tab { min-height: 40px; }
+}
 
 /* ── Filters Row ── */
 .filters-row {
@@ -76,7 +79,7 @@
   background: var(--bg-elevated) !important;
   border: 1px solid var(--border-input) !important;
   color: var(--text-primary);
-  border-radius: 7px;
+  border-radius: 999px;
   padding: 0.3rem 0.5rem;
   font-size: 0.78rem;
   width: auto;
@@ -84,9 +87,6 @@
   -webkit-appearance: none;
   appearance: none;
   -moz-appearance: textfield;
-}
-.filters-row select, .filters-row input, .filters-row .form-select, .filters-row .form-control {
-  border-radius: 999px !important;
 }
 .filters-row input[type="number"]::-webkit-inner-spin-button,
 .filters-row input[type="number"]::-webkit-outer-spin-button {
@@ -307,7 +307,7 @@
         <option value="popular_d">综合</option>
       </select>
 
-      <label>组合</label>
+      <label id="tagModeLabel">组合</label>
       <select id="tagMode" title="组合方式">
         <option value="or">OR</option>
         <option value="and">AND</option>
