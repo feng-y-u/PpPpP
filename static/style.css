@@ -347,6 +347,7 @@ img.img-fade.img-loaded {
   .full-page, .card-enter { animation: none !important; }
   img.img-fade { transition: none !important; opacity: 1 !important; }
   .skeleton-card-inner { animation: none !important; }
+  .lightbox-overlay, .lightbox-overlay .lightbox-main { transition: none !important; }
 }
 
 /* ── Lightbox ── */

@@ -14,10 +14,12 @@ const lightbox = (() => {
       closeBtn = null, bar = null, counter = null, favBtn = null,
       detailBtn = null, dlBtn = null;
   let touchX = 0;
+  let pollTimer = null, closeTimer = null;
 
   function build() {
     root = document.createElement('div');
     root.className = 'lightbox-overlay';
+    root.tabIndex = -1;
     root.innerHTML = `
       <div class="lightbox-main">
         <img id="lightboxImg" alt="">
@@ -54,22 +56,33 @@ const lightbox = (() => {
     dlBtn.addEventListener('click', () => {
       const it = items[index];
       if (!it) return;
+      const pollPid = it.pixiv_id;
+      if (pollTimer) clearInterval(pollTimer);
       dlBtn.disabled = true;
       dlBtn.textContent = '...';
-      fetch(`/download/${it.pixiv_id}`, {
+      fetch(`/download/${pollPid}`, {
         method: 'POST',
         headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '', 'Content-Type': 'application/json' },
-      }).then(r => r.json()).then(d => {
+      }).then(r => r.ok ? r.json() : null).then(d => {
+        if (!d) { dlBtn.disabled = false; dlBtn.textContent = '下载'; return; }
         dlBtn.disabled = false;
         if (d.status === 'done') { dlBtn.textContent = '已下载'; return; }
         dlBtn.textContent = '下载中...';
-        const iv = setInterval(() => {
-          fetch(`/download_status/${it.pixiv_id}`).then(r => r.json()).then(s => {
-            if (s.status === 'done') { clearInterval(iv); dlBtn.textContent = '已下载'; }
-            else if (s.status === 'failed') { clearInterval(iv); dlBtn.textContent = '下载'; dlBtn.disabled = false; }
+        pollTimer = setInterval(() => {
+          if (!items[index] || items[index].pixiv_id !== pollPid) return;
+          fetch(`/download_status/${pollPid}`).then(r => r.json()).then(s => {
+            if (!items[index] || items[index].pixiv_id !== pollPid) return;
+            if (s.status === 'done') { clearInterval(pollTimer); dlBtn.textContent = '已下载'; }
+            else if (s.status === 'failed') { clearInterval(pollTimer); dlBtn.textContent = '下载'; dlBtn.disabled = false; }
           }).catch(() => {});
         }, 2000);
-        setTimeout(() => clearInterval(iv), 300000);
+        setTimeout(() => {
+          clearInterval(pollTimer);
+          if (items[index] && items[index].pixiv_id === pollPid && dlBtn.textContent === '下载中...') {
+            dlBtn.disabled = false;
+            dlBtn.textContent = '下载';
+          }
+        }, 300000);
       }).catch(() => { dlBtn.disabled = false; dlBtn.textContent = '下载'; });
     });
     if (favBtn) favBtn.addEventListener('click', toggleFav);
@@ -84,6 +97,8 @@ const lightbox = (() => {
 
   function onKey(e) {
     if (!root || root.style.display === 'none') return;
+    const et = e.target;
+    if (et && (et.tagName === 'INPUT' || et.tagName === 'TEXTAREA' || et.isContentEditable)) return;
     if (e.key === 'ArrowLeft') { e.preventDefault(); showAt(index - 1); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); showAt(index + 1); }
     else if (e.key === 'Escape') close();
@@ -116,8 +131,12 @@ const lightbox = (() => {
     fetch(`/api/detail/${it.pixiv_id}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (d && d.local_urls && d.local_urls.length && index < items.length && items[index].pixiv_id === it.pixiv_id) {
-          imgEl.src = d.local_urls[0];
+        if (d && d.local_urls && d.local_urls.length) {
+          if (index < items.length && items[index].pixiv_id === it.pixiv_id) {
+            imgEl.src = d.local_urls[0];
+          } else {
+            upgraded.delete(it.pixiv_id);
+          }
         }
       }).catch(() => {});
   }
@@ -142,19 +161,22 @@ const lightbox = (() => {
   }
 
   function open(list, startIndex) {
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
     if (!root) build();
     items = list || [];
     upgraded.clear();  // 每次打开重新探测，避免陈旧
     showAt(startIndex || 0);
     root.style.display = 'flex';
     requestAnimationFrame(() => root.classList.add('lb-open'));
+    root.focus({ preventScroll: true });
     document.body.style.overflow = 'hidden';
   }
 
   function close() {
     if (!root) return;
     root.classList.remove('lb-open');
-    setTimeout(() => { root.style.display = 'none'; }, 200);
+    closeTimer = setTimeout(() => { root.style.display = 'none'; }, 200);
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     document.body.style.overflow = '';
   }
 
