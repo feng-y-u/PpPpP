@@ -1583,6 +1583,7 @@ def detail_api(pixiv_id: int) -> Response:
         d = illust.to_dict()
         paths = illust.local_paths_list or []
         d['local_urls'] = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
+        d['medium_urls'] = [_proxy_thumb(_original_to_resized(u)) for u in (illust.original_urls_list or [])]
         d['file_count'] = len(paths)
         return jsonify(d)
 

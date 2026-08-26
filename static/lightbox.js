@@ -1,20 +1,63 @@
 // ── 共享 Lightbox 预览组件 ──
 // 用法：lightbox.open(items, index)
 //   items: [{ pixiv_id, thumbUrl, isFav, collectionView }]
-//   index: 初始显示下标
+//   index: 初始显示下标（作品级）
 // 键盘 ←→ 切换 / Esc 关闭；触摸左右滑动；遮罩点击关闭。
-// 图源策略：先用缩略图即时渲染，后台静默调 /api/detail/<id>，
-// 已下载作品自动升级为原图（未下载保持缩略图，操作条提供「打开详情」）。
+// 图源策略：先用缩略图即时渲染，后台静默调 /api/detail/<id> 探测页源——
+//   已下载作品 → local_urls（原图原尺寸，逐页）；
+//   未下载但有 stored 原图 URL → medium_urls（master1200 中图，逐页）；
+//   都没有 → 保持缩略图（单张）。
+// 导航是"扁平图片级"：←/→ 在图片之间移动，跨过作品边界自动进入下一个/上一个
+// 作品；操作条按钮（下载/收藏/打开详情）始终作用于当前作品 items[index]。
 
 const lightbox = (() => {
   let items = [];
-  let index = 0;
-  let upgraded = new Set();
+  let index = 0;        // 当前作品下标
+  let pageIndex = 0;    // 当前作品内页下标
+  let loadedPids = new Set();       // 已探测过页源的作品（每次 open 清空，避免陈旧）
+  let activePollPid = null;         // 正在轮询下载状态的作品：保护其下载按钮不被渲染重置
   let root = null, imgEl = null, prevBtn = null, nextBtn = null,
-      closeBtn = null, bar = null, counter = null, favBtn = null,
+      closeBtn = null, counter = null, favBtn = null,
       detailBtn = null, dlBtn = null;
   let touchX = 0;
   let pollTimer = null, closeTimer = null;
+
+  // ── 扁平图片级辅助 ──
+  function getPages(it) {
+    return (it && Array.isArray(it.pages)) ? it.pages : [];
+  }
+  // 未探测页数的作品按 1 张计：总数为上界，探测完成后 render 会更新
+  function pageCount(it) {
+    const pages = getPages(it);
+    return pages.length ? pages.length : 1;
+  }
+  function totalImages() {
+    return items.reduce((sum, it) => sum + pageCount(it), 0);
+  }
+  function flatPosition() {
+    let flat = pageIndex;
+    for (let i = 0; i < index; i++) flat += pageCount(items[i]);
+    return flat;
+  }
+  function locate(flat) {
+    let rest = flat;
+    for (let i = 0; i < items.length; i++) {
+      const c = pageCount(items[i]);
+      if (rest < c) return { index: i, pageIndex: rest };
+      rest -= c;
+    }
+    const last = items.length - 1;
+    return { index: last, pageIndex: Math.max(0, pageCount(items[last]) - 1) };
+  }
+  function moveFlat(delta) {
+    const total = totalImages();
+    if (total <= 0) return;
+    const target = Math.max(0, Math.min(flatPosition() + delta, total - 1));
+    const loc = locate(target);
+    index = loc.index;
+    pageIndex = loc.pageIndex;
+    render();
+  }
 
   function build() {
     root = document.createElement('div');
@@ -44,8 +87,8 @@ const lightbox = (() => {
     detailBtn = root.querySelector('#lbDetail');
     closeBtn = root.querySelector('#lbClose');
 
-    prevBtn.addEventListener('click', () => showAt(index - 1));
-    nextBtn.addEventListener('click', () => showAt(index + 1));
+    prevBtn.addEventListener('click', () => moveFlat(-1));
+    nextBtn.addEventListener('click', () => moveFlat(1));
     closeBtn.addEventListener('click', close);
     root.addEventListener('click', (e) => { if (e.target === root) close(); });
     detailBtn.addEventListener('click', () => {
@@ -58,22 +101,23 @@ const lightbox = (() => {
       if (!it) return;
       const pollPid = it.pixiv_id;
       if (pollTimer) clearInterval(pollTimer);
+      activePollPid = pollPid;
       dlBtn.disabled = true;
       dlBtn.textContent = '...';
       fetch(`/download/${pollPid}`, {
         method: 'POST',
         headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '', 'Content-Type': 'application/json' },
       }).then(r => r.ok ? r.json() : null).then(d => {
-        if (!d) { dlBtn.disabled = false; dlBtn.textContent = '下载'; return; }
+        if (!d) { dlBtn.disabled = false; dlBtn.textContent = '下载'; activePollPid = null; return; }
         dlBtn.disabled = false;
-        if (d.status === 'done') { dlBtn.textContent = '已下载'; return; }
+        if (d.status === 'done') { dlBtn.textContent = '已下载'; activePollPid = null; return; }
         dlBtn.textContent = '下载中...';
         const iv = setInterval(() => {
           if (!items[index] || items[index].pixiv_id !== pollPid) return;
           fetch(`/download_status/${pollPid}`).then(r => r.json()).then(s => {
             if (!items[index] || items[index].pixiv_id !== pollPid) return;
-            if (s.status === 'done') { clearInterval(iv); dlBtn.textContent = '已下载'; }
-            else if (s.status === 'failed') { clearInterval(iv); dlBtn.textContent = '下载'; dlBtn.disabled = false; }
+            if (s.status === 'done') { clearInterval(iv); dlBtn.textContent = '已下载'; activePollPid = null; }
+            else if (s.status === 'failed') { clearInterval(iv); dlBtn.textContent = '下载'; dlBtn.disabled = false; activePollPid = null; }
           }).catch(() => {});
         }, 2000);
         pollTimer = iv;  // 共享槽指向当前轮询：close() 与下次点击靠它清理
@@ -83,8 +127,9 @@ const lightbox = (() => {
             dlBtn.disabled = false;
             dlBtn.textContent = '下载';
           }
+          if (activePollPid === pollPid) activePollPid = null;
         }, 300000);
-      }).catch(() => { dlBtn.disabled = false; dlBtn.textContent = '下载'; });
+      }).catch(() => { dlBtn.disabled = false; dlBtn.textContent = '下载'; activePollPid = null; });
     });
     if (favBtn) favBtn.addEventListener('click', toggleFav);
 
@@ -92,7 +137,7 @@ const lightbox = (() => {
     imgEl.parentElement.addEventListener('touchstart', (e) => { touchX = e.touches[0].clientX; }, { passive: true });
     imgEl.parentElement.addEventListener('touchend', (e) => {
       const diff = touchX - e.changedTouches[0].clientX;
-      if (Math.abs(diff) > 50) showAt(index + (diff > 0 ? 1 : -1));
+      if (Math.abs(diff) > 50) moveFlat(diff > 0 ? 1 : -1);
     }, { passive: true });
   }
 
@@ -100,44 +145,62 @@ const lightbox = (() => {
     if (!root || root.style.display === 'none') return;
     const et = e.target;
     if (et && (et.tagName === 'INPUT' || et.tagName === 'TEXTAREA' || et.isContentEditable)) return;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); showAt(index - 1); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); showAt(index + 1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); moveFlat(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); moveFlat(1); }
     else if (e.key === 'Escape') close();
   }
 
-  function showAt(i) {
+  function render() {
     if (!items.length) return;
-    index = Math.max(0, Math.min(i, items.length - 1));
     const it = items[index];
-    imgEl.src = it.thumbUrl || '';
-    prevBtn.disabled = index === 0;
-    nextBtn.disabled = index >= items.length - 1;
-    counter.textContent = `${index + 1} / ${items.length}`;
+    if (!it) return;
+    const pages = getPages(it);
+    imgEl.src = pages.length ? pages[pageIndex] : (it.thumbUrl || '');
+    const total = totalImages();
+    const flat = flatPosition();
+    prevBtn.disabled = flat === 0;
+    nextBtn.disabled = flat >= total - 1;
+    counter.textContent = `第 ${flat + 1} / ${total} 张`;
     const showFav = typeof it.isFav === 'boolean' && !it.collectionView;
     favBtn.hidden = !showFav;
     if (showFav) {
       favBtn.textContent = it.isFav ? '♥ 已收藏' : '♡ 收藏';
       favBtn.classList.toggle('lb-fav-on', !!it.isFav);
     }
-    dlBtn.disabled = false;
-    dlBtn.textContent = '下载';
-    maybeUpgrade();
+    if (it.pixiv_id !== activePollPid) {
+      dlBtn.disabled = false;
+      dlBtn.textContent = '下载';
+    }
+    discover();
   }
 
-  // 已下载作品升级为原图（静默，失败忽略）
-  function maybeUpgrade() {
+  function showAt(i) {
+    if (!items.length) return;
+    index = Math.max(0, Math.min(i, items.length - 1));
+    pageIndex = 0;
+    render();
+  }
+
+  // 页源探测（静默，失败忽略）：local_urls（原图）→ medium_urls（中图）→ 缩略图兜底。
+  // 每个作品只探测一次；结果存到 item.pages，供渲染与再次访问复用。
+  function discover() {
     const it = items[index];
-    if (!it || upgraded.has(it.pixiv_id)) return;
-    upgraded.add(it.pixiv_id);
-    fetch(`/api/detail/${it.pixiv_id}`)
+    if (!it) return;
+    const pid = it.pixiv_id;
+    if (loadedPids.has(pid)) return;
+    loadedPids.add(pid);
+    fetch(`/api/detail/${pid}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (d && d.local_urls && d.local_urls.length) {
-          if (index < items.length && items[index].pixiv_id === it.pixiv_id) {
-            imgEl.src = d.local_urls[0];
-          } else {
-            upgraded.delete(it.pixiv_id);
-          }
+        if (!d) return;
+        let pages = null;
+        if (d.local_urls && d.local_urls.length) pages = d.local_urls;
+        else if (d.medium_urls && d.medium_urls.length) pages = d.medium_urls;
+        if (!pages) return;
+        it.pages = pages;
+        if (root.style.display !== 'none' && items[index] === it) {
+          pageIndex = 0;   // 页数已探明：回到首张重新渲染（含计数更新）
+          render();
         }
       }).catch(() => {});
   }
@@ -165,7 +228,8 @@ const lightbox = (() => {
     if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
     if (!root) build();
     items = list || [];
-    upgraded.clear();  // 每次打开重新探测，避免陈旧
+    loadedPids.clear();  // 每次打开重新探测页源，避免陈旧
+    activePollPid = null;
     showAt(startIndex || 0);
     root.style.display = 'flex';
     requestAnimationFrame(() => root.classList.add('lb-open'));
@@ -178,6 +242,7 @@ const lightbox = (() => {
     root.classList.remove('lb-open');
     closeTimer = setTimeout(() => { root.style.display = 'none'; }, 200);
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    activePollPid = null;
     document.body.style.overflow = '';
   }
 
