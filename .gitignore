@@ -1,4 +1,4 @@
-venv/
+﻿venv/
 __pycache__/
 *.pyc
 cookies.txt
@@ -12,3 +12,6 @@ build/
 .pytest-tmp/
 .wt-test-tmp/
 .worktree-patch/
+
+# brainstorm visual companion session files
+.superpowers/
