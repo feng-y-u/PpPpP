@@ -153,7 +153,8 @@
   border-radius: var(--radius-card);
   overflow: hidden;
   cursor: pointer;
-  background: var(--bg-thumb);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-card);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 .photo-card:hover {
@@ -218,16 +219,15 @@
   gap: 3px;
   margin-top: 0.15rem;
 }
-.photo-tag {
+.photo-tag, .tag-badge {
   font-size: 0.62rem;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--accent-subtle);
+  color: var(--accent) !important;
+  background: var(--accent-subtle) !important;
+  padding: 2px 9px;
+  border-radius: 999px;
   transition: all 0.15s;
 }
-.photo-tag:hover { color: var(--accent); }
+.photo-tag:hover { color: var(--accent-hover); background: rgba(226,87,126,.16); }
 .tag-block-x { opacity: 0.35; margin-left: 2px; transition: opacity 0.15s; }
 .tag-block-x:hover { opacity: 1; color: var(--danger); }
 
@@ -238,7 +238,7 @@
 .photo-card-actions .btn {
   font-size: 0.68rem;
   padding: 0.2rem 0.7rem;
-  border-radius: 5px;
+  border-radius: var(--radius-btn);
   font-weight: 500;
 }
 

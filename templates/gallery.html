@@ -14,12 +14,20 @@
   border-radius: var(--radius-card);
   overflow: hidden;
   background: var(--bg-elevated);
+  box-shadow: var(--shadow-card);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   height: 100%;
 }
 .gallery-card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-card-hover);
+}
+.card-img-wrap img { transition: transform 0.3s ease; }
+.card-img-wrap:hover img { transform: scale(1.03); }
+/* 选中态：批量勾选时粉描边 + 上浮 */
+.gallery-card.card-selected {
+  box-shadow: 0 0 0 2px var(--accent), var(--shadow-card-hover);
+  transform: translateY(-2px);
 }
 
 .card-img-wrap {
@@ -57,12 +65,13 @@
 }
 .card-info { font-size: 0.73rem; color: var(--text-secondary); margin-bottom: 0.2rem; }
 .tags-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin: 0.25rem 0; }
-.tag-badge {
+.photo-tag, .tag-badge {
   font-size: 0.62rem;
+  color: var(--accent) !important;
   background: var(--accent-subtle) !important;
-  color: var(--text-muted) !important;
-  border-radius: 3px;
-  padding: 1px 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  transition: all 0.15s;
 }
 
 
