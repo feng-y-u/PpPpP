@@ -182,7 +182,8 @@ const lightbox = (() => {
   }
 
   // 页源探测（静默，失败忽略）：local_urls（原图）→ medium_urls（中图）→ 缩略图兜底。
-  // 每个作品只探测一次；结果存到 item.pages，供渲染与再次访问复用。
+  // 每个作品只探测一次（loadedPids 防并发重复请求）；探测失败或走缩略图兜底时
+  // 移除标记，下次切回该作品会重试（本机请求很廉价，重试安全）。
   function discover() {
     const it = items[index];
     if (!it) return;
@@ -192,17 +193,17 @@ const lightbox = (() => {
     fetch(`/api/detail/${pid}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (!d) return;
+        if (!d) { loadedPids.delete(pid); return; }
         let pages = null;
         if (d.local_urls && d.local_urls.length) pages = d.local_urls;
         else if (d.medium_urls && d.medium_urls.length) pages = d.medium_urls;
-        if (!pages) return;
+        if (!pages) { loadedPids.delete(pid); return; }
         it.pages = pages;
         if (root.style.display !== 'none' && items[index] === it) {
           pageIndex = 0;   // 页数已探明：回到首张重新渲染（含计数更新）
           render();
         }
-      }).catch(() => {});
+      }).catch(() => { loadedPids.delete(pid); });  // 网络抖动：不锁定，下次访问重试
   }
 
   async function toggleFav() {
