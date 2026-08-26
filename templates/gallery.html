@@ -22,7 +22,7 @@
   transform: translateY(-2px);
   box-shadow: var(--shadow-card-hover);
 }
-.card-img-wrap img { transition: transform 0.3s ease; }
+.card-img-wrap img { transition: transform 0.3s ease, opacity 0.25s ease; }
 .card-img-wrap:hover img { transform: scale(1.03); }
 /* 选中态：批量勾选时粉描边 + 上浮 */
 .gallery-card.card-selected {
@@ -143,6 +143,13 @@
   pointer-events: none;
 }
 .batch-float-bar .btn { font-size: 0.78rem; }
+/* 计数弹跳：选择数变化时 0.18s scale(1.15→1) */
+#batchFloatCount { display: inline-block; }
+#batchFloatCount.bounce { animation: countBounce 0.18s ease; }
+@keyframes countBounce {
+  0% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
 .batch-collection-select {
   font-size: 0.78rem;
   border-radius: 6px;

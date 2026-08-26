@@ -385,6 +385,7 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
             btn.closest('.gallery-card')?.parentElement?.remove();
           });
         });
+        currentResults = currentResults.filter(x => !ids.includes(x.pixiv_id));
         selectedPids.clear();
         updateFloatBar();
         btn.disabled = false;
@@ -416,6 +417,7 @@ $('#confirmDeleteBtn').addEventListener('click', async () => {
       document.querySelectorAll(`[data-pid="${deleteTarget}"].delete-btn`).forEach(btn => {
         btn.closest('.gallery-card')?.parentElement?.remove();
       });
+      currentResults = currentResults.filter(x => x.pixiv_id !== deleteTarget);
       btn.disabled = false;
       btn.textContent = '删除';
     } else {
@@ -442,6 +444,10 @@ function updateFloatBar() {
   }
   bar.classList.remove('hidden');
   $('#batchFloatCount').textContent = `已选 ${count} 个`;
+  const c = $('#batchFloatCount');
+  c.classList.remove('bounce');
+  void c.offsetWidth;  // 重触发
+  c.classList.add('bounce');
   $('#btnFloatDelete').textContent = `删除 (${count})`;
   $('#btnFloatRemoveColl').style.display = activeCollectionId ? '' : 'none';
 }

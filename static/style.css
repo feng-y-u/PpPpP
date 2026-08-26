@@ -164,6 +164,12 @@ input[type="number"] { -moz-appearance: textfield; }
 .modal-content { background: var(--bg-elevated); border: 1px solid var(--border-card); border-radius: var(--radius-lg); box-shadow: var(--shadow-card-hover); color: var(--text-primary); }
 .modal-header { border-bottom: 1px solid var(--border-subtle); }
 .modal-footer { border-top: 1px solid var(--border-subtle); }
+/* 弹窗显示：0.18s 缩放淡入（设计规范） */
+.modal.fade .modal-content { animation: modalIn 0.18s ease; }
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(.96); }
+  to   { opacity: 1; transform: none; }
+}
 .btn-close { filter: none; opacity: .4; }
 .btn-close:hover { opacity: .7; }
 
