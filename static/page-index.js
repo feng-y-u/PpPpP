@@ -6,7 +6,6 @@ let nextCursor = null;
 let currentPage = 1;
 let hasMore = false;
 let currentSearchType = null;
-let currentResults = [];
 
 const R18_STATE_KEY = 'pixiv_r18_mode';
 const SEARCH_STATE_KEY = 'pv_search_state';
@@ -103,7 +102,6 @@ function renderPage(pageNum) {
   if (!page) return;
   const grid = $('#masonryGrid');
   grid.innerHTML = '';
-  currentResults = page;
   renderInChunks(page, (r) => {
     const node = renderCard(r);
     grid.appendChild(node);
@@ -281,7 +279,6 @@ function finishSearch(data) {
   currentPage = 1;
   const grid = $('#masonryGrid');
   const results = loadedPages[0];
-  currentResults = loadedPages[0];
   renderInChunks(results, (r) => {
     const node = renderCard(r);
     grid.appendChild(node);
@@ -417,14 +414,10 @@ function renderCard(r) {
     });
   });
 
-  // Card click → lightbox
+  // Card click → detail page
   item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
-    const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
-    lightbox.open(currentResults.map(x => ({
-      pixiv_id: x.pixiv_id,
-      thumbUrl: proxyThumb(x.thumb_url),
-    })), idx >= 0 ? idx : 0);
+    window.location.href = `/detail/${r.pixiv_id}`;
   });
 
   // Artist click

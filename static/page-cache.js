@@ -1,7 +1,7 @@
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
 
 // ── Render Card ──
-// 简化版：标签/画师不可点击（无搜索集成），卡片点击弹 lightbox 预览，下载按钮与搜索页一致
+// 简化版：标签/画师不可点击（无搜索集成），卡片点击进详情，下载按钮与搜索页一致
 function renderCard(r) {
   const isDone = r.download_status === 'done';
   const isDl = r.download_status === 'downloading';
@@ -37,14 +37,10 @@ function renderCard(r) {
     </div>`;
   $('#masonryGrid').appendChild(item);
 
-  // Card click → lightbox（下载/删除按钮区域除外）
+  // Card click → detail page
   item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-card-actions')) return;
-    const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
-    lightbox.open(currentResults.map(x => ({
-      pixiv_id: x.pixiv_id,
-      thumbUrl: proxyThumb(x.thumb_url),
-    })), idx >= 0 ? idx : 0);
+    window.location.href = `/detail/${r.pixiv_id}`;
   });
 
   // Download button
@@ -83,7 +79,6 @@ async function deleteCacheItem(pixivId, title, btn) {
     }
     const card = btn.closest('.photo-card');
     card?.closest('.masonry-item')?.remove();
-    currentResults = currentResults.filter(x => x.pixiv_id !== pixivId);
     showToast('已从缓存删除');
   } catch {
     showToast('删除失败', true);
@@ -97,7 +92,6 @@ let currentOffset = 0;
 let cacheHasMore = false;
 let cachePageSize = 24;
 let cacheFilteredTotal = 0;
-let currentResults = [];
 
 async function loadCacheTags() {
   try {
@@ -165,7 +159,6 @@ function showCacheSkeleton() {
 function renderCacheResults(data) {
   cachePageSize = data.page_size || cachePageSize;
   cacheFilteredTotal = data.filtered_total || 0;
-  currentResults = data.results;
   $('#masonryGrid').innerHTML = '';
   if (!data.results.length) {
     $('#emptyState').style.display = 'block';

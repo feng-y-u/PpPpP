@@ -46,6 +46,7 @@ function setActiveTag(tag) {
     el.style.display = 'none';
     input.value = '';
   }
+  invalidateGalleryCache();
   loadGallery(1);
 }
 
@@ -265,7 +266,7 @@ function renderCard(r) {
         <button class="card-fav-btn${r.is_favorite ? ' favorited' : ''}" data-pid="${r.pixiv_id}" title="${r.is_favorite ? '取消收藏' : '收藏'}">${r.is_favorite ? '❤' : '♡'}</button>
         <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23ecece7'%3E%3C/svg%3E"
              data-src="${escAttr(thumbUrl)}" loading="lazy" class="img-fade" alt="">
-        <span class="size-badge">${fmtSize(r.file_size || 0)}</span>
+        <span class="page-badge">${r.page_count || r.file_count || 1} 张</span><span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
       <div class="card-body">
         <div class="card-title" title="${escAttr(r.title)}">${r.is_favorite ? '❤ ' : ''}${escHtml(r.title)}</div>
@@ -552,11 +553,13 @@ $('#collectionSelect').addEventListener('change', function() {
   const name = this.options[this.selectedIndex]?.text || '';
   $('#pageTitle').textContent = activeCollectionId ? `${name} - 收藏夹` : '已下载作品';
   clearSelection();
+  invalidateGalleryCache();
   loadGallery(1);
 });
 
 $('#sortSelect').addEventListener('change', function() {
   sortOrder = this.value;
+  invalidateGalleryCache();
   loadGallery(1);
 });
 
