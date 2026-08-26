@@ -198,7 +198,7 @@ function renderInChunks(items, renderFn, opts) {
         const node = renderFn(items[i], i);
         if (node && node.addEventListener) {
           node.classList.add('card-enter');
-          if (node.style) node.style.animationDelay = `${i * delay}ms`;
+          if (node.style) node.style.animationDelay = `${Math.min(i, 24) * delay}ms`;
           // 动画结束后清理内联 delay，避免影响后续 hover 过渡
           node.addEventListener('animationend', function handler(ev) {
             if (ev.animationName === 'cardIn') {
