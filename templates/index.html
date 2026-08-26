@@ -33,55 +33,33 @@
 }
 
 .search-bar {
-  display: flex;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-input);
-  border-radius: 10px;
-  overflow: hidden;
+  display: flex; background: var(--bg-elevated);
+  border: 1px solid var(--border-input); border-radius: 999px;
+  padding: 4px; overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
-.search-bar:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-subtle);
-}
-
-.search-bar select, .search-bar input, .search-bar .form-control, .search-bar .form-select {
-  background: transparent !important;
-  border: none;
-  color: var(--text-primary);
-  font-size: 0.88rem;
-  padding: 0.6rem 0.85rem;
-  outline: none;
-  box-shadow: none;
-  -webkit-appearance: none;
-  appearance: none;
-}
-.search-bar .form-control::placeholder { color: var(--text-muted); }
-.search-bar select, .search-bar .form-select {
-  color: var(--text-secondary);
-  width: auto;
-  cursor: pointer;
-  border-left: 1px solid var(--border-subtle) !important;
-  border-radius: 0;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%238a8a82' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
-  background-repeat: no-repeat !important;
-  background-position: right 0.6rem center !important;
-  padding-right: 1.8rem !important;
-}
-.search-bar select option, .search-bar .form-select option { background: #fff; color: #2b2b2b; }
-
+.search-bar:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-focus); }
+.search-bar .form-control { border: none; background: transparent !important; border-radius: 999px; }
 .search-bar .btn-search {
-  background: var(--accent);
-  border: none;
-  color: #fff;
-  font-weight: 600;
-  font-size: 0.85rem;
-  padding: 0.6rem 1.4rem;
-  cursor: pointer;
-  transition: background 0.2s;
+  background: var(--accent); border: none; color: #fff;
+  font-weight: 600; font-size: 0.85rem; padding: 0.55rem 1.5rem;
+  border-radius: 999px; cursor: pointer; transition: background 0.2s;
   white-space: nowrap;
 }
 .search-bar .btn-search:hover { background: var(--accent-hover); }
+
+.search-type-tabs {
+  display: inline-flex; gap: 4px; padding: 4px;
+  background: var(--bg-elevated); border: 1px solid var(--border-input);
+  border-radius: 999px; margin-bottom: 10px;
+}
+.st-tab {
+  border: none; background: transparent; color: var(--text-secondary);
+  font-size: 0.8rem; padding: 6px 18px; border-radius: 999px;
+  cursor: pointer; transition: all 0.2s;
+}
+.st-tab:hover { color: var(--text-primary); }
+.st-tab.active { background: var(--accent); color: #fff; font-weight: 600; }
 
 /* ── Filters Row ── */
 .filters-row {
@@ -106,6 +84,9 @@
   -webkit-appearance: none;
   appearance: none;
   -moz-appearance: textfield;
+}
+.filters-row select, .filters-row input, .filters-row .form-select, .filters-row .form-control {
+  border-radius: 999px !important;
 }
 .filters-row input[type="number"]::-webkit-inner-spin-button,
 .filters-row input[type="number"]::-webkit-outer-spin-button {
@@ -302,17 +283,18 @@
     <div class="search-hero-sub">按标签搜索、画师检索、关注动态</div>
 
     <div class="search-bar-wrap">
+      <div class="search-type-tabs" id="searchTypeTabs">
+        <button type="button" class="st-tab" data-type="tag">标签</button>
+        <button type="button" class="st-tab" data-type="user">画师</button>
+        <button type="button" class="st-tab" data-type="following">关注</button>
+      </div>
+      <select id="searchType" hidden>
+        <option value="tag">标签</option>
+        <option value="user">画师</option>
+        <option value="following">关注</option>
+      </select>
       <div class="search-bar">
-        <select id="searchType">
-          <option value="tag">标签</option>
-          <option value="user">画师UID</option>
-          <option value="following">关注</option>
-        </select>
         <input id="searchQuery" class="form-control" placeholder="多个标签用逗号分隔">
-        <select id="tagMode" title="组合方式">
-          <option value="or">OR</option>
-          <option value="and">AND</option>
-        </select>
         <button id="searchBtn" class="btn-search">搜索</button>
       </div>
     </div>
@@ -323,6 +305,12 @@
       <select id="sortOrder">
         <option value="date_d">最新</option>
         <option value="popular_d">综合</option>
+      </select>
+
+      <label>组合</label>
+      <select id="tagMode" title="组合方式">
+        <option value="or">OR</option>
+        <option value="and">AND</option>
       </select>
 
       <label>收藏≥</label>
@@ -396,6 +384,7 @@
 
 <script src="/static/vendor/bootstrap-5.3.3/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/lightbox.js"></script>
 <script src="/static/page-index.js"></script>
 </div>
 <footer class="site-footer">

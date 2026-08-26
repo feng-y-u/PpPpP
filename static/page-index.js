@@ -6,6 +6,7 @@ let nextCursor = null;
 let currentPage = 1;
 let hasMore = false;
 let currentSearchType = null;
+let currentResults = [];
 
 const R18_STATE_KEY = 'pixiv_r18_mode';
 const SEARCH_STATE_KEY = 'pv_search_state';
@@ -102,6 +103,7 @@ function renderPage(pageNum) {
   if (!page) return;
   const grid = $('#masonryGrid');
   grid.innerHTML = '';
+  currentResults = page;
   renderInChunks(page, (r) => {
     const node = renderCard(r);
     grid.appendChild(node);
@@ -279,6 +281,7 @@ function finishSearch(data) {
   currentPage = 1;
   const grid = $('#masonryGrid');
   const results = loadedPages[0];
+  currentResults = loadedPages[0];
   renderInChunks(results, (r) => {
     const node = renderCard(r);
     grid.appendChild(node);
@@ -349,6 +352,10 @@ function updateSearchUI() {
   } else {
     ['#sortOrder','#minBookmarks'].forEach(id => $(id).style.display = '');
   }
+  // 页签 active 态同步
+  $$('#searchTypeTabs .st-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.type === $('#searchType').value);
+  });
 }
 $('#searchType').addEventListener('change', updateSearchUI);
 
@@ -406,10 +413,14 @@ function renderCard(r) {
     });
   });
 
-  // Card click → detail page
-  item.querySelector('.photo-card').addEventListener('click', e => {
+  // Card click → lightbox
+  item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
-    window.location.href = `/detail/${r.pixiv_id}`;
+    const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
+    lightbox.open(currentResults.map(x => ({
+      pixiv_id: x.pixiv_id,
+      thumbUrl: proxyThumb(x.thumb_url),
+    })), idx >= 0 ? idx : 0);
   });
 
   // Artist click
@@ -503,6 +514,14 @@ function loadR18Mode() {
 
 // ── Init ──
 loadR18Mode();
+
+// 搜索类型页签
+$('#searchTypeTabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('.st-tab');
+  if (!tab) return;
+  $('#searchType').value = tab.dataset.type;
+  updateSearchUI();
+});
 
 $('#searchBtn').addEventListener('click', () => doSearch());
 $('#searchQuery').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
