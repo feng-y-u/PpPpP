@@ -60,8 +60,9 @@ _queued_downloads: set[int] = set()
 _download_progress: dict[int, dict] = {}
 
 # ── 简单内存限流器 ──
+# 清理计数器 _rate_limit_cleanup_counter 已随 _rate_limit 迁至 middleware.py
+#（函数内 global 声明指向其定义模块，单一归属；此处仅保留原地修改的 store）。
 _rate_limit_store: dict[str, list[float]] = {}
-_rate_limit_cleanup_counter = 0
 
 # ── 异步搜索任务 ──
 # 搜索（含限速拉取详情）在后台线程执行，/search 立即返回 task_id，

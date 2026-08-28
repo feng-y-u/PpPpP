@@ -15,15 +15,13 @@ import atexit
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from functools import wraps
-from typing import Callable
 from io import BytesIO
 
 import requests
 import urllib3
 from flask import (
     Flask, jsonify, render_template, request, session,
-    send_file, abort, Response, redirect, url_for,
+    send_file, abort, Response, redirect,
 )
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -53,7 +51,11 @@ from runtime import (_scan_cache, _SCAN_CACHE_TTL, _thumb_sem, _thumb_failed,
                      _auto_follow_state, _auto_follow_stop, _prefetch_state,
                      _queued_downloads, _download_progress, download_cancellations,
                      download_executor, _search_tasks, _search_tasks_lock,
-                     SEARCH_TASK_TTL, _rate_limit_store, _rate_limit_cleanup_counter)
+                     SEARCH_TASK_TTL, _rate_limit_store)
+# 中间件（认证/CSRF/限流/安全头）——app 级钩子经 middleware_bp 注册全局生效；
+# _rate_limit_store 仍在 app 命名空间可见（tests/test_auth.py 清空同一共享 dict）
+from middleware import (bp as middleware_bp, _get_csrf_token, _rate_limit,
+                        _get_json_body, _csrf_required, _safe_next, _is_authed)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +100,9 @@ app.config.update(
     SESSION_COOKIE_SECURE=COOKIE_SECURE,
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
+
+# 中间件 Blueprint：不承载路由，仅注册 app 级钩子（认证拦截/安全头/限流等）
+app.register_blueprint(middleware_bp)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'image_cache')
@@ -578,90 +583,6 @@ def _download_illust(pixiv_id: int) -> None:
         _queued_downloads.discard(pixiv_id)
 
 
-# ── 简单内存限流器 ──
-def _rate_limit(max_attempts: int = 5, window: int = 60) -> Callable:
-    """装饰器：限制同一 IP 在 window 秒内最多 max_attempts 次请求。"""
-    def decorator(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            global _rate_limit_cleanup_counter
-            ip = request.remote_addr or 'unknown'
-            now = time.time()
-            records = _rate_limit_store.setdefault(ip, [])
-            # 移除过期的记录
-            records[:] = [t for t in records if now - t < window]
-            if len(records) >= max_attempts:
-                return jsonify({'error': '请求过于频繁，请稍后再试'}), 429
-            records.append(now)
-            # 定期清理过期的 IP 记录
-            _rate_limit_cleanup_counter += 1
-            if _rate_limit_cleanup_counter >= 100:
-                _rate_limit_cleanup_counter = 0
-                cutoff = now - window
-                stale = [k for k, v in _rate_limit_store.items() if v and max(v) < cutoff]
-                for k in stale:
-                    del _rate_limit_store[k]
-            return f(*args, **kwargs)
-        return decorated
-    return decorator
-
-
-def _get_csrf_token() -> str:
-    if '_csrf_token' not in session:
-        session['_csrf_token'] = secrets.token_hex(16)
-    return session['_csrf_token']
-
-
-def _get_json_body() -> dict:
-    """安全解析请求 JSON：非法 JSON / 非对象（list、标量、null）一律返回空 dict。"""
-    data = request.get_json(silent=True)
-    return data if isinstance(data, dict) else {}
-
-
-def _csrf_required(f: Callable) -> Callable:
-    """装饰器：POST 接口要求携带有效的 X-CSRF-Token 请求头。"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('X-CSRF-Token', '')
-        expected = session.get('_csrf_token', '')
-        if not token or not expected or not hmac.compare_digest(token, expected):
-            return jsonify({'error': 'CSRF校验失败'}), 403
-        return f(*args, **kwargs)
-    return decorated
-
-
-# ── 全局认证 ──
-_AUTH_EXEMPT_PATHS = {'/login', '/favicon.ico', '/csrf-token'}
-_AUTH_EXEMPT_PREFIXES = ('/static',)
-
-
-def _is_authed() -> bool:
-    return not ACCESS_PASSWORD or bool(session.get('authed'))
-
-
-@app.before_request
-def _require_login():
-    if _is_authed():
-        return None
-    path = request.path
-    if path in _AUTH_EXEMPT_PATHS or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
-        return None
-    if path.startswith('/api/') or path == '/search' or request.method != 'GET':
-        return jsonify({'error': '未登录', 'error_code': 'AUTH_REQUIRED'}), 401
-    return redirect(url_for('login_page', next=path))
-
-
-def _safe_next(url: str) -> str:
-    """防开放重定向：只允许站内相对路径。"""
-    if not url or not url.startswith('/'):
-        return '/'
-    # 拒绝协议相对地址（//...）及其反斜杠变体：浏览器会把首字符 \ 规整为 /，
-    # 使 "/\evil.com" 变成 "//evil.com" 协议相对 URL；控制字符一律拒绝。
-    if url.startswith('//') or '\\' in url or any(ord(c) < 0x20 for c in url):
-        return '/'
-    return url
-
-
 @app.route('/login', methods=['GET'])
 def login_page():
     if _is_authed():
@@ -681,21 +602,6 @@ def login_submit():
         return jsonify({'ok': True, 'next': _safe_next(str(body.get('next', '')))})
     time.sleep(1)  # 失败延迟，减缓爆破
     return jsonify({'error': '密码错误'}), 403
-
-
-@app.after_request
-def _security_headers(resp: Response) -> Response:
-    resp.headers['X-Content-Type-Options'] = 'nosniff'
-    resp.headers['X-Frame-Options'] = 'DENY'
-    resp.headers['Referrer-Policy'] = 'no-referrer'
-    # CSP：脚本已全部抽离到 static/，script-src 收紧为 'self'；
-    # style 仍允许 unsafe-inline（模板大量 style 属性），img 放行 data:
-    resp.headers['Content-Security-Policy'] = (
-        "default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
-    )
-    return resp
 
 
 @app.route('/favicon.ico')
