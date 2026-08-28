@@ -34,12 +34,13 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 
 | 文件 | 作用 |
 |------|------|
-| `app.py` | Flask 入口：所有路由、下载引擎、后台任务、CSRF、限流 |
+| `app.py` | Flask 入口：组装（app/配置/Blueprint 注册/后台线程）、路由、下载引擎、后台任务 |
 | `fetcher.py` | Pixiv API 封装：Cookie/OAuth 认证、搜索、作品详情 |
 | `models.py` | SQLAlchemy ORM：Illust、BlockedTag、DownloadLog、Collection、CollectionItem |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
 | `runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：后台任务状态、扫描/TTL 缓存、下载队列、限流存储等全部模块级状态 |
 | `helpers.py` | 纯工具函数与库内查询：下载目录/扫描、URL 与展示工具、`query_cached_tag`、收藏夹位置计算 |
+| `middleware.py` | 认证/CSRF/限流/安全头中间件；app 级钩子（before/after_app_request）随 `middleware_bp` 注册 |
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（可选磁盘清理 cron：仅清理**已下载原图**，不参与预取缓存容量控制） |
@@ -55,7 +56,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 ### 进程与状态
 - **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_search_tasks`、`_rate_limit_store`、`_prefetch_state`。多 worker 不共享。详见 `runtime.py` 的 ⚠ 多进程限制注释（状态定义已随模块化迁移至 `runtime.py`）。
 - **单 Worker 进程内状态是个人自用的明确取舍**：不做 Redis/Celery/多 Worker 协调——所有后台任务与内存状态都依赖单进程常驻，这是本项目按单用户自用场景的有意设计，不是缺陷。
-- **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login`（`app.py:664`）和 `/api/settings/unlock`（`app.py:1976`）。
+- **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login`（`app.py:595`）和 `/api/settings/unlock`（`app.py:1758`）。
 
 ### 配置与重启
 - **settings.json 需重启服务器**：`config.py` 在导入时读取 `instance/settings.json`。通过 Web UI 修改后需重启进程生效。

@@ -11,15 +11,16 @@ from flask import Blueprint, Response, jsonify, redirect, request, session, url_
 
 from runtime import _rate_limit_store
 
-bp = Blueprint('middleware', __name__)  # 不承载路由，仅用于 app 级钩子
+bp = Blueprint('middleware', __name__)  # 不承载路由，仅用于挂 app 级钩子；无循环导入问题（不 import app）
 
+
+# ── 简单内存限流器 ──
 # _rate_limit 内 `global _rate_limit_cleanup_counter` 指向本模块命名空间，
 # 计数器因此随函数迁到本模块（单一归属）；runtime.py 只保留被原地修改的
 # _rate_limit_store（from-import 共享同一 dict 对象）。
 _rate_limit_cleanup_counter = 0
 
 
-# ── 简单内存限流器 ──
 def _rate_limit(max_attempts: int = 5, window: int = 60) -> Callable:
     """装饰器：限制同一 IP 在 window 秒内最多 max_attempts 次请求。"""
     def decorator(f):

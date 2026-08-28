@@ -443,7 +443,7 @@ git commit -m "refactor: 提取 routes_download/prefetch/collections/settings Bl
 
 核对：`grep -n "@app.route" app.py` 应只剩 `/`、`/cache`、`/favicon.ico` 等 2-3 条；`Get-Content app.py | Measure-Object -Line` 应 ≤ 250 行。若某私有函数仍留在 app.py 且仅被单一路由使用，评估搬去对应模块（能搬则搬）。
 
-随后清理 Task 1 遗留的死 import（均仅 import、无 app.py 内引用）：`_pid_in_clause`、`_scan_cache`、`_SCAN_CACHE_TTL`（from-import 块）、`urlsafe_b64encode`、`ThreadPoolExecutor`、`DOWNLOAD_MAX_WORKERS`、`AUTO_FOLLOW_INTERVAL`、`AUTO_FOLLOW_DOWNLOAD`、`PREFETCH_INTERVAL`、`PREFETCH_PAGES`、`PREFETCH_MAX_ILLUSTS`、`MEDIUM_IMAGE_SIZE`。
+随后清理 Task 1 遗留的死 import（均仅 import、无 app.py 内引用）：`_pid_in_clause`、`_scan_cache`、`_SCAN_CACHE_TTL`（from-import 块）、`urlsafe_b64encode`、`ThreadPoolExecutor`、`DOWNLOAD_MAX_WORKERS`、`AUTO_FOLLOW_INTERVAL`、`AUTO_FOLLOW_DOWNLOAD`、`PREFETCH_INTERVAL`、`PREFETCH_PAGES`、`PREFETCH_MAX_ILLUSTS`、`MEDIUM_IMAGE_SIZE`。注意 `_rate_limit_store`（from-import 块）**保留不删**：app.py 内虽无引用，但 tests/test_auth.py 依赖 `app._rate_limit_store` 绑定（与 middleware 共享同一 dict）清空限流存储（Task 2 遗留的测试契约绑定）。
 
 - [ ] **Step 2: 创建 `docs/architecture.md`**
 
