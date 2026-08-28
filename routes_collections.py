@@ -6,7 +6,6 @@ from __future__ import annotations
 from flask import Blueprint, Response, jsonify, request
 from sqlalchemy import text
 
-import helpers
 from helpers import _compute_move_position, _next_collection_position
 from middleware import _csrf_required, _get_json_body
 from models import Collection, CollectionItem, get_session, safe_commit

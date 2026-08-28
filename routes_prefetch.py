@@ -11,10 +11,7 @@ import threading
 
 from flask import Blueprint, Response, jsonify, request
 
-import background
-import runtime
 from background import _collect_other_tag_pids
-from config import SETTINGS_KEYS
 from middleware import _csrf_required, _get_json_body
 from models import (CollectionItem, Illust, SearchCache, get_session,
                     safe_commit)

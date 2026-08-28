@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import hmac
-import json
 import logging
 import os
 import platform
@@ -10,47 +8,35 @@ import re
 import secrets
 import threading
 import time
-import zipfile
 import atexit
-from base64 import urlsafe_b64decode, urlsafe_b64encode
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from io import BytesIO
 
-import requests
 import urllib3
 from flask import (
     Flask, jsonify, render_template, request, session,
-    send_file, abort, Response, redirect,
+    send_file, Response, redirect,
 )
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
 
 from config import (
-    DOWNLOAD_DIR, DOWNLOAD_MAX_WORKERS, PAGE_DOWNLOAD_INTERVAL,
-    MAX_BOOKMARKS_DEFAULT, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
-    PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
-    MEDIUM_IMAGE_SIZE,
+    DOWNLOAD_DIR, PAGE_DOWNLOAD_INTERVAL,
+    MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
     ITEMS_PER_PAGE,
 )
 import config as config_module
-from models import init_db, get_session, get_favorite_pids, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
+from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
 import fetcher
-from fetcher import search_by_tag, search_by_user, fetch_following, browse_discovery, build_pixiv_session, _get_illust_detail, _is_r18, PixivAuthError, encode_cursor, decode_cursor, paginated_search, clear_search_cache
+from fetcher import search_by_tag, search_by_user, browse_discovery, build_pixiv_session, _get_illust_detail, _is_r18, encode_cursor, paginated_search, clear_search_cache
 
 import helpers
 import runtime
-from helpers import (query_cached_tag, _scan_local_downloads, _build_orphan_dicts,
-                     _proxy_thumb, _original_to_resized, _fetch_original_urls,
-                     _get_download_dir, _page_sort_key, _extract_ext, _fmt_num,
-                     _safe_int, _pid_in_clause, _delete_illust_files,
+from helpers import (query_cached_tag, _fetch_original_urls,
+                     _get_download_dir,
                      _next_collection_position, _compute_move_position)
-from runtime import (_scan_cache, _SCAN_CACHE_TTL, _thumb_sem, _thumb_failed,
-                     _THUMB_FAIL_COOLDOWN, _db_pids_cache, _DB_PIDS_CACHE_TTL,
+from runtime import (_scan_cache, _SCAN_CACHE_TTL, _db_pids_cache,
                      _auto_follow_state, _auto_follow_stop, _prefetch_state,
                      _queued_downloads, _download_progress, download_cancellations,
-                     download_executor, _search_tasks, _search_tasks_lock,
+                     download_executor,
                      SEARCH_TASK_TTL, _rate_limit_store)
 # 中间件（认证/CSRF/限流/安全头）——app 级钩子经 middleware_bp 注册全局生效；
 # _rate_limit_store 仍在 app 命名空间可见（tests/test_auth.py 清空同一共享 dict）
@@ -63,7 +49,7 @@ import background
 from background import (
     _download_illust, _shutdown_background_threads,
     _reset_stuck_downloads, _reset_stuck_prefetch,
-    _prefetch_one_tag, _collect_other_tag_pids, _remove_pids_from_search_caches,
+    _prefetch_one_tag, _collect_other_tag_pids,
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
     _start_prefetch_thread,
 )

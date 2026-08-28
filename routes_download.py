@@ -11,8 +11,6 @@ from io import BytesIO
 
 from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
-import helpers
-import runtime
 from background import _download_illust
 from helpers import _fetch_original_urls, _get_download_dir
 from middleware import _csrf_required, _get_csrf_token, _get_json_body

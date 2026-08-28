@@ -15,11 +15,10 @@ import re
 import time
 
 from flask import (Blueprint, Response, jsonify, redirect, render_template,
-                   request, session, url_for)
+                   request, session)
 
 import config as config_module
 import fetcher
-import runtime
 from fetcher import clear_search_cache
 from middleware import (_csrf_required, _get_csrf_token, _get_json_body,
                         _is_authed, _rate_limit, _safe_next)
