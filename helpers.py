@@ -19,6 +19,8 @@ import runtime
 logger = logging.getLogger(__name__)
 
 
+# ── 文件系统/下载目录 ──
+
 def _get_download_dir(pixiv_id: int) -> str:
     return os.path.join(DOWNLOAD_DIR, str(pixiv_id))
 
@@ -89,6 +91,8 @@ def _build_orphan_dicts(pixiv_ids: list[int], local_items: dict[int, list[str]])
         })
     return results
 
+
+# ── 库内查询 ──
 
 def _pid_in_clause(all_ids: list[int]) -> tuple[str, dict]:
     """把 illust_ids 分片拼进 IN 子句，避免触碰 SQLite 绑定变量上限。"""
@@ -192,6 +196,8 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     return page_dicts, has_more, next_offset, total
 
 
+# ── URL/展示工具 ──
+
 def _extract_ext(url: str) -> str:
     """从图片 URL 中提取文件扩展名。"""
     match = re.search(r'\.(jpg|jpeg|png|gif|webp)(?:\?|$)', url, re.IGNORECASE)
@@ -237,6 +243,8 @@ def _fmt_num(n: int | str) -> str:
     n = int(n)
     return f'{n/10000:.1f}w' if n >= 10000 else str(n)
 
+
+# ── 文件删除与收藏夹位置 ──
 
 def _delete_illust_files(illust: Illust) -> int:
     """删除作品的已下载文件及目录。返回删除的文件数。"""
