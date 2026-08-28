@@ -25,6 +25,7 @@ from runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
 logger = logging.getLogger(__name__)
 
 
+# ── 启动重置 ──
 def _reset_stuck_downloads() -> None:
     """启动时重置上次崩溃/重启遗留下的 downloading 状态。"""
     with get_session() as db:
@@ -68,6 +69,7 @@ def _reset_stuck_prefetch() -> None:
         logger.info(f'[prefetch] 重置了 {len(stuck)} 个卡死的预取标签（fetching → done）')
 
 
+# ── 自动关注后台任务 ──
 def _auto_follow_worker() -> None:
     while not _auto_follow_stop.is_set():
         interval = _auto_follow_state['interval']
@@ -314,7 +316,6 @@ def _prefetch_capacity_cleanup() -> None:
         if not to_delete:
             return
 
-        to_delete_set = set(to_delete)
         _remove_pids_from_search_caches(db, to_delete)
         safe_commit(db)
 
@@ -376,13 +377,8 @@ def _start_prefetch_thread() -> None:
     logger.info(f'[prefetch] 后台线程已启动，interval={interval}s')
 
 
+# ── 下载引擎与生命周期 ──
 download_locks: dict[int, threading.Lock] = {}
-
-
-def _shutdown_background_threads() -> None:
-    """进程退出时优雅停止后台线程（gunicorn worker 退出 / 测试进程结束）。"""
-    _auto_follow_stop.set()
-    download_executor.shutdown(wait=False)
 
 
 def _download_illust(pixiv_id: int) -> None:
@@ -491,9 +487,17 @@ def _download_illust(pixiv_id: int) -> None:
 _auto_follow_thread: threading.Thread | None = None
 
 
+def _shutdown_background_threads() -> None:
+    """进程退出时优雅停止后台线程（gunicorn worker 退出 / 测试进程结束）。"""
+    _auto_follow_stop.set()
+    download_executor.shutdown(wait=False)
+
+
 def start_background_threads() -> None:
     """启动所有后台线程（app.py import 时调用；-w 1 单进程常驻语义）。"""
     global _auto_follow_thread
+    if _auto_follow_thread is not None:
+        return  # 幂等：防止重复调用启动两个工作者
     _auto_follow_thread = threading.Thread(target=_auto_follow_worker, daemon=True)
     _auto_follow_thread.start()
     _start_prefetch_thread()
