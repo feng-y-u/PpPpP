@@ -1,55 +1,44 @@
 from __future__ import annotations
 
-import hmac
 import logging
 import os
 import platform
-import re
 import secrets
 import threading
 import time
 import atexit
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import urllib3
 from flask import (
-    Flask, jsonify, render_template, request, session,
-    send_file, Response, redirect,
+    Flask, jsonify, render_template, Response,
 )
 
 from config import (
-    DOWNLOAD_DIR, PAGE_DOWNLOAD_INTERVAL,
+    DOWNLOAD_DIR,
     MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
-    ITEMS_PER_PAGE,
 )
-import config as config_module
-from models import init_db, get_session, Illust, DownloadLog, BlockedTag, Collection, CollectionItem, SearchCache, safe_commit
+from models import init_db, get_session  # get_session：tests 补丁目标（test_prefetch.py setattr(app, 'get_session')）
 import fetcher
-from fetcher import search_by_tag, search_by_user, browse_discovery, build_pixiv_session, _get_illust_detail, _is_r18, encode_cursor, paginated_search, clear_search_cache
+# 以下为 app 命名空间测试补丁契约绑定，勿删（见 docs/architecture.md「测试契约」）
+from fetcher import search_by_tag, search_by_user, browse_discovery, paginated_search, build_pixiv_session
 
-import helpers
-import runtime
-from helpers import (query_cached_tag, _fetch_original_urls,
-                     _get_download_dir,
-                     _next_collection_position, _compute_move_position)
-from runtime import (_scan_cache, _SCAN_CACHE_TTL, _db_pids_cache,
-                     _auto_follow_state, _auto_follow_stop, _prefetch_state,
-                     _queued_downloads, _download_progress, download_cancellations,
-                     download_executor,
+# 以下为 app 命名空间测试补丁契约绑定，勿删（见 docs/architecture.md「测试契约」）
+from helpers import query_cached_tag
+from runtime import (_scan_cache, _db_pids_cache, _prefetch_state,
                      SEARCH_TASK_TTL, _rate_limit_store)
 # 中间件（认证/CSRF/限流/安全头）——app 级钩子经 middleware_bp 注册全局生效；
-# _rate_limit_store 仍在 app 命名空间可见（tests/test_auth.py 清空同一共享 dict）
-from middleware import (bp as middleware_bp, _get_csrf_token, _rate_limit,
-                        _get_json_body, _csrf_required, _safe_next, _is_authed)
+# _rate_limit_store 仍在 app 命名空间可见（tests/test_auth.py 清空同一共享 dict）；
+# _get_csrf_token/_safe_next 亦为 app 命名空间契约（模板渲染 / test_auth.py 直接调用）
+from middleware import bp as middleware_bp, _get_csrf_token, _safe_next
 
 # 后台线程与下载引擎（auto_follow / 预取 / 下载 / 启动重置）已迁至 background.py：
-# from-import 供路由/模块级调用使用，同时保持 tests 的 app.<符号> monkeypatch 契约。
+# 以下 app 命名空间绑定为测试补丁契约，勿删（见 docs/architecture.md「测试契约」）
 import background
 from background import (
-    _download_illust, _shutdown_background_threads,
-    _reset_stuck_downloads, _reset_stuck_prefetch,
-    _prefetch_one_tag, _collect_other_tag_pids,
+    _shutdown_background_threads, _reset_stuck_downloads, _reset_stuck_prefetch,
+    _prefetch_one_tag,
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
     _start_prefetch_thread,
 )

@@ -1,6 +1,6 @@
 # 后端模块架构（模块化重构后）
 
-> 2026-08-26 起实施（分支 `refactor/backend-modularization`；重构前状态 commit `6eafaea`，重构 commit 序列 `416d147`…`e228e49`）。
+> 2026-08-26 起实施（分支 `refactor/backend-modularization`；重构前状态 commit `6eafaea`，重构 commit 序列 `e947796`…`632d080`）。
 > 本文档给出拆分后的模块职责地图与两条最重要的开发约定：`-w 1` 单进程语义、**app 命名空间测试补丁契约**。
 
 ## 模块地图
@@ -64,11 +64,11 @@ helpers / runtime（叶子）→ middleware → background → routes_* → app.
 | `_safe_next` | test_auth.py 直接调用 |
 | `query_cached_tag` | test_search_cache.py 直接调用 |
 
-**新增对 `app.<符号>` 的读取规则**：路由/后台模块若需读取**可能被测试 monkeypatch 的 app 命名空间符号**，必须在函数体内 `import app` 延迟导入并限定 `app.<符号>`（先例：routes_search.py:34/99、routes_prefetch.py:45/154、routes_settings.py:45/128/145/163/189），并在该行注释 `# 延迟导入…tests monkeypatch('app.<符号>')`。禁止在模块顶部 `from app import <符号>`（会造成循环 import，且看不到测试补丁）。
+**新增对 `app.<符号>` 的读取规则**：路由/后台模块若需读取**可能被测试 monkeypatch 的 app 命名空间符号**，必须在函数体内 `import app` 延迟导入并限定 `app.<符号>`（先例：routes_search.py:34/99、routes_prefetch.py:42/151、routes_settings.py:44/127/144/162/188），并在该行注释 `# 延迟导入…tests monkeypatch('app.<符号>')`。禁止在模块顶部 `from app import <符号>`（会造成循环 import，且看不到测试补丁）。
 
 ## 本次重构 commit 起点
 
 - 设计 spec：`docs/superpowers/specs/2026-08-26-backend-modularization-design.md`（`416d147`）
 - 实施计划：`docs/superpowers/plans/2026-08-26-backend-modularization.md`（`a3dcb58`）
-- 重构 commit 序列：`e947796`（runtime+helpers）→ `3d05564` → `e20bcac`（middleware）→ `ee500ca` → `ce597fc`（background）→ `0484e23` → `5b26719`（routes_search/gallery）→ `c74fb45` → `73a8f0e`（routes_download/prefetch/collections/settings）→ `e228e49`（settings 写盘命名空间修正）→ 收尾 commit（本文件 + app.py import 面清理）
+- 重构 commit 序列：`e947796`（runtime+helpers）→ `3d05564` → `e20bcac`（middleware）→ `ee500ca` → `ce597fc`（background）→ `0484e23` → `5b26719`（routes_search/gallery）→ `c74fb45` → `73a8f0e`（routes_download/prefetch/collections/settings）→ `e228e49`（settings 写盘命名空间修正）→ `632d080`（收尾：app.py import 面清理 + architecture 模块地图文档）→ 收尾第二轮（残留死 import 清除 + 测试契约标注 + 本文档行号修正）
 - 重构前状态（起点）：`6eafaea`（前端重塑落地 main 之后）
