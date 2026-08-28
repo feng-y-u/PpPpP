@@ -836,8 +836,6 @@ def remove_collection_item(collection_id: int, pixiv_id: int) -> Response:
     return jsonify({'status': 'deleted'})
 
 
-
-
 @app.route('/api/collections/<int:collection_id>/items/batch', methods=['POST'])
 @_csrf_required
 def batch_add_collection_items(collection_id: int) -> Response:

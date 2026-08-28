@@ -443,7 +443,17 @@ git commit -m "refactor: 提取 routes_download/prefetch/collections/settings Bl
 
 核对：`grep -n "@app.route" app.py` 应只剩 `/`、`/cache`、`/favicon.ico` 等 2-3 条；`Get-Content app.py | Measure-Object -Line` 应 ≤ 250 行。若某私有函数仍留在 app.py 且仅被单一路由使用，评估搬去对应模块（能搬则搬）。
 
-随后清理 Task 1 遗留的死 import（均仅 import、无 app.py 内引用）：`_pid_in_clause`、`_scan_cache`、`_SCAN_CACHE_TTL`（from-import 块）、`urlsafe_b64encode`、`ThreadPoolExecutor`、`DOWNLOAD_MAX_WORKERS`、`AUTO_FOLLOW_INTERVAL`、`AUTO_FOLLOW_DOWNLOAD`、`PREFETCH_INTERVAL`、`PREFETCH_PAGES`、`PREFETCH_MAX_ILLUSTS`、`MEDIUM_IMAGE_SIZE`。注意 `_rate_limit_store`（from-import 块）**保留不删**：app.py 内虽无引用，但 tests/test_auth.py 依赖 `app._rate_limit_store` 绑定（与 middleware 共享同一 dict）清空限流存储（Task 2 遗留的测试契约绑定）。
+- **CACHE_DIR 去重（Task 4 遗留）**：`CACHE_DIR`（instance/image_cache）现同时定义于 `routes_gallery.py:36`（缩略图代理缓存路径）与 `app.py:125`（路径 + makedirs 副作用，任务 4 后无引用）——两处路径派生一致。建议迁到 `config.py` 单一来源（如 `INSTANCE_DIR` / `CACHE_DIR` 常量），routes_gallery 与 app 均从 config 导入。
+
+随后清理死 import（均仅 import、无 app.py 内引用，且 tests 无 `app.<名>` 依赖——**删除任何 from-import 前先 `grep "app\.<名>" tests/` 核对**，防止误删测试契约绑定）：
+
+- **Task 1 遗留**（仍准确）：`_pid_in_clause`、`_SCAN_CACHE_TTL`（from-import 块）、`urlsafe_b64encode`、`ThreadPoolExecutor`、`DOWNLOAD_MAX_WORKERS`、`AUTO_FOLLOW_INTERVAL`、`AUTO_FOLLOW_DOWNLOAD`、`PREFETCH_INTERVAL`、`PREFETCH_PAGES`、`PREFETCH_MAX_ILLUSTS`、`MEDIUM_IMAGE_SIZE`。
+- **Task 4 新增**（搜索/图库路由迁走后 app.py 不再引用，tests 亦无引用）：helpers `_scan_local_downloads`、`_build_orphan_dicts`、`_proxy_thumb`、`_original_to_resized`、`_page_sort_key`、`_extract_ext`、`_fmt_num`、`_safe_int`、`_delete_illust_files`；runtime `_thumb_sem`、`_thumb_failed`、`_THUMB_FAIL_COOLDOWN`、`_DB_PIDS_CACHE_TTL`、`_search_tasks`、`_search_tasks_lock`；fetcher `fetch_following`、`decode_cursor`、`PixivAuthError`；background `_remove_pids_from_search_caches`；models `get_favorite_pids`；stdlib/第三方 `hashlib`、`platform`、`urlsafe_b64decode`、`requests`、`abort`、`OperationalError`。
+- **测试契约绑定，必须保留不删**：
+  - `_rate_limit_store`（from-import 块）：tests/test_auth.py:7 `app_module._rate_limit_store.clear()` 清空限流存储（与 middleware 共享同一 dict）。
+  - `_scan_cache`、`_db_pids_cache`（from-import 块）：tests/conftest.py:63-64 重置 `app._scan_cache['ts']` / `app._db_pids_cache['ts']` 防脏数据。
+  - `SEARCH_TASK_TTL`（from-import 块）：tests/test_app.py:211 monkeypatch('app.SEARCH_TASK_TTL')，且 routes_search._cleanup_search_tasks 运行期经 app 命名空间读取。
+  - `threading`、`time`（stdlib import）：tests/test_prefetch.py:345/357 monkeypatch app.threading/app.time，background 线程函数（_start_prefetch_thread/_prefetch_loop 等）运行期经 app 命名空间读取。
 
 - [ ] **Step 2: 创建 `docs/architecture.md`**
 

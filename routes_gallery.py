@@ -17,7 +17,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 import fetcher
-import runtime
 from fetcher import PixivAuthError, build_pixiv_session
 from helpers import (_build_orphan_dicts, _delete_illust_files, _extract_ext,
                      _fetch_original_urls, _fmt_num, _get_download_dir,
@@ -36,6 +35,8 @@ bp = Blueprint('gallery', __name__)
 # 缩略图代理磁盘缓存目录（app.py 中同名定义路径一致：instance/image_cache）
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'image_cache')
 
+
+# ── 图片服务 / 详情页 ──
 
 @bp.route('/thumb/<path:url_b64>')
 def thumb_proxy(url_b64: str) -> Response:
@@ -209,6 +210,8 @@ def detail_api(pixiv_id: int) -> Response:
 def gallery() -> str:
     return render_template('gallery.html', csrf_token=_get_csrf_token())
 
+
+# ── 图库查询与删除 ──
 
 @bp.route('/api/gallery')
 def api_gallery() -> Response:
@@ -434,6 +437,8 @@ def batch_delete_gallery() -> Response:
         'message': f'已删除 {deleted_count} 个作品 ({total_files} 个文件)' + (f', {failed} 个失败' if failed else ''),
     })
 
+
+# ── 收藏与打开目录 ──
 
 @bp.route('/api/illust/<int:pixiv_id>/collections')
 def illust_collections(pixiv_id: int) -> Response:

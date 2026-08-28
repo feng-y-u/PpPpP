@@ -13,7 +13,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 import fetcher
-import runtime
 from background import _remove_pids_from_search_caches
 from config import ITEMS_PER_PAGE, MAX_BOOKMARKS_DEFAULT
 from fetcher import PixivAuthError, decode_cursor, fetch_following
