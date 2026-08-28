@@ -471,7 +471,11 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
 
 
 def _prefetch_capacity_cleanup() -> None:
-    """容量清理：超出上限时优先删除收藏数最低的未下载未收藏预取作品。"""
+    """容量清理：超出上限时优先删除最终收藏数最低的未下载未收藏预取作品。
+
+    删除决策只看刷新后的最终收藏数：未完成最终刷新（prefetch_refresh_at 为空）的
+    作品暂不参与淘汰，避免用抓取时的快照收藏数误删实际收藏很高的新作品。
+    """
     with get_session() as db:
         count = db.query(Illust).filter(Illust.prefetch_source == 1).count()
         max_illusts = _prefetch_state['max_illusts']
@@ -481,14 +485,17 @@ def _prefetch_capacity_cleanup() -> None:
 
         fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
         candidates: list[Illust] = []
-        for i in db.query(Illust).filter(Illust.prefetch_source == 1).all():
+        for i in db.query(Illust).filter(
+                Illust.prefetch_source == 1,
+                Illust.prefetch_refresh_at.isnot(None),
+        ).all():
             if i.download_status in ('done', 'downloading') or i.local_paths_list:
                 continue
             if i.pixiv_id in fav_ids:
                 continue
             candidates.append(i)
 
-        # 收藏数低优先删除，并列时更早上传的优先
+        # 最终收藏数低优先删除，并列时更早上传的优先
         candidates.sort(key=lambda x: (x.bookmark_count, x.upload_date or datetime.min))
         to_delete = [c.pixiv_id for c in candidates[:need_free]]
         if not to_delete:
@@ -520,7 +527,8 @@ def _prefetch_loop() -> None:
         try:
             for tag in tags:
                 _prefetch_one_tag(tag)
-            # 先刷新最终收藏数（满 1 天的作品），再按新收藏数做容量清理
+            # 先刷新最终收藏数（满 1 天的作品），再按最终收藏数做容量清理
+            #（仅已完成最终刷新的作品参与淘汰，未刷新的等下一轮）
             _prefetch_refresh_bookmarks()
             _prefetch_capacity_cleanup()
             _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
