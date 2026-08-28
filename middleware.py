@@ -94,7 +94,9 @@ def _require_login():
         return None
     if path.startswith('/api/') or path == '/search' or request.method != 'GET':
         return jsonify({'error': '未登录', 'error_code': 'AUTH_REQUIRED'}), 401
-    return redirect(url_for('login_page', next=path))
+    # /login 路由已随设置 Blueprint 迁移（Task 5）：端点经 blueprint 命名空间
+    # 变为 settings.login_page（Flask 对显式 endpoint 也会加 bp 前缀）。
+    return redirect(url_for('settings.login_page', next=path))
 
 
 def _safe_next(url: str) -> str:

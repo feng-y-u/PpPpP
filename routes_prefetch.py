@@ -1,0 +1,169 @@
+# ── 搜索预取管理 API ──
+# _PREFETCH_SETTINGS_KEYS + /api/prefetch/config、/api/prefetch/tags、
+# /api/prefetch/status、/api/prefetch/refresh 路由。
+# 设置读写经 app 命名空间延迟访问：tests(test_prefetch_api._isolate_settings 夹具)
+# monkeypatch('app._SETTINGS_PATH')，从 routes_settings 的独立绑定取不到补丁。
+from __future__ import annotations
+
+import json
+import os
+import threading
+
+from flask import Blueprint, Response, jsonify, request
+
+import background
+import runtime
+from background import _collect_other_tag_pids
+from config import SETTINGS_KEYS
+from middleware import _csrf_required, _get_json_body
+from models import (CollectionItem, Illust, SearchCache, get_session,
+                    safe_commit)
+from runtime import _prefetch_state
+
+bp = Blueprint('prefetch', __name__)
+
+
+# ── 搜索预取管理 ──
+
+_PREFETCH_SETTINGS_KEYS = {
+    'interval': 'prefetch_interval',
+    'pages': 'prefetch_pages',
+    'max_illusts': 'prefetch_max_illusts',
+}
+
+
+@bp.route('/api/prefetch/config', methods=['GET'])
+def prefetch_config_get() -> Response:
+    return jsonify({
+        'interval': _prefetch_state['interval'],
+        'pages': _prefetch_state['pages'],
+        'max_illusts': _prefetch_state['max_illusts'],
+    })
+
+
+@bp.route('/api/prefetch/config', methods=['POST'])
+@_csrf_required
+def prefetch_config_post() -> Response:
+    import app  # 延迟导入经 app 命名空间读设置路径/加载函数：
+    #             tests monkeypatch('app._SETTINGS_PATH')（test_prefetch_api.py
+    #             _isolate_settings 夹具重定向 settings.json），routes_settings 的
+    #             独立绑定看不到补丁
+    body = _get_json_body()
+    updates: dict[str, int] = {}
+    for key in _PREFETCH_SETTINGS_KEYS:
+        if key in body:
+            try:
+                updates[key] = max(0, int(body[key]))
+            except (ValueError, TypeError):
+                return jsonify({'error': f'{key} must be integer'}), 400
+
+    # 写配置：先全部校验并持久化 settings.json，成功后一次性提交到内存，避免校验/写盘失败时状态漂移
+    if updates:
+        current = app._load_settings()
+        for key, val in updates.items():
+            current[_PREFETCH_SETTINGS_KEYS[key]] = val
+        try:
+            os.makedirs(os.path.dirname(app._SETTINGS_PATH), exist_ok=True)
+            with open(app._SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(current, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return jsonify({'error': f'保存失败: {e}'}), 500
+        _prefetch_state.update(updates)
+
+    return jsonify({
+        'interval': _prefetch_state['interval'],
+        'pages': _prefetch_state['pages'],
+        'max_illusts': _prefetch_state['max_illusts'],
+    })
+
+
+@bp.route('/api/prefetch/tags', methods=['GET'])
+def prefetch_tags_get() -> Response:
+    with get_session() as db:
+        rows = db.query(SearchCache).order_by(SearchCache.cached_at.desc()).all()
+        return jsonify([{
+            'tag': r.tag,
+            'cached_at': r.cached_at.isoformat() if r.cached_at else None,
+            'status': r.status,
+            'total': r.total,
+            'error': r.error,
+        } for r in rows])
+
+
+@bp.route('/api/prefetch/tags', methods=['POST'])
+@_csrf_required
+def prefetch_tags_post() -> Response:
+    tag = _get_json_body().get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '标签不能为空'}), 400
+    with get_session() as db:
+        if db.query(SearchCache).filter(SearchCache.tag == tag).first():
+            return jsonify({'error': '标签已存在'}), 409
+        db.add(SearchCache(tag=tag))
+        safe_commit(db)
+        return jsonify({'tag': tag}), 201
+
+
+@bp.route('/api/prefetch/tags/<path:tag>', methods=['DELETE'])
+@_csrf_required
+def prefetch_tags_delete(tag: str) -> Response:
+    with get_session() as db:
+        row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+        if not row:
+            return jsonify({'error': '标签不存在'}), 404
+
+        try:
+            ids = json.loads(row.illust_ids) if row.illust_ids else []
+        except (json.JSONDecodeError, TypeError):
+            ids = []
+
+        deletable: list[int] = []
+        other_pids = _collect_other_tag_pids(db, tag)
+        for pid in ids:
+            if not isinstance(pid, int):
+                continue
+            # 仍被其他 SearchCache 引用时保留
+            if pid in other_pids:
+                continue
+            illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            if illust is None or not illust.prefetch_source:
+                continue
+            if illust.download_status in ('done', 'downloading') or illust.local_paths_list:
+                continue
+            if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
+                continue
+            deletable.append(pid)
+
+        if deletable:
+            db.query(Illust).filter(Illust.pixiv_id.in_(deletable)).delete(synchronize_session=False)
+        db.delete(row)
+        safe_commit(db)
+        return jsonify({'tag': tag})
+
+
+@bp.route('/api/prefetch/status', methods=['GET'])
+def prefetch_status_get() -> Response:
+    return jsonify({
+        'running': _prefetch_state['running'],
+        'last_check': _prefetch_state['last_check'],
+        'interval': _prefetch_state['interval'],
+    })
+
+
+@bp.route('/api/prefetch/refresh', methods=['POST'])
+@_csrf_required
+def prefetch_refresh_post() -> Response:
+    import app  # 延迟导入经 app 命名空间调用 _prefetch_one_tag：
+    #             tests monkeypatch('app._prefetch_one_tag')（test_prefetch_api.py
+    #             TestPrefetchRefreshAPI），from background import 绑定看不到补丁
+    tag = _get_json_body().get('tag', '').strip()
+    if not tag:
+        return jsonify({'error': '标签不能为空'}), 400
+    with get_session() as db:
+        row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+        if not row:
+            return jsonify({'error': '标签不存在'}), 404
+        if row.status == 'fetching':
+            return jsonify({'error': '该标签正在刷新中'}), 409
+    threading.Thread(target=app._prefetch_one_tag, args=(tag,), daemon=True).start()
+    return jsonify({'tag': tag, 'status': 'refreshing'})
