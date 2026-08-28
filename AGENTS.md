@@ -34,13 +34,15 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 
 | 文件 | 作用 |
 |------|------|
-| `app.py` | Flask 入口：组装（app/配置/Blueprint 注册/后台线程）、路由、下载引擎、后台任务 |
+| `app.py` | 组装入口（Flask app/配置/Blueprint 注册/后台线程启动）+ 4 个页面路由（`/`、`/cache`、`/csrf-token`、`/favicon.ico`） |
 | `fetcher.py` | Pixiv API 封装：Cookie/OAuth 认证、搜索、作品详情 |
 | `models.py` | SQLAlchemy ORM：Illust、BlockedTag、DownloadLog、Collection、CollectionItem |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` 导入时覆盖 |
 | `runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：后台任务状态、扫描/TTL 缓存、下载队列、限流存储等全部模块级状态 |
 | `helpers.py` | 纯工具函数与库内查询：下载目录/扫描、URL 与展示工具、`query_cached_tag`、收藏夹位置计算 |
+| `background.py` | 后台线程与下载引擎：自动关注/预取循环/下载执行器，start_background_threads 幂等启动 |
 | `middleware.py` | 认证/CSRF/限流/安全头中间件；app 级钩子（before/after_app_request）随 `middleware_bp` 注册 |
+| `routes_search.py`/`routes_gallery.py`/`routes_download.py`/`routes_prefetch.py`/`routes_collections.py`/`routes_settings.py` | Flask Blueprint 按域拆分的路由模块 |
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`、`style.css`、`vendor/bootstrap-5.3.3/` |
 | `scripts/` | `pixiv-cleanup.sh`（可选磁盘清理 cron：仅清理**已下载原图**，不参与预取缓存容量控制） |
@@ -56,7 +58,7 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 ### 进程与状态
 - **Gunicorn 必须用 `-w 1`**：以下状态在进程内存中 — `_auto_follow_state`、`download_locks`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_search_tasks`、`_rate_limit_store`、`_prefetch_state`。多 worker 不共享。详见 `runtime.py` 的 ⚠ 多进程限制注释（状态定义已随模块化迁移至 `runtime.py`）。
 - **单 Worker 进程内状态是个人自用的明确取舍**：不做 Redis/Celery/多 Worker 协调——所有后台任务与内存状态都依赖单进程常驻，这是本项目按单用户自用场景的有意设计，不是缺陷。
-- **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login`（`app.py:595`）和 `/api/settings/unlock`（`app.py:1758`）。
+- **限流是每个 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，`-w 1` 时正常工作。用于 `POST /login` 与 `/api/settings/unlock`（routes_settings.py 的 `login_submit`/`settings_unlock`）。
 
 ### 配置与重启
 - **settings.json 需重启服务器**：`config.py` 在导入时读取 `instance/settings.json`。通过 Web UI 修改后需重启进程生效。
@@ -71,10 +73,10 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - **全局访问密码**：`ACCESS_PASSWORD`（环境变量或 settings.json 的 `access_password`）非空时启用全站登录墙 —— `before_request` 钩子拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 免认证**（本机默认）。登录态存 session（`authed`），7 天有效；`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒。`COOKIE_SECURE` 控制 Session Cookie 仅 HTTPS 传输（默认 true，本地 HTTP 调试需设 `COOKIE_SECURE=false`）。
 
 ### API 行为
-- **`popular_d` 排序需 Pixiv Premium**：非 Premium 账号静默返回空结果。`/search` 路由默认排序为 `date_d`（`app.py:811`），空查询回退到 `browse_discovery()` 时也使用该默认值。
+- **`popular_d` 排序需 Pixiv Premium**：非 Premium 账号静默返回空结果。`/search` 路由默认排序为 `date_d`（`routes_search.py` 的 `search()`），空查询回退到 `browse_discovery()` 时也使用该默认值。
 - **搜索是异步的**：`GET /search` 立即返回 `task_id`，后台线程拉取，前端轮询 `/api/search/status/<task_id>`。任务在 `_search_tasks` 内存字典中，访问 status 时清理过期任务。
 - **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。缩略图代理 `/thumb/<base64_url>` 处理此问题（仅允许 `https://i.pximg.net/` 白名单 URL，磁盘缓存 7 天）。
-- **游标分页 24 小时过期**（`app.py:841`）：翻页游标包含时间戳，超时后客户端需重新搜索。空页去重 + 死游标作废由前端处理。
+- **游标分页 24 小时过期**（`routes_search.py` 的 `search()`）：翻页游标包含时间戳，超时后客户端需重新搜索。空页去重 + 死游标作废由前端处理。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址（`config.py:48`）。
 - **搜索预取缓存**：手动在设置页配置预取标签，后台线程按 interval 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）定时预取并写入 `Illust` + `SearchCache` 表。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果通过独立 `/cache` 页面浏览（`GET /api/cache/items`，库内按收藏数/排序过滤分页，`query_cached_tag`）。`popular_d` 排序为 `bookmark_count` 降序的库内近似。
 
@@ -82,13 +84,13 @@ gunicorn -w 1 --timeout 300 -b 127.0.0.1:8000 app:app
 - **轻量迁移系统**：启动时 `SQLAlchemy create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行 `migrations/versions.py` 中的版本函数。当前会补加 `file_size`、`downloaded_at`、`bookmark_updated_at`、`prefetch_source`（预取来源标记）列与 `collection_items.position`（拖拽排序），并一次性回填 position 初值；`SearchCache` 表（tag→illust_ids 映射，预取缓存）由 metadata 创建。**`description` 列已彻底移除**（模型、`to_dict`、fetcher、模板均不再有，迁移会 DROP）。**`is_favorite` / `favorited_at` 列已废弃，迁移会将其 DROP**。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。新增 schema 变更必须追加新版本，不得修改已发布版本。
 - **写入必须用 `safe_commit()`**（`models.py:32`）而不是直接 `db.commit()`：它带重试处理 `database is locked`。
 - **获取 session 用 `get_session()`**（`models.py:324`），不要直接创建 `Session(engine)`，除非在 `init_db()` 等启动逻辑中。
-- **启动时重置卡死下载**：模块导入时 `_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件（`app.py:143`）。
+- **启动时重置卡死下载**：模块导入时 `_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件（`background.py` 的 `_reset_stuck_downloads`，app.py 组装时调用）。
 - **收藏语义完全由 Collection 驱动**：切换收藏会添加/移除"我的收藏"收藏夹中的 CollectionItem。`Illust.is_favorite` 列已废弃删除，不要再依赖。
 
 ### 请求与中间件
-- **所有 POST 接口需 CSRF**：`X-CSRF-Token` 请求头（从 `GET /csrf-token` 或页面内嵌获取）。缺失/错误返回 403。`_csrf_required` 装饰器实现（`app.py:616`）。
-- **上传限制 1MB**：`app.config['MAX_CONTENT_LENGTH']`（`app.py:67`）。
-- **Werkzeug 请求日志被设为 WARNING** 级别以防止 Cookie 泄露到日志（`app.py:48`）。
+- **所有 POST 接口需 CSRF**：`X-CSRF-Token` 请求头（从 `GET /csrf-token` 或页面内嵌获取）。缺失/错误返回 403。`_csrf_required` 装饰器实现（`middleware.py`）。
+- **上传限制 1MB**：`app.config['MAX_CONTENT_LENGTH']`（`app.py:91`）。
+- **Werkzeug 请求日志被设为 WARNING** 级别以防止 Cookie 泄露到日志（`app.py:64`）。
 
 ### 下载
 - **SSL 验证默认关闭**（`config.py` 中 `SSL_VERIFY = False`）。生产环境如已安装 CA 证书可设为 `True`。

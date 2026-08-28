@@ -70,5 +70,5 @@ helpers / runtime（叶子）→ middleware → background → routes_* → app.
 
 - 设计 spec：`docs/superpowers/specs/2026-08-26-backend-modularization-design.md`（`416d147`）
 - 实施计划：`docs/superpowers/plans/2026-08-26-backend-modularization.md`（`a3dcb58`）
-- 重构 commit 序列：`e947796`（runtime+helpers）→ `3d05564` → `e20bcac`（middleware）→ `ee500ca` → `ce597fc`（background）→ `0484e23` → `5b26719`（routes_search/gallery）→ `c74fb45` → `73a8f0e`（routes_download/prefetch/collections/settings）→ `e228e49`（settings 写盘命名空间修正）→ `632d080`（收尾：app.py import 面清理 + architecture 模块地图文档）→ 收尾第二轮（残留死 import 清除 + 测试契约标注 + 本文档行号修正）
+- 重构 commit 序列：`e947796`（runtime+helpers）→ `3d05564` → `e20bcac`（middleware）→ `ee500ca` → `ce597fc`（background）→ `0484e23` → `5b26719`（routes_search/gallery）→ `c74fb45` → `73a8f0e`（routes_download/prefetch/collections/settings）→ `e228e49`（settings 写盘命名空间修正）→ `632d080`（收尾：app.py import 面清理 + architecture 模块地图文档）→ `4ca73ec`（收尾第二轮：残留死 import 清除 + 测试契约标注）
 - 重构前状态（起点）：`6eafaea`（前端重塑落地 main 之后）
