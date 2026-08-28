@@ -33,7 +33,7 @@ _DB_PIDS_CACHE_TTL = 30.0
 # 要正确支持多 worker，需要共享存储
 #（Redis / SQLite KV 表）。在此之前，请使用单 worker 运行：
 #   gunicorn -w 1 app:app
-# 注：download_locks 定义暂仍在 app.py（随下载引擎迁移时一并移入本模块）
+# 注：download_locks 已随下载引擎迁移至 background.py（模块级全局，与 _download_illust 同居）
 # ─────────────────────────────────────────────────────────────────────
 
 # ── 自动关注后台任务 ──
