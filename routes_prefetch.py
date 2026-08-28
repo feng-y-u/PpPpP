@@ -23,8 +23,6 @@ from runtime import _prefetch_state
 bp = Blueprint('prefetch', __name__)
 
 
-# ── 搜索预取管理 ──
-
 _PREFETCH_SETTINGS_KEYS = {
     'interval': 'prefetch_interval',
     'pages': 'prefetch_pages',

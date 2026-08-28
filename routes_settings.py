@@ -143,6 +143,7 @@ def _load_settings() -> dict:
 def _settings_locked() -> bool:
     """设置页门禁：已全局登录则直通；否则按旧 SETTINGS_PASSWORD 流程。"""
     import app  # 延迟导入读取 app.SETTINGS_PASSWORD：tests monkeypatch('app.SETTINGS_PASSWORD')
+    #             （test_auth.py TestSettingsCompat），from config import 绑定看不到补丁
     if session.get('authed'):
         return False
     return bool(app.SETTINGS_PASSWORD) and not session.get('settings_unlocked')
@@ -160,6 +161,7 @@ def settings_page() -> str:
 @_rate_limit(max_attempts=5, window=60)
 def settings_unlock() -> Response:
     import app  # 延迟导入读取 app.SETTINGS_PASSWORD：tests monkeypatch('app.SETTINGS_PASSWORD')
+    #             （test_auth.py TestSettingsCompat），from config import 绑定看不到补丁
     if session.get('authed') or not app.SETTINGS_PASSWORD:
         return jsonify({'ok': True})
     body = _get_json_body()
@@ -184,6 +186,10 @@ def api_settings_get() -> Response:
 @bp.route('/api/settings', methods=['POST'])
 @_csrf_required
 def api_settings_post() -> Response:
+    import app  # 延迟导入经 app 命名空间读写 _SETTINGS_PATH：本函数读侧经
+    #             _load_settings()（app._SETTINGS_PATH）已走 app 命名空间，写侧若用
+    #             模块级绑定，在 tests monkeypatch('app._SETTINGS_PATH') 下会读临时路径
+    #             却写坏生产 instance/settings.json（test_prefetch_api._isolate_settings 夹具）
     if _settings_locked():
         return jsonify({'error': '需要密码访问'}), 403
 
@@ -224,8 +230,8 @@ def api_settings_post() -> Response:
                     continue
             current[key] = val
     try:
-        os.makedirs(os.path.dirname(_SETTINGS_PATH), exist_ok=True)
-        with open(_SETTINGS_PATH, 'w', encoding='utf-8') as f:
+        os.makedirs(os.path.dirname(app._SETTINGS_PATH), exist_ok=True)
+        with open(app._SETTINGS_PATH, 'w', encoding='utf-8') as f:
             json.dump(current, f, ensure_ascii=False, indent=2)
         # prefetch_* 键与 /api/prefetch/config 保持同构：保存成功后同步内存态
         #（interval 即时生效，不再需要重启）

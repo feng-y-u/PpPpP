@@ -454,6 +454,12 @@ git commit -m "refactor: 提取 routes_download/prefetch/collections/settings Bl
   - `_scan_cache`、`_db_pids_cache`（from-import 块）：tests/conftest.py:63-64 重置 `app._scan_cache['ts']` / `app._db_pids_cache['ts']` 防脏数据。
   - `SEARCH_TASK_TTL`（from-import 块）：tests/test_app.py:211 monkeypatch('app.SEARCH_TASK_TTL')，且 routes_search._cleanup_search_tasks 运行期经 app 命名空间读取。
   - `threading`、`time`（stdlib import）：tests/test_prefetch.py:345/357 monkeypatch app.threading/app.time，background 线程函数（_start_prefetch_thread/_prefetch_loop 等）运行期经 app 命名空间读取。
+- **Task 5 新增（4 个 routes_* 模块内死 import）**：均源自计划 Task 5 的 import 模板，模块内无引用、tests 亦无 `app.<名>` 依赖，可直接删除：
+  - `routes_download.py`：`import helpers`、`import runtime`（函数体实际走 from-import：`from helpers import _fetch_original_urls, _get_download_dir`、`from runtime import ...`）。
+  - `routes_prefetch.py`：`import background`、`import runtime`（body 实际走 `from background import _collect_other_tag_pids`、`from runtime import _prefetch_state`）、`from config import SETTINGS_KEYS`（无引用）。
+  - `routes_settings.py`：`url_for`（flask import 块，本模块无 url_for 调用）、`import runtime`（body 实际走 `from runtime import _auto_follow_state, _prefetch_state`）。
+  - `routes_collections.py`：`import helpers`（body 实际走 `from helpers import _compute_move_position, _next_collection_position`）。
+  - **注意：勿删 Task 4 模块的模块级 `import fetcher`**（routes_gallery.py / routes_search.py 运行期经 `fetcher.<attr>` 取模块属性，确有使用）。
 
 - [ ] **Step 2: 创建 `docs/architecture.md`**
 
