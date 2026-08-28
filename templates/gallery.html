@@ -14,12 +14,20 @@
   border-radius: var(--radius-card);
   overflow: hidden;
   background: var(--bg-elevated);
+  box-shadow: var(--shadow-card);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   height: 100%;
 }
 .gallery-card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-card-hover);
+}
+.card-img-wrap img { transition: transform 0.3s ease, opacity 0.25s ease; }
+.card-img-wrap:hover img { transform: scale(1.03); }
+/* 选中态：批量勾选时粉描边 + 上浮 */
+.gallery-card.card-selected {
+  box-shadow: 0 0 0 2px var(--accent), var(--shadow-card-hover);
+  transform: translateY(-2px);
 }
 
 .card-img-wrap {
@@ -33,10 +41,9 @@
   height: 100%;
   object-fit: cover;
 }
-.size-badge {
+.size-badge, .page-badge {
   position: absolute;
   bottom: 6px;
-  right: 6px;
   background: rgba(255,255,255,.85);
   backdrop-filter: blur(6px);
   color: #2b2b2b;
@@ -45,6 +52,8 @@
   border-radius: 4px;
   font-weight: 500;
 }
+.size-badge { right: 6px; }
+.page-badge { left: 6px; }
 
 .card-body { padding: 0.6rem 0.7rem; }
 .card-title {
@@ -57,13 +66,15 @@
 }
 .card-info { font-size: 0.73rem; color: var(--text-secondary); margin-bottom: 0.2rem; }
 .tags-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin: 0.25rem 0; }
-.tag-badge {
+.photo-tag, .tag-badge {
   font-size: 0.62rem;
+  color: var(--accent) !important;
   background: var(--accent-subtle) !important;
-  color: var(--text-muted) !important;
-  border-radius: 3px;
-  padding: 1px 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  transition: all 0.15s;
 }
+.photo-tag:hover, .tag-badge:hover { color: var(--accent-hover); background: rgba(226,87,126,.16); }
 
 
 /* ── Card Checkbox ── */
@@ -125,9 +136,21 @@
   box-shadow: 0 4px 24px rgba(0,0,0,.15);
   z-index: 1050;
   font-size: 0.82rem;
+  transition: transform 0.22s ease, opacity 0.22s ease;
 }
-.batch-float-bar.hidden { display: none !important; }
+.batch-float-bar.hidden {
+  transform: translate(-50%, 12px);
+  opacity: 0;
+  pointer-events: none;
+}
 .batch-float-bar .btn { font-size: 0.78rem; }
+/* 计数弹跳：选择数变化时 0.18s scale(1.15→1) */
+#batchFloatCount { display: inline-block; }
+#batchFloatCount.bounce { animation: countBounce 0.18s ease; }
+@keyframes countBounce {
+  0% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
 .batch-collection-select {
   font-size: 0.78rem;
   border-radius: 6px;
@@ -280,6 +303,7 @@
 
 <script src="/static/vendor/bootstrap-5.3.3/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/lightbox.js"></script>
 <script src="/static/page-gallery.js"></script>
 
 </div>

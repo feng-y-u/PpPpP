@@ -38,7 +38,7 @@ function renderCard(r) {
   $('#masonryGrid').appendChild(item);
 
   // Card click → detail page
-  item.querySelector('.photo-card').addEventListener('click', e => {
+  item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-card-actions')) return;
     window.location.href = `/detail/${r.pixiv_id}`;
   });

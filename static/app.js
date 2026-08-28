@@ -184,7 +184,7 @@ function lazyLoad() {
 }
 
 // 分帧渲染：把 items 按 chunks 分批用 requestAnimationFrame 渲染，
-// 批间让出主线程（避免长任务卡顿），并给每张卡加 stagger 浮现动画。
+// 批间让出主线程（避免长任务卡顿），并给每张卡加 stagger 浮现动画（索引前 24 张递增延迟，之后同批）。
 // renderFn(item, i) 需返回创建的 DOM 元素（或 null 跳过动画）。
 // opts: { chunk=12, delay=30ms } — 返回 Promise，全部完成后 resolve。
 function renderInChunks(items, renderFn, opts) {
@@ -198,7 +198,7 @@ function renderInChunks(items, renderFn, opts) {
         const node = renderFn(items[i], i);
         if (node && node.addEventListener) {
           node.classList.add('card-enter');
-          if (node.style) node.style.animationDelay = `${i * delay}ms`;
+          if (node.style) node.style.animationDelay = `${Math.min(i, 24) * delay}ms`; // 前 24 张递增 stagger，之后同批进入（避免大页尾部过慢）
           // 动画结束后清理内联 delay，避免影响后续 hover 过渡
           node.addEventListener('animationend', function handler(ev) {
             if (ev.animationName === 'cardIn') {

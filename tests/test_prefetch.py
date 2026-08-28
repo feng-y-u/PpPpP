@@ -119,15 +119,19 @@ class TestPrefetchOneTag:
 
 class TestCapacityCleanup:
     def test_capacity_cleanup_low_bookmark_first(self, clean_db):
-        # 超过上限时优先删除收藏数最低的预取作品，并从所有标签列表移除
+        # 超过上限时优先删除最终收藏数最低的预取作品，并从所有标签列表移除
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_a', illust_ids='[1, 2, 3]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
             SearchCache(tag='tag_b', illust_ids='[3]',
                         cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=10),
-            Illust(pixiv_id=2, title='high', prefetch_source=1, bookmark_count=500),
-            Illust(pixiv_id=3, title='mid', prefetch_source=1, bookmark_count=100),
+            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=10,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='high', prefetch_source=1, bookmark_count=500,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=3, title='mid', prefetch_source=1, bookmark_count=100,
+                   prefetch_refresh_at=refreshed),
         ])
         safe_commit(clean_db)
 
@@ -149,11 +153,13 @@ class TestCapacityCleanup:
         clean_db.add(coll)
         clean_db.commit()
         clean_db.add(CollectionItem(collection_id=coll.id, pixiv_id=2, position=1000.0))
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_old', illust_ids='[1, 2]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='dl', prefetch_source=1, download_status='done'),
-            Illust(pixiv_id=2, title='col', prefetch_source=1),
+            Illust(pixiv_id=1, title='dl', prefetch_source=1, download_status='done',
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='col', prefetch_source=1, prefetch_refresh_at=refreshed),
         ])
         safe_commit(clean_db)
 
@@ -171,12 +177,14 @@ class TestCapacityCleanup:
         assert ids == [1, 2]
 
     def test_capacity_cleanup_keeps_protected_in_list(self, clean_db):
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_a', illust_ids='[1, 2, 3]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='dl', prefetch_source=1, download_status='done'),
-            Illust(pixiv_id=2, title='b', prefetch_source=1),
-            Illust(pixiv_id=3, title='c', prefetch_source=1),
+            Illust(pixiv_id=1, title='dl', prefetch_source=1, download_status='done',
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='b', prefetch_source=1, prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=3, title='c', prefetch_source=1, prefetch_refresh_at=refreshed),
         ])
         safe_commit(clean_db)
 
@@ -195,13 +203,16 @@ class TestCapacityCleanup:
 
     def test_capacity_cleanup_removes_from_all_tag_lists(self, clean_db):
         # 被多个标签引用的低收藏作品也会被删，且从所有标签的列表移除
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_a', illust_ids='[1, 2]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
             SearchCache(tag='tag_b', illust_ids='[2]',
                         cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='a', prefetch_source=1, bookmark_count=10),
-            Illust(pixiv_id=2, title='b', prefetch_source=1, bookmark_count=100),
+            Illust(pixiv_id=1, title='a', prefetch_source=1, bookmark_count=10,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='b', prefetch_source=1, bookmark_count=100,
+                   prefetch_refresh_at=refreshed),
         ])
         safe_commit(clean_db)
 
@@ -217,6 +228,36 @@ class TestCapacityCleanup:
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 2).first() is not None
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [2]
+
+    def test_capacity_cleanup_uses_only_updated_bookmark(self, clean_db):
+        # 删除决策只看刷新后的最终收藏数：未完成最终刷新（prefetch_refresh_at 为空）
+        # 的作品即使快照收藏数最低也不删，等最终刷新后再参与淘汰
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        clean_db.add_all([
+            SearchCache(tag='tag_u', illust_ids='[1, 2, 3]',
+                        cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+            # pid1：已最终刷新，最终收藏 10 → 被淘汰
+            Illust(pixiv_id=1, title='finalized-low', prefetch_source=1, bookmark_count=10,
+                   prefetch_refresh_at=refreshed),
+            # pid2：未刷新，快照收藏仅 1（实际可能很高）→ 不删
+            Illust(pixiv_id=2, title='unfinalized', prefetch_source=1, bookmark_count=1),
+            # pid3：未刷新，快照收藏 2 → 不删
+            Illust(pixiv_id=3, title='unfinalized2', prefetch_source=1, bookmark_count=2),
+        ])
+        safe_commit(clean_db)
+
+        old = app._prefetch_state['max_illusts']
+        try:
+            app._prefetch_state['max_illusts'] = 1
+            app._prefetch_capacity_cleanup()
+        finally:
+            app._prefetch_state['max_illusts'] = old
+
+        # 只有最终刷新过的 pid1 被删，pid2/pid3 保留在库和标签列表中
+        remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
+        assert remaining == {2, 3}
+        ids = json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_u').first().illust_ids)
+        assert ids == [2, 3]
 
     def test_prefetch_loop_survives_cleanup_error(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='t'))

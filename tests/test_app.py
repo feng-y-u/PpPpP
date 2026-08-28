@@ -1,3 +1,4 @@
+import base64
 import json
 from unittest.mock import patch
 
@@ -571,3 +572,27 @@ class TestGalleryTriggersBookmarkFill:
         r = client.get('/api/gallery?limit=10')
         assert r.status_code == 200
         assert called == [] or 91003 not in [x for sub in called for x in sub]
+
+
+class TestDetailApiMediumUrls:
+    def test_detail_api_includes_medium_urls(self, client, clean_db):
+        """/api/detail 返回 medium_urls：master1200 中图代理地址，数量与原图 URL 一致。"""
+        illust = models.Illust(pixiv_id=92001, title='multi-page', page_count=2)
+        illust.original_urls_list = [
+            'https://i.pximg.net/img-original/img/0001/01/15/00/00/00/92001_p0.jpg',
+            'https://i.pximg.net/img-original/img/0001/01/15/00/00/00/92001_p1.jpg',
+        ]
+        clean_db.add(illust)
+        clean_db.commit()
+
+        r = client.get('/api/detail/92001')
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['pixiv_id'] == 92001
+        assert 'medium_urls' in data
+        assert len(data['medium_urls']) == len(illust.original_urls_list) == 2
+        for u in data['medium_urls']:
+            assert u.startswith('/thumb/')
+            encoded = u[len('/thumb/'):]
+            decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
+            assert '/img-master/' in decoded and decoded.endswith('_master1200.jpg')

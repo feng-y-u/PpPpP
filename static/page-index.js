@@ -349,6 +349,14 @@ function updateSearchUI() {
   } else {
     ['#sortOrder','#minBookmarks'].forEach(id => $(id).style.display = '');
   }
+  // 组合 label 与 tagMode 下拉联动显隐（画师模式不显示游离的「组合」label；
+  // 须放在 .filters-row label 的 forEach 之后，否则该 forEach 会把它重新显示出来）
+  const tagModeLabel = $('#tagModeLabel');
+  if (tagModeLabel) tagModeLabel.style.display = isTag ? '' : 'none';
+  // 页签 active 态同步
+  $$('#searchTypeTabs .st-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.type === $('#searchType').value);
+  });
 }
 $('#searchType').addEventListener('change', updateSearchUI);
 
@@ -407,7 +415,7 @@ function renderCard(r) {
   });
 
   // Card click → detail page
-  item.querySelector('.photo-card').addEventListener('click', e => {
+  item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
     window.location.href = `/detail/${r.pixiv_id}`;
   });
@@ -503,6 +511,15 @@ function loadR18Mode() {
 
 // ── Init ──
 loadR18Mode();
+updateSearchUI();  // 首次加载默认高亮「标签」页签（无缓存/无 URL 参数时）
+
+// 搜索类型页签
+$('#searchTypeTabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('.st-tab');
+  if (!tab) return;
+  $('#searchType').value = tab.dataset.type;
+  updateSearchUI();
+});
 
 $('#searchBtn').addEventListener('click', () => doSearch());
 $('#searchQuery').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
