@@ -95,9 +95,10 @@ $('#backBtn').addEventListener('click', () => {
   }
 });
 
+// ←→：跨作品翻页（图库上下文下）；无上下文时不动作，作品内翻页用图上 ‹ ›
 document.addEventListener('keydown', e => {
-  if (e.key === 'ArrowLeft') { e.preventDefault(); showPage(currentPage - 1); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); showPage(currentPage + 1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); navTo(-1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); navTo(1); }
 });
 
 // Touch swipe
@@ -108,11 +109,123 @@ document.addEventListener('keydown', e => {
   el.addEventListener('touchend', e => {
     const diff = touchStartX - e.changedTouches[0].clientX;
     if (Math.abs(diff) > 50) {
-      if (diff > 0) showPage(currentPage + 1);
-      else showPage(currentPage - 1);
+      if (diff > 0) navTo(1);
+      else navTo(-1);
     }
   }, {passive: true});
 })();
+
+// ── 跨作品翻页（仅图库上下文 ctx=gallery 启用）──
+// 顺序跟随图库当前视图（排序/收藏夹/标签筛选）。序列来源：图库跳转时写入的
+// sessionStorage（pv_detail_seq）；新标签页直接粘贴 URL 时按 URL 参数现拉
+// /api/gallery 定位。两者都失败则不渲染翻页 UI。
+const PAGE_SIZE = 50;
+const DETAIL_SEQ_KEY = 'pv_detail_seq';
+const navCtx = (() => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('ctx') !== 'gallery') return null;
+  return {
+    sort: q.get('sort') || 'downloaded',
+    collectionId: q.get('collection_id') || '',
+    tag: q.get('tag') || '',
+    pos: parseInt(q.get('pos'), 10),
+    page: Math.max(1, parseInt(q.get('page'), 10) || 1),
+  };
+})();
+let seq = null;        // { total, pages: {页码: [pixiv_id, ...]} }
+let navReady = false;
+let navPending = false;   // 防并发：pidAt 现拉相邻页期间忽略后续翻页触发
+
+function loadStoredSeq() {
+  try {
+    const s = JSON.parse(sessionStorage.getItem(DETAIL_SEQ_KEY) || 'null');
+    if (!s || s.v !== 1) return null;
+    if (s.sort !== navCtx.sort || (s.collection_id || '') !== navCtx.collectionId
+        || (s.tag || '') !== navCtx.tag) return null;
+    return s;
+  } catch { return null; }
+}
+
+function saveSeq() {
+  try { sessionStorage.setItem(DETAIL_SEQ_KEY, JSON.stringify(seq)); } catch {}
+}
+
+function galleryParams(pageNo) {
+  const p = new URLSearchParams();
+  p.set('sort', navCtx.sort);
+  if (navCtx.collectionId) p.set('collection_id', navCtx.collectionId);
+  if (navCtx.tag) p.set('tag', navCtx.tag);
+  p.set('limit', PAGE_SIZE);
+  p.set('offset', (pageNo - 1) * PAGE_SIZE);
+  return p.toString();
+}
+
+async function fetchPage(pageNo) {
+  const resp = await fetch('/api/gallery?' + galleryParams(pageNo));
+  if (!resp.ok) throw new Error('gallery fetch failed');
+  const data = await resp.json();
+  seq.total = data.total;
+  seq.pages[pageNo] = data.data.map(x => x.pixiv_id);
+  // 只保留目标页 ±1，防 sessionStorage 膨胀
+  Object.keys(seq.pages).forEach(k => {
+    if (Math.abs(parseInt(k, 10) - pageNo) > 1) delete seq.pages[k];
+  });
+  saveSeq();
+}
+
+async function resolveSeq() {
+  if (!navCtx || isNaN(navCtx.pos)) return;
+  seq = loadStoredSeq() || { total: 0, pages: {} };
+  // 当前页必须包含本作品（sessionStorage 可能已过期或被其他筛选覆盖）
+  if (!seq.pages[navCtx.page] || !seq.pages[navCtx.page].includes(illust.pixiv_id)) {
+    try {
+      await fetchPage(navCtx.page);
+    } catch {
+      seq = null;
+      return;
+    }
+  }
+  if (!seq.pages[navCtx.page].includes(illust.pixiv_id)) { seq = null; return; }
+  // pos 以图库实际序列为准（图库数据可能在跳转后已变化）
+  navCtx.pos = (navCtx.page - 1) * PAGE_SIZE + seq.pages[navCtx.page].indexOf(illust.pixiv_id);
+  navReady = true;
+}
+
+async function pidAt(pos) {
+  const pageNo = Math.floor(pos / PAGE_SIZE) + 1;
+  if (!seq.pages[pageNo]) await fetchPage(pageNo);   // 跨页续翻：现拉相邻页
+  return seq.pages[pageNo][pos % PAGE_SIZE] || null;
+}
+
+async function navTo(delta) {
+  if (!navReady || navPending) return;
+  navPending = true;
+  try {
+    const target = navCtx.pos + delta;
+    if (target < 0 || (seq.total > 0 && target >= seq.total)) return;
+    const pid = await pidAt(target).catch(() => null);
+    if (!pid) { showToast('加载翻页数据失败', true); return; }
+    const params = new URLSearchParams(location.search);
+    params.set('pos', target);
+    params.set('page', Math.floor(target / PAGE_SIZE) + 1);
+    // replace 不压历史栈：连翻多个作品后按返回仍一次回到图库
+    location.replace(`/detail/${pid}?${params}`);
+  } finally {
+    navPending = false;
+  }
+}
+
+function renderIllustNav() {
+  if (!navReady) return;
+  $('#illustNav').style.display = 'flex';
+  $('#illustPos').textContent = `${navCtx.pos + 1} / ${seq.total}`;
+  $('#prevIllustBtn').disabled = navCtx.pos <= 0;
+  $('#nextIllustBtn').disabled = seq.total > 0 && navCtx.pos >= seq.total - 1;
+}
+
+// 屏幕按钮绑定：上一作/下一作，与键盘 ←→、触摸滑动共用 navTo
+$('#prevIllustBtn').addEventListener('click', () => navTo(-1));
+$('#nextIllustBtn').addEventListener('click', () => navTo(1));
 
 // ── Collection Picker ──
 let savedCollectionIds = new Set();
@@ -204,6 +317,7 @@ $('#tagList')?.addEventListener('click', e => {
 
 // ── Init ──
 showPage(0);
+resolveSeq().then(renderIllustNav).catch(() => {});
 
 // Handle image load error
 $('#mainImage').addEventListener('error', function() {
