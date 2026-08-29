@@ -379,11 +379,26 @@ def _start_prefetch_thread() -> None:
 
 # ── 下载引擎与生命周期 ──
 download_locks: dict[int, threading.Lock] = {}
+# 保护 download_locks 自身的读写。setdefault 单次调用虽是原子的，但"取出锁"
+# 与 finally 里的"删除锁"之间跨越了整个下载过程：若任务 A 在 release 之后、
+# pop 之前被抢占，任务 B 会拿到 A 那把已释放的锁并开始下载，A 随后把它 pop
+# 掉，任务 C 再进来就拿到一把全新锁 —— 同一作品被并发下载两次。
+# 故删除时只删自己那把。
+_download_locks_guard = threading.Lock()
+
+
+def _release_download_lock(pixiv_id: int, lock: threading.Lock) -> None:
+    """注销本任务的下载锁。只删自己那把——期间若已被新任务替换，删错会让
+    后来者拿到一把不同的锁，同一作品被并发下载两次。"""
+    with _download_locks_guard:
+        if download_locks.get(pixiv_id) is lock:
+            download_locks.pop(pixiv_id, None)
 
 
 def _download_illust(pixiv_id: int) -> None:
     """后台任务：下载作品的所有原图。"""
-    lock = download_locks.setdefault(pixiv_id, threading.Lock())
+    with _download_locks_guard:
+        lock = download_locks.setdefault(pixiv_id, threading.Lock())
     if not lock.acquire(blocking=False):
         return  # 正在下载中，跳过
     try:
@@ -479,7 +494,7 @@ def _download_illust(pixiv_id: int) -> None:
             session_obj.close()  # 释放连接池，防止长驻进程累积 socket
         _download_progress.pop(pixiv_id, None)
         lock.release()
-        download_locks.pop(pixiv_id, None)
+        _release_download_lock(pixiv_id, lock)
         download_cancellations.discard(pixiv_id)
         _queued_downloads.discard(pixiv_id)
 

@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 
 
@@ -73,6 +76,76 @@ class TestLogin:
         resp = client.post('/login', json={'password': 'wrong'},
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 429
+
+
+class TestRateLimitConcurrency:
+    """限流是安全控制，并发下不能被绕过。
+
+    回归：限流曾把"读窗口 → 判定 → 记录"拆成无锁的多条语句，并发请求各自读到
+    未计入对方的 records，于是同时通过判定——gunicorn --threads 下每次登录请求
+    都在不同线程，爆破成本从 5 次/分钟变成 5 次/批。
+
+    注意：这里直接压测 _check_rate_limit 而不是走 HTTP。走完整请求时每个线程
+    都要先穿过路由/session 等大量代码，真正撞进临界区的时刻被自然错开，
+    竞态窗口几乎打不中（实测走 HTTP 的用例在拆掉锁的情况下依然全绿——
+    那样的测试是无效的）。直接压测才让线程真正重叠在临界区上。
+    """
+
+    class _YieldList(list):
+        """读出长度后主动让出 GIL，把线程切换强制推进限流的判定窗口内。
+
+        限流的临界区（判定 → 记录）只有几微秒。默认 5ms 的 GIL 切换间隔下线程
+        根本来不及在窗口内被抢占，竞态永远打不中——实测走完整 HTTP 请求、压到
+        100 线程、把 switchinterval 降到 1µs 都依然全绿。只有在这里主动 yield，
+        线程才会真正重叠在"已读到旧长度、尚未 append"的那一瞬。
+        """
+
+        def __len__(self):
+            n = super().__len__()
+            time.sleep(0)
+            return n
+
+    def test_concurrent_burst_cannot_exceed_limit(self):
+        import middleware
+
+        # 单轮复现率约 2/3（CPython 线程调度决定），跑 40 轮取最大值：
+        # 有 bug 时几乎必然被抓到，无 bug 时每轮都恰好放行 limit 个。
+        total, limit, rounds = 8, 1, 40
+        seen = set()
+
+        for _ in range(rounds):
+            middleware._rate_limit_store.clear()
+            # 预置成 _YieldList：setdefault 会命中它，从而接管 len() 的时机
+            middleware._rate_limit_store['1.2.3.4'] = self._YieldList()
+            barrier = threading.Barrier(total)
+            allowed = []
+            guard = threading.Lock()
+
+            def attempt():
+                barrier.wait()
+                if not middleware._check_rate_limit('1.2.3.4', limit, 60):
+                    with guard:
+                        allowed.append(1)
+
+            threads = [threading.Thread(target=attempt) for _ in range(total)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+            assert not any(t.is_alive() for t in threads), '有线程挂住'
+            seen.add(len(allowed))
+
+        assert max(seen) == limit, (
+            f'限流被绕过：{rounds} 轮并发里最多放行了 {max(seen)} 个'
+            f'（上限 {limit}），观察到 {sorted(seen)}')
+
+    def test_http_login_still_capped_at_5(self, client, auth_enabled):
+        """端到端冒烟：装饰器确实接到了限流上（用正确密码，避免失败延迟）。"""
+        token = _get_token(client)
+        codes = [client.post('/login', json={'password': 'test-secret'},
+                             headers={'X-CSRF-Token': token}).status_code
+                 for _ in range(7)]
+        assert codes == [200] * 5 + [429, 429]
 
     def test_login_requires_csrf(self, client, auth_enabled):
         resp = client.post('/login', json={'password': 'test-secret'})

@@ -17,16 +17,17 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 import fetcher
-from fetcher import PixivAuthError, build_pixiv_session
+from fetcher import PixivAuthError, get_pooled_session, reset_pooled_session
 from helpers import (_build_orphan_dicts, _delete_illust_files, _extract_ext,
                      _fetch_original_urls, _fmt_num, _get_download_dir,
                      _next_collection_position, _original_to_resized,
-                     _page_sort_key, _proxy_thumb, _scan_local_downloads)
+                     _page_sort_key, _proxy_thumb, _scan_local_downloads,
+                     enforce_image_cache_limit)
 from middleware import _csrf_required, _get_csrf_token, _get_json_body
 from models import (BlockedTag, Collection, CollectionItem, DownloadLog,
                     Illust, get_favorite_pids, get_session, safe_commit)
 from runtime import (_DB_PIDS_CACHE_TTL, _THUMB_FAIL_COOLDOWN, _db_pids_cache,
-                     _thumb_failed, _thumb_sem)
+                     _thumb_failed, _thumb_failed_lock, _thumb_sem)
 
 logger = logging.getLogger(__name__)
 
@@ -71,17 +72,28 @@ def thumb_proxy(url_b64: str) -> Response:
 
     try:
         with _thumb_sem:
-            session = build_pixiv_session()
+            # 用线程内连接池：旧代码每张图都新建 Session 再 close()，等于每张图
+            # 重做一次 TCP + TLS 握手（实测 30 张图 = 30 条连接，复用后 = 1 条）。
+            session = get_pooled_session()
             try:
                 resp = session.get(url, timeout=(10, 30))
                 resp.raise_for_status()
-            finally:
-                session.close()
+            except requests.RequestException as e:
+                # 复用的 keep-alive 连接可能已被对端单方面关闭：这类失败是"快失败"
+                # （连接重置，毫秒级），而 urllib3 因 connect=0 不会自动重试——
+                # 重建本线程连接池后再试一次。超时类失败不重试（那才耗时）。
+                if isinstance(e, requests.Timeout):
+                    raise
+                reset_pooled_session()
+                session = get_pooled_session()
+                resp = session.get(url, timeout=(10, 30))
+                resp.raise_for_status()
     except requests.RequestException:
-        _thumb_failed[url] = now
-        # 顺手清理过期失败记录，防止集合无限增长
-        for failed_url in [k for k, v in _thumb_failed.items() if now - v >= _THUMB_FAIL_COOLDOWN]:
-            _thumb_failed.pop(failed_url, None)
+        with _thumb_failed_lock:
+            _thumb_failed[url] = now
+            # 顺手清理过期失败记录，防止集合无限增长
+            for failed_url in [k for k, v in _thumb_failed.items() if now - v >= _THUMB_FAIL_COOLDOWN]:
+                _thumb_failed.pop(failed_url, None)
         return abort(502)
 
     _thumb_failed.pop(url, None)
@@ -103,7 +115,18 @@ def thumb_proxy(url_b64: str) -> Response:
             pass
         return Response(resp.iter_content(chunk_size=8192), mimetype=mimetype)
 
+    # 新写入可能让缓存超限：触发一次容量检查。受 IMAGE_CACHE_CLEANUP_INTERVAL
+    # 节流，绝大多数调用立即返回，只有间隔到的那一次会真正扫描目录。
+    enforce_image_cache_limit(CACHE_DIR)
+
     return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
+
+
+# 已下载原图是不变的（重新下载会产生新的 mtime，ETag 随之变化），可放心长缓存。
+# Flask 的 SEND_FILE_MAX_AGE_DEFAULT 默认为 None，此时 send_file 发的是
+# Cache-Control: no-cache —— 浏览器每次打开灯箱都要发一趟 304 重新校验。
+# 与 /thumb 代理保持一致的 7 天。
+LOCAL_IMAGE_MAX_AGE = 86400 * 7
 
 
 @bp.route('/api/image/<int:pixiv_id>/<int:index>')
@@ -113,7 +136,7 @@ def serve_image(pixiv_id: int, index: int) -> Response:
         if illust and illust.download_status == 'done' and illust.local_paths_list:
             paths = illust.local_paths_list
             if 0 <= index < len(paths) and os.path.isfile(paths[index]):
-                return send_file(paths[index])
+                return send_file(paths[index], max_age=LOCAL_IMAGE_MAX_AGE)
 
     # 不在 DB（或状态不对）→ 直接从 downloads 目录读
     ddir = _get_download_dir(pixiv_id)
@@ -125,7 +148,7 @@ def serve_image(pixiv_id: int, index: int) -> Response:
         key=_page_sort_key,
     )
     if 0 <= index < len(files) and os.path.isfile(files[index]):
-        return send_file(files[index])
+        return send_file(files[index], max_age=LOCAL_IMAGE_MAX_AGE)
     abort(404)
 
 
@@ -360,10 +383,13 @@ def api_gallery() -> Response:
             now = time.time()
             if now - _db_pids_cache['ts'] >= _DB_PIDS_CACHE_TTL:
                 with get_session() as cache_db:
-                    _db_pids_cache['ts'] = now
-                    _db_pids_cache['data'] = {
-                        r[0] for r in cache_db.query(Illust.pixiv_id).all()
-                    }
+                    pids = {r[0] for r in cache_db.query(Illust.pixiv_id).all()}
+                # 先 data 后 ts，且两者都放在查询完成之后：旧写法在查询期间就把
+                # ts 推新，那段时间里并发请求会读到"新鲜的 ts + 旧（甚至空的）
+                # data"，把所有已下载作品误判成孤儿 —— 同一作品渲染出两张卡片、
+                # total 翻倍。这个窗口是整条查询的耗时，不是几微秒。
+                _db_pids_cache['data'] = pids
+                _db_pids_cache['ts'] = now
             orphan_pids = sorted(set(local_pids) - _db_pids_cache['data'], reverse=True)
             orphan_results = _build_orphan_dicts(orphan_pids, local_items)
             total += len(orphan_results)

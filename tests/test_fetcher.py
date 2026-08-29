@@ -1,8 +1,12 @@
 from unittest.mock import patch
 
+import os
 import time
 import threading
 from datetime import datetime, timezone, timedelta
+
+import pytest
+import requests
 
 import fetcher
 from models import Illust
@@ -426,4 +430,118 @@ class TestBookmarkStaleness:
 
         assert results == []
         mock_fill.assert_called_once_with([8003])
+
+
+class TestDetailRetryPolicy:
+    """详情拉取的重试必须分类：连接错误 fail fast，限流才退避重试。
+
+    回归背景：urllib3 的 Retry 与应用层的 DETAIL_MAX_RETRIES 曾同时放开，
+    把 10s 的连接超时放大成 62s（3 次 attempt × 2 次连接 × 10s ＋ 退避），
+    断网时详情页要干等一分钟才降级为"无原图"。
+    """
+
+    class _FakeSession:
+        def __init__(self, exc):
+            self.exc = exc
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            raise self.exc
+
+    @staticmethod
+    def _http_error(status):
+        resp = requests.Response()
+        resp.status_code = status
+        return requests.HTTPError(response=resp)
+
+    def _run(self, monkeypatch, exc):
+        # 旁路令牌桶，让用例只测重试语义、不受全局限速器残留状态影响
+        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        session = self._FakeSession(exc)
+        with patch('fetcher.time.sleep') as mock_sleep:
+            try:
+                result = fetcher._get_illust_detail(
+                    session, 123, limiter=fetcher._TokenBucket(6000))
+            except fetcher.PixivAuthError as e:
+                result = e
+        return session.calls, mock_sleep, result
+
+    def test_connect_error_fails_fast(self, monkeypatch):
+        """连接类错误不重试：重试几乎必然重复失败，每次还要空等满超时。"""
+        calls, mock_sleep, result = self._run(
+            monkeypatch, requests.ConnectTimeout('connect timeout'))
+        assert result is None
+        assert calls == 1
+        mock_sleep.assert_not_called()
+
+    def test_rate_limit_retries_with_backoff(self, monkeypatch):
+        """429 限流是暂时性的，应退避后重试 DETAIL_MAX_RETRIES 次。"""
+        calls, mock_sleep, result = self._run(monkeypatch, self._http_error(429))
+        assert result is None
+        assert calls == fetcher.DETAIL_MAX_RETRIES + 1
+        assert mock_sleep.call_count == fetcher.DETAIL_MAX_RETRIES
+
+    def test_401_raises_auth_error_immediately(self, monkeypatch):
+        """认证失效重试无意义，必须直接上报 PixivAuthError。"""
+        calls, mock_sleep, result = self._run(monkeypatch, self._http_error(401))
+        assert isinstance(result, fetcher.PixivAuthError)
+        assert calls == 1
+        mock_sleep.assert_not_called()
+
+    def test_session_does_not_retry_connect_errors(self, monkeypatch):
+        """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。"""
+        monkeypatch.setattr(fetcher, '_load_cookie', lambda: None)
+        monkeypatch.setattr(fetcher, '_cookie_value', 'test')
+        session = fetcher.build_pixiv_session()
+        retry = session.get_adapter('https://www.pixiv.net').max_retries
+        assert retry.connect == 0
+        assert retry.total == 1
+
+
+class TestPooledSession:
+    """图片代理与并发详情共用的线程内连接池。
+
+    回归背景：`/thumb` 与 `_fetch_details_parallel` 曾对每张图 / 每个作品都新建
+    Session 再 close()，等于每次请求都重做 TCP + TLS 握手（实测 30 次请求 =
+    30 条连接，复用后 = 1 条），是图库首屏、灯箱与搜索变慢的主因。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_cookie(self, monkeypatch, tmp_path):
+        cookie = tmp_path / 'cookies.txt'
+        cookie.write_text('PHPSESSID=test-cookie\n')
+        monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(cookie))
+        monkeypatch.setattr(fetcher, '_cookie_mtime', 0)
+        monkeypatch.setattr(fetcher, '_cookie_value', '')
+        fetcher.reset_pooled_session()
+        yield
+        fetcher.reset_pooled_session()
+
+    def test_same_thread_reuses_session(self):
+        """同线程跨请求复用同一个 Session，即复用同一条 keep-alive 连接。"""
+        assert fetcher.get_pooled_session() is fetcher.get_pooled_session()
+
+    def test_different_threads_get_own_session(self):
+        """不跨线程共享：requests.Session 不保证线程安全。"""
+        main_session = fetcher.get_pooled_session()
+        box = []
+        t = threading.Thread(target=lambda: box.append(fetcher.get_pooled_session()))
+        t.start()
+        t.join()
+        assert box, '子线程应拿到自己的 session'
+        assert box[0] is not main_session
+        box[0].close()
+
+    def test_cookie_change_rebuilds_session(self):
+        """设置页改写 cookies.txt 后必须立即生效，不能沿用旧连接的旧 Cookie。"""
+        first = fetcher.get_pooled_session()
+        os.utime(fetcher.COOKIE_PATH, (time.time() + 60, time.time() + 60))
+        assert fetcher.get_pooled_session() is not first
+
+    def test_reset_drops_pool(self):
+        """复用连接被对端关闭后，reset 必须让下次取到全新的 Session。"""
+        first = fetcher.get_pooled_session()
+        fetcher.reset_pooled_session()
+        assert fetcher.get_pooled_session() is not first
 

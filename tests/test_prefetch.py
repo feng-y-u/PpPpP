@@ -1,4 +1,5 @@
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -470,3 +471,40 @@ class TestPrefetchRefreshBookmarks:
         illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5005).first()
         assert illust is not None
         assert illust.prefetch_refresh_at is None  # 未标记，下轮重试
+
+
+class TestDownloadLockRegistry:
+    """同一作品的下载锁：收尾时只能注销自己那把。
+
+    回归：`_download_illust` 的 finally 曾无条件 pop。gunicorn --threads 下，
+    任务 A 在 release 之后、pop 之前若被抢占，任务 B 会拿到 A 那把已释放的锁并
+    开始下载，A 随后把它 pop 掉 —— 任务 C 再进来就拿到一把全新锁，同一作品被
+    并发下载两次。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        import background
+        background.download_locks.clear()
+        yield
+        background.download_locks.clear()
+
+    def test_release_removes_own_lock(self):
+        import background
+        lock = threading.Lock()
+        background.download_locks[555] = lock
+        background._release_download_lock(555, lock)
+        assert 555 not in background.download_locks
+
+    def test_release_keeps_superseding_lock(self):
+        import background
+        old, new = threading.Lock(), threading.Lock()
+        background.download_locks[555] = old
+        background.download_locks[555] = new      # 新任务已顶替
+        background._release_download_lock(555, old)
+        assert background.download_locks[555] is new, '新任务的锁不能被旧任务误删'
+
+    def test_release_without_entry_is_noop(self):
+        import background
+        background._release_download_lock(999, threading.Lock())   # 不应抛异常
+        assert 999 not in background.download_locks

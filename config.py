@@ -61,6 +61,19 @@ PREFETCH_MAX_ILLUSTS = 10000    # 预取来源作品最大数量
 # 显示设置
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下
 
+# 缩略图代理并发上限：图片走 i.pximg.net 图床（比 Ajax API 宽松）。
+# 调大 → 图库首屏 / 灯箱加载更快；调小 → 减轻对 Pixiv 的压力。需重启生效。
+THUMB_CONCURRENCY = 12
+
+# 缩略图磁盘缓存（instance/image_cache）容量上限与淘汰策略。
+# 该目录此前只写不删，磁盘会无限增长（1 万条预取缓存的规模下可达 GB 级）。
+# 淘汰的代价只是下次访问回源一次，所以上限可以设宽松些以减少回源。
+IMAGE_CACHE_MAX_BYTES = 1024 * 1024 * 1024   # 1 GB
+# 淘汰后回落到上限的这个比例：留出余量，避免每次只删一点点而反复扫描
+IMAGE_CACHE_TARGET_RATIO = 0.9
+# 扫描目录的最小间隔（秒）：扫描要遍历全部缓存文件，不能每次写入都做
+IMAGE_CACHE_CLEANUP_INTERVAL = 300.0
+
 # 下载设置
 DOWNLOAD_MAX_WORKERS = 2   # 全局下载线程池并发数
 PAGE_DOWNLOAD_INTERVAL = 3 # 多页作品页面间下载间隔（秒）

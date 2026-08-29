@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from config import (
     DOWNLOAD_MAX_WORKERS, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
+    THUMB_CONCURRENCY,
 )
 
 _scan_cache: dict = {'ts': 0.0, 'data': {}}
@@ -13,8 +14,12 @@ _SCAN_CACHE_TTL = 30.0  # 图库目录扫描缓存（秒）：避免每页请求
 
 # 缩略图代理实时拉取：限制并发数（而非按时间节流——节流会把批量缩略图
 # 压成串行队列，刷新页面时肉眼可见变慢）+ 失败 URL 冷却防放大
-_thumb_sem = threading.Semaphore(6)
+_thumb_sem = threading.Semaphore(THUMB_CONCURRENCY)
 _thumb_failed: dict[str, float] = {}
+# 遍历清理与并发写入必须互斥：容器的清理是 Python 层推导式（每条之间有
+# 字节码边界，可被其他线程抢入），期间被改动会抛
+# RuntimeError: dictionary changed size during iteration。
+_thumb_failed_lock = threading.Lock()
 _THUMB_FAIL_COOLDOWN = 30.0
 
 # 图库孤儿判定用的"全部 DB pixiv_id 集合"缓存：避免每次图库请求全表加载

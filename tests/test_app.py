@@ -499,8 +499,12 @@ class TestFavoriteMembershipContract:
         """回归：详情页收藏按钮初始状态须反映'我的收藏'归属（曾恒为未收藏）。"""
         import models
         default_id = self._default_coll(clean_db)
-        clean_db.add(models.Illust(pixiv_id=90060, title='fav-item', download_status='done'))
-        clean_db.add(models.Illust(pixiv_id=90061, title='plain-item', download_status='done'))
+        # 必须预置 original_urls：/detail 在该列为空时会惰性调
+        # _fetch_original_urls() 走真实网络，离线时单次 60s+ 把整轮套件拖到 140s。
+        for pid, title in ((90060, 'fav-item'), (90061, 'plain-item')):
+            item = models.Illust(pixiv_id=pid, title=title, download_status='done')
+            item.original_urls_list = [f'https://i.pximg.net/img-original/img/x/{pid}_p0.jpg']
+            clean_db.add(item)
         clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90060, position=1000.0))
         clean_db.commit()
 

@@ -209,10 +209,65 @@ def build_pixiv_session() -> requests.Session:
         s.proxies = {'https': PROXY, 'http': PROXY}
 
     adapter = HTTPAdapter()
-    retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503])
+    # connect=0：连接建立失败（超时/拒绝/DNS/代理）不在 urllib3 层重试。连接类
+    # 错误几乎必然重复失败，重试只会线性放大等待——应用层另有 DETAIL_MAX_RETRIES
+    # 次重试，两层叠加会把 10s 连接超时放大成 62s。429/5xx 与读取错误仍重试一次。
+    retry = Retry(total=1, connect=0, backoff_factor=0.5,
+                  status_forcelist=[429, 500, 502, 503])
     adapter.max_retries = retry
     s.mount('https://', adapter)
     return s
+
+
+# ── 线程内连接池（图片代理 / 并发详情共用）──
+# 调用方曾对每张图、每个作品都 build_pixiv_session() 再 close()，于是每次请求
+# 都要重做 TCP + TLS 握手（实测 30 次请求 = 30 条连接，复用后 = 1 条；本地无
+# TLS 就已快 3 倍，真实环境还要叠加每次 1~2 个 RTT 的 TLS 握手）。批量加载
+# 图片或并发拉详情时，握手开销可能超过响应体本身，是图库/灯箱/搜索变慢的主因。
+#
+# 按线程缓存而非全局共享：requests.Session 不保证线程安全，但同线程内跨请求
+# 复用连接池完全安全，且已覆盖 gunicorn sync worker 的主线程与线程池 executor
+# 的各工作线程（每个线程一条连接，跨请求复用）。
+_thread_local = threading.local()
+
+
+def _cookie_file_stamp() -> float | None:
+    """Cookie 文件 mtime；文件缺失时返回 None（行为同旧代码：由 _load_cookie 抛出）。"""
+    try:
+        return os.path.getmtime(COOKIE_PATH)
+    except OSError:
+        return None
+
+
+def get_pooled_session() -> requests.Session:
+    """取本线程复用的 Pixiv session。Cookie 文件内容变化时自动重建。"""
+    stamp = _cookie_file_stamp()
+    session = getattr(_thread_local, 'session', None)
+    if session is not None and getattr(_thread_local, 'stamp', None) == stamp:
+        return session
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
+    # build_pixiv_session() 内部的 _load_cookie() 会刷新 _cookie_mtime/_cookie_value
+    session = build_pixiv_session()
+    _thread_local.session = session
+    _thread_local.stamp = stamp
+    return session
+
+
+def reset_pooled_session() -> None:
+    """丢弃本线程的连接池。复用的 keep-alive 连接被对端关闭后需要重建。"""
+    session = getattr(_thread_local, 'session', None)
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
+    _thread_local.session = None
+    _thread_local.stamp = None
 
 
 def _split_tags(keyword: str) -> list[str]:
@@ -367,6 +422,13 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                 'original_urls': _extract_original_urls(body),
                 'tags': _parse_tags(body.get('tags')),
             }
+        except requests.ConnectionError as e:
+            # 连接建立失败（超时 / 拒绝 / DNS / 代理）：重试几乎必然重复失败，
+            # 且每次都要空等满 DETAIL_TIMEOUT 的连接超时，3 次就是 30s+ 的
+            # 无谓等待。直接放弃，交由调用方降级——后台补全
+            # _kick_background_fill 之后还会兜一次。
+            logger.warning(f'Detail API 连接失败 {pixiv_id}: {e}')
+            return None
         except requests.RequestException as e:
             status = getattr(getattr(e, 'response', None), 'status_code', None)
             if status == 401:
@@ -400,7 +462,9 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     attempted = 0
 
     def _worker(pid: int) -> tuple[int, dict | None]:
-        session = build_pixiv_session()
+        # 用线程内连接池：本线程处理的多个 pid 复用同一条连接（旧代码每个 pid
+        # 都新建 Session，24~60 个作品就是 24~60 次 TCP + TLS 握手）
+        session = get_pooled_session()
         return pid, _get_illust_detail(session, pid, limiter)
 
     executor = ThreadPoolExecutor(max_workers=FETCH_DETAIL_WORKERS)

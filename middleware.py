@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import secrets
+import threading
 import time
 from functools import wraps
 from typing import Callable
@@ -19,6 +20,41 @@ bp = Blueprint('middleware', __name__)  # 不承载路由，仅用于挂 app 级
 # 计数器因此随函数迁到本模块（单一归属）；runtime.py 只保留被原地修改的
 # _rate_limit_store（from-import 共享同一 dict 对象）。
 _rate_limit_cleanup_counter = 0
+# 限流是安全控制：整个"读窗口 → 判定 → 记录 → 清理"必须在锁内一次完成。
+# 拆成多步时并发请求会各自读到未计入对方的 records，从而同时通过判定
+# （gunicorn --threads 下并发登录请求各在一个线程），限流被绕过。
+# 顺带保护 _rate_limit_store 的遍历：容器在遍历中被改动会抛
+# RuntimeError: dictionary changed size during iteration。
+_rate_limit_lock = threading.Lock()
+
+
+def _check_rate_limit(ip: str, max_attempts: int, window: int) -> bool:
+    """记录一次请求，返回 True 表示已超限（调用方应返回 429）。
+
+    整个"读窗口 → 判定 → 记录 → 清理"必须在同一把锁内一次完成：拆成多步时
+    并发请求会各自读到未计入对方的 records，从而同时通过判定（gunicorn
+    --threads 下每次登录请求都在不同线程）。锁同时保护 _rate_limit_store 的
+    遍历——容器在遍历中被改动会抛 RuntimeError: dictionary changed size
+    during iteration。
+    """
+    global _rate_limit_cleanup_counter
+    now = time.time()
+    with _rate_limit_lock:
+        records = _rate_limit_store.setdefault(ip, [])
+        # 移除过期的记录
+        records[:] = [t for t in records if now - t < window]
+        if len(records) >= max_attempts:
+            return True
+        records.append(now)
+        # 定期清理过期的 IP 记录
+        _rate_limit_cleanup_counter += 1
+        if _rate_limit_cleanup_counter >= 100:
+            _rate_limit_cleanup_counter = 0
+            cutoff = now - window
+            stale = [k for k, v in _rate_limit_store.items() if v and max(v) < cutoff]
+            for k in stale:
+                del _rate_limit_store[k]
+    return False
 
 
 def _rate_limit(max_attempts: int = 5, window: int = 60) -> Callable:
@@ -26,23 +62,9 @@ def _rate_limit(max_attempts: int = 5, window: int = 60) -> Callable:
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
-            global _rate_limit_cleanup_counter
             ip = request.remote_addr or 'unknown'
-            now = time.time()
-            records = _rate_limit_store.setdefault(ip, [])
-            # 移除过期的记录
-            records[:] = [t for t in records if now - t < window]
-            if len(records) >= max_attempts:
+            if _check_rate_limit(ip, max_attempts, window):
                 return jsonify({'error': '请求过于频繁，请稍后再试'}), 429
-            records.append(now)
-            # 定期清理过期的 IP 记录
-            _rate_limit_cleanup_counter += 1
-            if _rate_limit_cleanup_counter >= 100:
-                _rate_limit_cleanup_counter = 0
-                cutoff = now - window
-                stale = [k for k, v in _rate_limit_store.items() if v and max(v) < cutoff]
-                for k in stale:
-                    del _rate_limit_store[k]
             return f(*args, **kwargs)
         return decorated
     return decorator

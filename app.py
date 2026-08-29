@@ -25,7 +25,7 @@ import fetcher
 from fetcher import search_by_tag, search_by_user, browse_discovery, paginated_search, build_pixiv_session
 
 # 以下为 app 命名空间测试补丁契约绑定，勿删（见 docs/architecture.md「测试契约」）
-from helpers import query_cached_tag
+from helpers import enforce_image_cache_limit, query_cached_tag
 from runtime import (_scan_cache, _db_pids_cache, _prefetch_state,
                      SEARCH_TASK_TTL, _rate_limit_store)
 # 中间件（认证/CSRF/限流/安全头）——app 级钩子经 middleware_bp 注册全局生效；
@@ -48,7 +48,7 @@ from background import (
 # monkeypatch('app._SETTINGS_PATH') 重定向 settings.json，routes_prefetch.prefetch_config_post
 # 经 app 命名空间调用 app._load_settings()/app._SETTINGS_PATH 以看到该补丁。
 from routes_search import bp as search_bp, _cleanup_search_tasks
-from routes_gallery import bp as gallery_bp
+from routes_gallery import CACHE_DIR, bp as gallery_bp
 from routes_download import bp as download_bp
 from routes_prefetch import bp as prefetch_bp
 from routes_collections import bp as collections_bp
@@ -108,8 +108,10 @@ app.register_blueprint(collections_bp)
 app.register_blueprint(settings_bp)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'image_cache')
+# 缓存目录路径由 routes_gallery 单点定义（此前两处各写一份，靠注释约定保持一致）
 os.makedirs(CACHE_DIR, exist_ok=True)
+# 启动时兜底清理：上次进程可能留下超限的缓存，不必等下一次写入触发
+enforce_image_cache_limit(CACHE_DIR, force=True)
 
 init_db()
 
