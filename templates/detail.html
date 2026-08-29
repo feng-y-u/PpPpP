@@ -58,6 +58,16 @@
   transition: all 0.15s;
 }
 .info-back-btn:hover { background: var(--accent-subtle); color: var(--accent); }
+.illust-nav { display: flex; align-items: center; gap: 8px; margin-right: auto; }
+.illust-nav-btn {
+  height: 48px; padding: 0 14px; border-radius: 10px;
+  border: 1px solid var(--border-input);
+  background: var(--bg-elevated); color: var(--text-secondary);
+  font-size: 0.85rem; cursor: pointer; transition: all 0.15s;
+}
+.illust-nav-btn:hover { background: var(--accent-subtle); color: var(--accent); }
+.illust-nav-btn:disabled { opacity: 0.35; pointer-events: none; }
+.illust-nav-pos { font-size: 0.78rem; color: var(--text-muted); white-space: nowrap; }
 .page-indicator {
   position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: rgba(0,0,0,.5); backdrop-filter: blur(8px);
@@ -206,6 +216,11 @@
   <!-- Info -->
   <div class="info-area">
     <div class="info-header">
+      <div class="illust-nav" id="illustNav" style="display:none;">
+        <button class="illust-nav-btn" id="prevIllustBtn">‹ 上一作</button>
+        <span class="illust-nav-pos" id="illustPos"></span>
+        <button class="illust-nav-btn" id="nextIllustBtn">下一作 ›</button>
+      </div>
       <button class="info-back-btn" id="backBtn" aria-label="返回">←</button>
     </div>
     <h1 class="info-title">{{ illust.title or '无标题' }}</h1>
