@@ -80,6 +80,23 @@ curl -X POST http://127.0.0.1:8080/api/prefetch/refresh -H "X-CSRF-Token: <从�
 
 ---
 
+## 5b. 缩略图磁盘缓存（`instance/image_cache/`）
+
+`/thumb/<base64>` 代理下来的图片（网格缩略图、灯箱中图）缓存于此。**有容量上限**，超出后自动按修改时间从旧到新淘汰，无需手动干预。
+
+```bash
+# 查看占用与文件数
+du -sh instance/image_cache && ls instance/image_cache | wc -l
+
+# 调整上限（默认 1 GB）：改 config.py 的 IMAGE_CACHE_MAX_BYTES 后重启。
+# 淘汰的代价只是下次访问回源一次，所以磁盘宽松时建议调大，以减少对 Pixiv 的请求。
+```
+
+- 淘汰规则见 `AGENTS.md`「目录」一节：只删本缓存自己写的文件，且是"最旧写入优先"而非严格 LRU。
+- 要彻底清空时停服删掉整个目录即可，下次访问会自动重建（代价是一轮回源）。
+
+---
+
 ## 6. 下载清理（可选 cron）
 
 仅清理 30 天前下载的、收藏数 < 100 的**已下载原图**文件，并把作品标记 `cleaned`。
@@ -106,6 +123,13 @@ pip install -r requirements-lock.txt    # 首次或依赖更新后
 sudo systemctl restart pixiv-viewer     # 服务名以实际 unit 为准
 ```
 
-- **必须 `gunicorn -w 1`**：进程内状态（下载锁、预取、搜索任务、限流、自动关注）不支持多 worker。
+- **必须 `gunicorn -w 1`，并建议加 `--threads 8`**：进程内状态（下载锁、预取、搜索任务、限流、自动关注）**不支持多 worker**，但线程共享同一进程内存，因此 `--threads` 在保持单进程语义的前提下提供并发。
+
+- **为什么要 `--threads`**：不给 `--threads` 时 gunicorn 的 sync worker **一次只处理一个请求**，一页 24 张缩略图会严格串行加载 —— 这是图库首屏慢的主要来源之一。开启后图片可并发拉取，共享状态的线程安全已审计（见 `AGENTS.md`「并发：`--threads` 下的共享状态约定」）。
+
+  ```bash
+  gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
+  ```
+
 - 更新代码后重启**必须整进程重启**（`systemctl restart`），不能只 `kill -HUP`（`--preload` 下不重载代码）。
 - 服务日志：`journalctl -u pixiv-viewer -f | grep prefetch`（预取/清理）。
