@@ -227,6 +227,36 @@ function loadTags() {
     });
 }
 
+// ── 详情页跨作品翻页的上下文传递 ──
+// 点卡片信息区进详情时：URL 参数定位（排序/筛选/位置），sessionStorage 存
+// 当前页 id 序列（与图库 30 分钟前端缓存同一份数据，约几 KB）。详情页据此
+// 算上一作/下一作；序列获取失败时详情页自动降级为无翻页。
+function buildDetailUrl(r, idx) {
+  const pos = (galleryCurrentPage - 1) * PAGE_SIZE + idx;
+  const params = new URLSearchParams();
+  params.set('ctx', 'gallery');
+  params.set('sort', sortOrder);
+  if (activeCollectionId) params.set('collection_id', activeCollectionId);
+  if (activeTag) params.set('tag', activeTag);
+  params.set('pos', pos);
+  params.set('page', galleryCurrentPage);
+  saveDetailSeq();
+  return `/detail/${r.pixiv_id}?${params}`;
+}
+
+function saveDetailSeq() {
+  try {
+    sessionStorage.setItem('pv_detail_seq', JSON.stringify({
+      v: 1,
+      sort: sortOrder,
+      collection_id: activeCollectionId || '',
+      tag: activeTag || '',
+      total: galleryTotal,
+      pages: { [galleryCurrentPage]: currentResults.map(x => x.pixiv_id) },
+    }));
+  } catch (e) { /* sessionStorage 不可用（隐私模式等）时详情页自动降级 */ }
+}
+
 async function moveCard(pid, direction, btn) {
   btn.classList.add('loading');
   try {
@@ -284,6 +314,10 @@ function renderCard(r) {
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
     if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a') || e.target.closest('.card-fav-btn') || e.target.closest('.card-move-btn')) return;
     const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
+    if (e.target.closest('.card-body')) {
+      location.href = buildDetailUrl(r, idx >= 0 ? idx : 0);
+      return;
+    }
     lightbox.open(currentResults.map(x => ({
       pixiv_id: x.pixiv_id,
       thumbUrl: proxyThumb(x.thumb_url),
