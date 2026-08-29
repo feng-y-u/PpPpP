@@ -578,6 +578,68 @@ class TestGalleryTriggersBookmarkFill:
         assert called == [] or 91003 not in [x for sub in called for x in sub]
 
 
+class TestGalleryDeleteOrphans:
+    """删除接口支持无 DB 记录的孤儿作品。
+
+    孤儿 = downloads/<pid> 有文件但 Illust 表无行（DB 重置/丢行等原因产生）。
+    旧行为：DELETE 查无行直接 404，孤儿在图库里删不掉、永久残留。
+    """
+
+    def _token(self, client):
+        return client.get('/csrf-token').get_json()['token']
+
+    def _patch_download_dir(self, monkeypatch, tmp_path):
+        import helpers
+        monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
+        return tmp_path
+
+    def test_delete_orphan_removes_dir_and_logs(self, client, clean_db, monkeypatch, tmp_path):
+        ddir = self._patch_download_dir(monkeypatch, tmp_path)
+        orphan = ddir / '70001'
+        orphan.mkdir()
+        (orphan / '70001_p0.jpg').write_bytes(b'x' * 10)
+        (orphan / '70001_p1.jpg').write_bytes(b'x' * 10)
+
+        resp = client.delete('/api/gallery/70001',
+                             headers={'X-CSRF-Token': self._token(client)})
+        assert resp.status_code == 200
+        assert resp.get_json()['status'] == 'deleted'
+        assert not orphan.exists(), '孤儿目录应被删除'
+        log = clean_db.query(models.DownloadLog).filter_by(pixiv_id=70001).all()
+        assert len(log) == 1 and log[0].action == 'deleted'
+
+    def test_delete_without_row_and_dir_returns_404(self, client, clean_db, monkeypatch, tmp_path):
+        """既无 DB 行也无本地目录才算不存在，保持原 404 语义。"""
+        self._patch_download_dir(monkeypatch, tmp_path)
+        resp = client.delete('/api/gallery/70002',
+                             headers={'X-CSRF-Token': self._token(client)})
+        assert resp.status_code == 404
+
+    def test_batch_delete_covers_orphans(self, client, clean_db, monkeypatch, tmp_path):
+        ddir = self._patch_download_dir(monkeypatch, tmp_path)
+        orphan = ddir / '70003'
+        orphan.mkdir()
+        (orphan / '70003_p0.jpg').write_bytes(b'x' * 10)
+        # 有 DB 行的作品：local_paths 指向临时目录里的真实文件，走原有删除路径
+        known = ddir / '70004'
+        known.mkdir()
+        f = known / '70004_p0.jpg'
+        f.write_bytes(b'x' * 10)
+        illust = models.Illust(pixiv_id=70004, title='known', download_status='done')
+        illust.local_paths_list = [str(f)]
+        clean_db.add(illust)
+        clean_db.commit()
+
+        resp = client.post('/api/gallery/batch-delete',
+                           data=json.dumps({'ids': [70003, 70004]}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': self._token(client)})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['deleted'] == 2 and data['failed'] == 0
+        assert not orphan.exists() and not known.exists()
+
+
 class TestDetailApiMediumUrls:
     def test_detail_api_includes_medium_urls(self, client, clean_db):
         """/api/detail 返回 medium_urls：master1200 中图代理地址，数量与原图 URL 一致。"""

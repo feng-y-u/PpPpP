@@ -18,8 +18,8 @@ from sqlalchemy.exc import OperationalError
 
 import fetcher
 from fetcher import PixivAuthError, get_pooled_session, reset_pooled_session
-from helpers import (_build_orphan_dicts, _delete_illust_files, _extract_ext,
-                     _fetch_original_urls, _fmt_num, _get_download_dir,
+from helpers import (_build_orphan_dicts, _delete_illust_files, _delete_orphan_files,
+                     _extract_ext, _fetch_original_urls, _fmt_num, _get_download_dir,
                      _next_collection_position, _original_to_resized,
                      _page_sort_key, _proxy_thumb, _scan_local_downloads,
                      enforce_image_cache_limit)
@@ -27,7 +27,7 @@ from middleware import _csrf_required, _get_csrf_token, _get_json_body
 from models import (BlockedTag, Collection, CollectionItem, DownloadLog,
                     Illust, get_favorite_pids, get_session, safe_commit)
 from runtime import (_DB_PIDS_CACHE_TTL, _THUMB_FAIL_COOLDOWN, _db_pids_cache,
-                     _thumb_failed, _thumb_failed_lock, _thumb_sem)
+                     _scan_cache, _thumb_failed, _thumb_failed_lock, _thumb_sem)
 
 logger = logging.getLogger(__name__)
 
@@ -426,7 +426,18 @@ def delete_gallery(pixiv_id: int) -> Response:
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
-            return jsonify({'error': '作品不存在'}), 404
+            # 孤儿作品：本地有下载目录但无 DB 行（DB 重置/丢行等原因产生），
+            # 直接删目录。既无行也无目录才算不存在。
+            work_dir = _get_download_dir(pixiv_id)
+            existed = os.path.isdir(work_dir)
+            deleted = _delete_orphan_files(pixiv_id)
+            if not existed:
+                return jsonify({'error': '作品不存在'}), 404
+            db.add(DownloadLog(pixiv_id=pixiv_id, action='deleted',
+                               message=f'已删除孤儿作品 {deleted} 个文件'))
+            safe_commit(db)
+            _scan_cache['ts'] = 0.0   # 目录扫描缓存立即失效，图库马上反映删除
+            return jsonify({'status': 'deleted', 'message': f'已删除 {deleted} 个文件'})
 
         deleted = _delete_illust_files(illust)
         db.add(DownloadLog(pixiv_id=pixiv_id, action='deleted', message=f'已删除 {deleted} 个文件'))
@@ -445,14 +456,31 @@ def batch_delete_gallery() -> Response:
     with get_session() as db:
         pixiv_ids = [int(pid) for pid in ids if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())]
         illusts = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
+        handled = {i.pixiv_id for i in illusts}
         deleted_count = 0
         total_files = 0
+        orphans_deleted = 0
         for illust in illusts:
             n = _delete_illust_files(illust)
             total_files += n
             db.add(DownloadLog(pixiv_id=illust.pixiv_id, action='deleted', message=f'已删除 {n} 个文件'))
             deleted_count += 1
+        # 无 DB 行的 id 按孤儿目录删除，不再静默跳过
+        for pid in pixiv_ids:
+            if pid in handled:
+                continue
+            work_dir = _get_download_dir(pid)
+            existed = os.path.isdir(work_dir)
+            n = _delete_orphan_files(pid)
+            if not existed:
+                continue
+            total_files += n
+            deleted_count += 1
+            orphans_deleted += 1
+            db.add(DownloadLog(pixiv_id=pid, action='deleted', message=f'已删除孤儿作品 {n} 个文件'))
         safe_commit(db)
+        if orphans_deleted:
+            _scan_cache['ts'] = 0.0
 
     failed = len(pixiv_ids) - deleted_count
     return jsonify({

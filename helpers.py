@@ -361,6 +361,33 @@ def _delete_illust_files(illust: Illust) -> int:
     return deleted
 
 
+def _delete_orphan_files(pixiv_id: int) -> int:
+    """删除无 DB 记录的孤儿作品目录（downloads/<pid>）。返回删除的文件数。
+
+    孤儿 = 本地有下载目录但 Illust 表无对应行（DB 重置/丢行等原因产生）。
+    目录内只删文件，删空后移除目录本身，非空目录保留（与 _delete_illust_files
+    同样的保守策略）。
+    """
+    work_dir = _get_download_dir(pixiv_id)
+    if not os.path.isdir(work_dir):
+        return 0
+    deleted = 0
+    for name in os.listdir(work_dir):
+        p = os.path.join(work_dir, name)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+                deleted += 1
+        except OSError:
+            pass
+    try:
+        if not os.listdir(work_dir):
+            os.rmdir(work_dir)
+    except OSError:
+        pass
+    return deleted
+
+
 def _next_collection_position(db, collection_id: int) -> float:
     """计算收藏夹下一个可用位置：当前最大位置 + 1000（单语句，统一三处调用）。"""
     return float(db.execute(text(
