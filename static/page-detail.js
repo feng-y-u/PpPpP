@@ -175,7 +175,8 @@ async function fetchPage(pageNo) {
 
 async function resolveSeq() {
   if (!navCtx || isNaN(navCtx.pos)) return;
-  seq = loadStoredSeq() || { total: 0, pages: {} };
+  seq = loadStoredSeq() || { v: 1, sort: navCtx.sort, collection_id: navCtx.collectionId,
+                             tag: navCtx.tag, total: 0, pages: {} };
   // 当前页必须包含本作品（sessionStorage 可能已过期或被其他筛选覆盖）
   if (!seq.pages[navCtx.page] || !seq.pages[navCtx.page].includes(illust.pixiv_id)) {
     try {
@@ -199,6 +200,7 @@ async function pidAt(pos) {
 
 async function navTo(delta) {
   if (!navReady || navPending) return;
+  if (document.querySelector('.modal.show')) return;   // 收藏夹选择弹窗等打开时不翻页
   navPending = true;
   try {
     const target = navCtx.pos + delta;
