@@ -578,6 +578,85 @@ class TestGalleryTriggersBookmarkFill:
         assert called == [] or 91003 not in [x for sub in called for x in sub]
 
 
+class TestGalleryR18Filter:
+    """图库 R18 过滤：默认不含 R18，显式 r18=all 才包含（与缓存页一致）。"""
+
+    def test_gallery_r18_default_safe(self, client, clean_db):
+        r18 = models.Illust(pixiv_id=95001, title='r18', download_status='done')
+        r18.tags_list = ['R-18', 'original']
+        r18g = models.Illust(pixiv_id=95002, title='r18g', download_status='done')
+        r18g.tags_list = ['R-18G']
+        safe = models.Illust(pixiv_id=95003, title='safe', download_status='done')
+        safe.tags_list = ['original']
+        clean_db.add_all([r18, r18g, safe])
+        clean_db.commit()
+
+        # 缺省 = safe：R-18 与 R-18G 都隐藏
+        resp = client.get('/api/gallery?limit=10')
+        assert resp.status_code == 200
+        pids = [d['pixiv_id'] for d in resp.get_json()['data']]
+        assert 95003 in pids
+        assert 95001 not in pids
+        assert 95002 not in pids
+
+        # 显式 r18=all 时包含 R18
+        resp = client.get('/api/gallery?limit=10&r18=all')
+        assert resp.status_code == 200
+        pids = [d['pixiv_id'] for d in resp.get_json()['data']]
+        assert 95001 in pids and 95002 in pids and 95003 in pids
+
+    def test_gallery_r18_filter_applies_to_collection_view(self, client, clean_db):
+        coll = models.Collection(name='col-r18')
+        clean_db.add(coll)
+        clean_db.commit()
+        r18 = models.Illust(pixiv_id=95011, title='r18', download_status='done')
+        r18.tags_list = ['R-18']
+        safe = models.Illust(pixiv_id=95012, title='safe', download_status='done')
+        safe.tags_list = ['original']
+        clean_db.add_all([r18, safe])
+        clean_db.commit()
+        clean_db.add_all([
+            models.CollectionItem(collection_id=coll.id, pixiv_id=95011, position=1000.0),
+            models.CollectionItem(collection_id=coll.id, pixiv_id=95012, position=2000.0),
+        ])
+        clean_db.commit()
+
+        resp = client.get(f'/api/gallery?collection_id={coll.id}&limit=10')
+        assert resp.status_code == 200
+        pids = [d['pixiv_id'] for d in resp.get_json()['data']]
+        assert pids == [95012]
+
+        resp = client.get(f'/api/gallery?collection_id={coll.id}&limit=10&r18=all')
+        assert resp.status_code == 200
+        pids = [d['pixiv_id'] for d in resp.get_json()['data']]
+        assert pids == [95011, 95012]
+
+
+class TestFollowingRouteR18:
+    """/api/following 的 R18 过滤：缺省 safe（默认不显示 R18），显式 r18_mode=all 才包含。"""
+
+    def _patch_following(self, monkeypatch):
+        import routes_search
+        calls = []
+        def fake_following(page=1, r18_mode='all'):
+            calls.append({'page': page, 'r18_mode': r18_mode})
+            return [{'pixiv_id': page}], False
+        monkeypatch.setattr(routes_search, 'fetch_following', fake_following)
+        return calls
+
+    def test_following_default_safe(self, client, monkeypatch):
+        calls = self._patch_following(monkeypatch)
+        resp = client.get('/api/following')
+        assert resp.status_code == 200
+        assert calls and calls[0]['r18_mode'] == 'safe'
+
+    def test_following_explicit_all(self, client, monkeypatch):
+        calls = self._patch_following(monkeypatch)
+        resp = client.get('/api/following?r18_mode=all')
+        assert resp.status_code == 200
+        assert calls and calls[0]['r18_mode'] == 'all'
+
+
 class TestGalleryDeleteOrphans:
     """删除接口支持无 DB 记录的孤儿作品。
 

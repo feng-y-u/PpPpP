@@ -339,16 +339,15 @@ function updateSearchUI() {
   $('#searchQuery').placeholder = type === 'following' ? '' : isTag ? '多个标签用逗号分隔' : '输入画师UID...';
 
   const show = type !== 'following';
+  // 关注模式隐藏排序/收藏数下限；R18 过滤三模式通用（关注直接复用搜索的 R18 选项）
   ['#sortOrder','#minBookmarks'].forEach(id => {
     const el = $(id);
     if (el) el.style.display = show ? '' : 'none';
   });
-  $$('.filters-row label').forEach(l => l.style.display = show ? '' : 'none');
-  if (!show) {
-    ['#sortOrder','#minBookmarks'].forEach(id => $(id).style.display = 'none');
-  } else {
-    ['#sortOrder','#minBookmarks'].forEach(id => $(id).style.display = '');
-  }
+  $$('.filters-row label').forEach(l => {
+    if (l.id === 'r18Label') return;   // R18 标签在关注模式下也保留
+    l.style.display = show ? '' : 'none';
+  });
   // 组合 label 与 tagMode 下拉联动显隐（画师模式不显示游离的「组合」label；
   // 须放在 .filters-row label 的 forEach 之后，否则该 forEach 会把它重新显示出来）
   const tagModeLabel = $('#tagModeLabel');

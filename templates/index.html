@@ -315,10 +315,10 @@
 
       <label>收藏≥</label>
       <input id="minBookmarks" type="number" value="{{ max_bookmarks_default }}" min="0" step="100">
-      <label>R18</label>
+      <label id="r18Label">R18</label>
       <select id="r18Mode">
+        <option value="safe" selected>隐藏R18</option>
         <option value="all">显示全部</option>
-        <option value="safe">隐藏R18</option>
       </select>
       <span class="r18-notice" title="R18选项是没用的，因为我压根就没有打开账号的显示R18内容设置，嘿嘿">⚠</span>
     </div>

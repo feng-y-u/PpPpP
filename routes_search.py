@@ -120,9 +120,9 @@ def search() -> Response:
     if sort_order not in ('popular_d', 'date_d'):
         sort_order = 'date_d'
 
-    r18_mode = request.args.get('r18_mode', 'all')
+    r18_mode = request.args.get('r18_mode', 'safe')
     if r18_mode not in ('all', 'safe'):
-        r18_mode = 'all'
+        r18_mode = 'safe'
 
     # 解析游标（同步快速校验）
     cursor_data = None
@@ -303,9 +303,9 @@ def api_following() -> Response:
         page = max(1, int(page))
     except (ValueError, TypeError):
         page = 1
-    r18_mode = request.args.get('r18_mode', 'all')
+    r18_mode = request.args.get('r18_mode', 'safe')
     if r18_mode not in ('all', 'safe'):
-        r18_mode = 'all'
+        r18_mode = 'safe'
     try:
         results, has_more = fetch_following(page, r18_mode=r18_mode)
     except PixivAuthError as e:

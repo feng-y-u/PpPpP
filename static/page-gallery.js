@@ -6,6 +6,7 @@ let galleryCurrentPage = 1, galleryTotal = 0, galleryTotalPages = 0, galleryFavT
 let allTags = [];
 let activeCollectionId = '';
 let sortOrder = 'downloaded';
+let galleryR18 = 'safe';   // R18 过滤：默认隐藏（与缓存页/搜索页一致）
 let currentResults = [];
 const PAGE_SIZE = 50;
 const GALLERY_CACHE_TTL = 30 * 60 * 1000; // 图库分页前端缓存 30 分钟
@@ -71,7 +72,7 @@ $('#tagFilterActive')?.addEventListener('click', function(e) {
 
 function loadGallery(pageNum) {
   const offset = (pageNum - 1) * PAGE_SIZE;
-  const cacheKey = `pv_gallery_${activeTag || ''}_${activeCollectionId || ''}_${sortOrder}_${pageNum}`;
+  const cacheKey = `pv_gallery_${activeTag || ''}_${activeCollectionId || ''}_${sortOrder}_${galleryR18}_${pageNum}`;
   const cached = pvCache.get(cacheKey, GALLERY_CACHE_TTL);
   if (cached) {
     renderGalleryData(cached, pageNum);
@@ -82,6 +83,7 @@ function loadGallery(pageNum) {
   if (activeTag) params.set('tag', activeTag);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
   params.set('sort', sortOrder);
+  params.set('r18', galleryR18);
   params.set('limit', PAGE_SIZE);
   params.set('offset', offset);
   fetch('/api/gallery?' + params.toString())
@@ -598,6 +600,12 @@ $('#collectionSelect').addEventListener('change', function() {
 
 $('#sortSelect').addEventListener('change', function() {
   sortOrder = this.value;
+  invalidateGalleryCache();
+  loadGallery(1);
+});
+
+$('#r18Filter').addEventListener('change', function() {
+  galleryR18 = this.value;
   invalidateGalleryCache();
   loadGallery(1);
 });

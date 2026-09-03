@@ -249,6 +249,11 @@ def api_gallery() -> Response:
     limit = max(1, min(200, limit))
     offset = max(0, offset)
 
+    # R18 过滤：默认 safe（不含 R18）；显式 r18=all 才包含（与 /api/cache/items 一致）
+    r18_mode = request.args.get('r18', 'safe')
+    if r18_mode not in ('all', 'safe'):
+        r18_mode = 'safe'
+
     is_collection_view = collection_id is not None
 
     # 扫描本地 downloads 目录
@@ -289,6 +294,14 @@ def api_gallery() -> Response:
             wheres.append(f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value IN ({phs}))')
             for i, t in enumerate(blk_list):
                 params[f'blk_{i}'] = t
+        if r18_mode == 'safe':
+            # R18 标签是常量，直接内联字面量（不进 params，损坏 JSON 降级时
+            # 该 json_each 子句随其他标签条件一并丢弃）
+            r18_lits = ','.join("'" + t + "'" for t in sorted(fetcher.R18_TAGS))
+            wheres.append(
+                f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je '
+                f'WHERE je.value IN ({r18_lits}))'
+            )
         if tag_filter:
             wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value = :tag_filter)')
             params['tag_filter'] = tag_filter
