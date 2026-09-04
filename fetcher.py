@@ -1081,6 +1081,9 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
             illust_factory=_illust_from_item,
             blocked=blocked,
             defer_details=True,
+            # Pixiv 的 follow_latest mode 参数并不总是过滤 R18（账号开启 R18 显示时
+            # safe/all 可能返回相同结果），本地再按标签兜底过滤一层，与搜索一致
+            hide_r18=(r18_mode == 'safe'),
         )
         safe_commit(db)
 

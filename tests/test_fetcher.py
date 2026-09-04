@@ -545,3 +545,65 @@ class TestPooledSession:
         fetcher.reset_pooled_session()
         assert fetcher.get_pooled_session() is not first
 
+
+class TestFetchFollowingR18Filter:
+    """关注列表 R18 过滤：safe 模式必须按标签过滤 R-18/R-18G。
+
+    回归背景：fetch_following 曾只依赖 Pixiv follow_latest 的 mode 参数；
+    账号开启 R18 显示后该接口 safe/all 可能返回相同结果，"隐藏R18"失效。
+    本地 hide_r18 按标签兜底过滤（与搜索路径一致）。
+    """
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _FakeSession:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def get(self, *args, **kwargs):
+            return TestFetchFollowingR18Filter._FakeResponse(self._payload)
+
+    @staticmethod
+    def _payload(items):
+        return {
+            'error': False,
+            'body': {
+                'thumbnails': {'illust': items},
+                'page': {'isLastPage': True},
+            },
+        }
+
+    def _run(self, monkeypatch, r18_mode, items):
+        fetcher._SEARCH_CACHE.clear()
+        session = self._FakeSession(self._payload(items))
+        monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
+        with patch('fetcher._kick_background_fill'):
+            return fetcher.fetch_following(1, r18_mode=r18_mode)
+
+    def test_safe_filters_r18_by_tag(self, clean_db, monkeypatch):
+        results, has_more = self._run(
+            monkeypatch, 'safe',
+            [_item(6001, tags=['少女']), _item(6002, tags=['R-18', 'original'])],
+        )
+        assert [r['pixiv_id'] for r in results] == [6001]
+        assert has_more is False
+
+    def test_safe_filters_r18g(self, clean_db, monkeypatch):
+        results, _ = self._run(monkeypatch, 'safe', [_item(6003, tags=['R-18G'])])
+        assert results == []
+
+    def test_all_keeps_r18(self, clean_db, monkeypatch):
+        results, _ = self._run(
+            monkeypatch, 'all',
+            [_item(6004, tags=['少女']), _item(6005, tags=['R-18'])],
+        )
+        assert [r['pixiv_id'] for r in results] == [6004, 6005]
+
