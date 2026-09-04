@@ -2,7 +2,9 @@
 
 Flask Web 应用，通过 Pixiv 内部 Ajax API（非官方）搜索/浏览/下载 Pixiv 插画。单人自部署服务。
 
-**技术栈**：Python（开发/测试实际运行 3.13，语法下限 3.9+）/ Flask 3.1 / SQLAlchemy 2.0 / SQLite(WAL) / Bootstrap 5.3 / 原生 ES5-ES2017 JS（无构建步骤）/ requests / gunicorn / pytest。无 linter、无类型检查、无打包配置。
+**本仓库无 README —— 本文件是唯一的工程入口文档**，涵盖命令、架构、约定。设计工作流见文末「设计任务（opendesign）」。
+
+**技术栈**：Python（开发/测试实际运行 3.13，语法下限 3.9+）/ Flask 3.1 / SQLAlchemy 2.0 / SQLite(WAL) / Bootstrap 5.3 / 原生 ES2020 JS（无构建步骤）/ requests / gunicorn / pytest。无 linter、无类型检查、无打包配置。
 
 > 引用位置时用**符号名**而非行号（行号随重构腐化）。需要行号时自行 grep。
 
@@ -20,8 +22,13 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不需要真实 Cookie。完整一轮 220 用例约 13s，见文末「测试」）
+# 默认测试（离线；不需要真实 Cookie。完整一轮 262 用例约 15s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
+
+# 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
+powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 tests/test_models.py -q
+powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 "tests/test_models.py::TestIllustToDict" -q
+powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q -k "prefetch and capacity"
 
 # 真实 Pixiv 集成测试（必须显式标记 integration + live_pixiv_required fixture）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -m integration
@@ -68,6 +75,38 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 ```
 
 `app.py` import 时序：`init_db()` → `_reset_stuck_downloads()` / `_reset_stuck_prefetch()`（清理残留状态）→ `start_background_threads()` → `atexit.register(_shutdown_background_threads)`。
+
+### 扩展点：新增路由
+
+路由全部挂在 Blueprint 上，共 7 个（`middleware_bp` / `search_bp` / `gallery_bp` / `download_bp` / `prefetch_bp` / `collections_bp` / `settings_bp`）。新增接口时：在对应的 `routes_*.py` 里加路由 → `app.py` 注册该 Blueprint（已注册则无需改动）。**如果新接口的某个依赖将来可能被测试 monkeypatch，该符号必须在 `app.py` 顶部用 from-import 再导出一次**，然后业务代码在函数体内 `import app` 延迟引用 `app.<符号>` —— 见文末「测试契约」。
+
+---
+
+## 变更流程：spec / plan 先行
+
+非平凡改动（新功能、跨模块重构、性能改造）走 `docs/superpowers/` 两阶段：
+
+1. **spec** → `docs/superpowers/specs/`：写清需求、决策与取舍边界。
+2. **plan** → `docs/superpowers/plans/`：写清实施步骤。
+3. **实现**，然后**回写 spec/plans 标记"已实现 + 验证结果"** —— 这一步不是形式主义，git log 里 `docs: spec 标记已实现并记录验证结果` 一类的提交就是回写记录。
+
+小修（单文件 bugfix、文案、注释）不需要走这套流程。
+
+---
+
+## 提交与分支约定
+
+- **Commit message**：Conventional Commits 前缀 + 中文描述。本仓库实际用过的前缀：`feat:` / `fix:` / `docs:` / `refactor:` / `perf+fix:`（性能与修复混合时）。示例：`fix: 删除接口支持无 DB 记录的孤儿作品（按 downloads 目录删 + 记 DownloadLog）`。
+- **分支**：主线 `main`；功能用 `feature/<slug>`，重构用 `refactor/<slug>`。改动在分支上完成后合回 `main`。
+
+---
+
+## 代码风格
+
+仓库无 linter / formatter / 类型检查，以下约定靠人工保持一致：
+
+- **Python**：模块顶部 `from __future__ import annotations`（可放心写 `dict | None` 这类注解）；注释与日志用中文；函数和公开常量写 docstring，说明「为什么」而非复述代码。
+- **前端 JS**：**无构建步骤，浏览器直接加载源文件**，所以语法上限 = 目标浏览器原生支持的范围。按代码现状，实际上限是 **ES2020**：`const/let`、箭头函数、模板字符串、async/await 已普遍使用，可选链 `?.` 与空值合并 `??` 也已大量使用（如 `static/page-gallery.js`）。**不要引入需要转译的语法**：ESM `import`、`class` 私有字段 `#x`、装饰器、顶层 await。另外 CSP 是 `script-src 'self'`（无 `unsafe-inline`），**不允许内联 `<script>`，也不允许 `eval` / `new Function`**。
 
 ---
 
@@ -144,11 +183,12 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/收藏契约）、`test_auth.py`（认证/限流/安全头）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**）、`test_prefetch.py`（预取引擎/容量清理）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份）、`test_helpers.py`（下载目录扫描等纯工具函数）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**作者搜索切片与结果缓存**/**详情预算**）、`test_prefetch.py`（预取引擎/容量清理）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
+- `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
 
 ### 最重要的约定：app 命名空间是测试补丁 seam
 
@@ -182,6 +222,13 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **别在循环里发查询**。`list_collections` 曾对每个收藏夹单独 `COUNT`，20 个收藏夹 5.0ms；改成一次 `GROUP BY` 后整条 HTTP 路由 0.9ms。
 - **`/api/image` 必须带 `max_age`**。Flask 的 `SEND_FILE_MAX_AGE_DEFAULT` 默认为 `None`，此时 `send_file` 发的是 `Cache-Control: no-cache` —— 已下载原图每次打开灯箱都要发一趟 304 重新校验。已设 `LOCAL_IMAGE_MAX_AGE`（7 天，与 `/thumb` 一致；重新下载会产生新 mtime，ETag 随之变化）。
 - **压缩交给反代**。Flask 自身不 gzip，`/api/gallery?limit=50` 响应体约 25 KB。生产前面有 nginx/Caddy 时在那里开 gzip/brotli，不要在应用层加。
+- **按作者搜索是唯一走"全量同步详情"的搜索路径，改动前务必先读**。它是 `search_by_user` 传 `illust_factory=_illust_from_detail` 且不传 `defer_details`，因为过滤条件（`hide_r18` / `min_bookmarks`）**必须拿到详情的 tags 才能判定**，而 `profile/all` 只给 id —— 所以过滤必然发生在拉详情之后。对比之下 `search_by_tag` 的 `defer = defer_details or (min_bookmarks == 0)`，列表接口自带 tags/thumb，默认一条详情都不拉。
+  三道闸把成本压在可控范围内，**不要绕过任何一道**：
+  1. **切片用 `ITEMS_PER_PAGE`（24）而不是 `PER_PAGE`（60）**。`PER_PAGE` 是标签搜索从 Pixiv 上游"白拿"的页大小（一次 HTTP 回来 60 条，多拿不花额外请求）；这里每多切一条就多一次详情请求，60 是纯浪费。注意这会改变游标里 `pixiv_page` 的步长，故游标携带 `ps` 字段，步长对不上时 `routes_search` 会丢弃游标重新搜索（不是报错，是重搜）。
+  2. **单次搜索的详情总预算**：`paginated_search(..., detail_budget=N)`。因为 `early_stop` 只数"通过过滤"的条数，筛选严格时一页可能一条都不通过，会一直翻页扫满 `_MAX_SCAN_PAGES`。预算用 `threading.local` 存（搜索任务跑在自己的线程里，天然隔离），只给作者搜索启用，其余路径默认 0（不限）。
+  3. **响应缓存**：`search_by_user` 用独立的 `_USER_SEARCH_CACHE_TTL`（600s），远长于标签搜索的 30s —— 后者成本是 1 次 HTTP，前者一页要发整页详情请求，30 秒会在用户看完这一屏之前就失效。代价是新鲜度，所以**缓存键必须带上 `_blocked_fingerprint(blocked)`**，否则改完屏蔽标签要等十分钟才见效；预算中途耗尽的残缺结果与拉不到作品列表的情况都**不写入**缓存。
+
+  **放宽令牌桶是错的**：45/60 每分钟是为绕开 403 实测定的（`fetcher.py` 顶部注释：并发 3 即触发 403）。`_TokenBucket.wait()` 持锁 sleep，`FETCH_DETAIL_WORKERS` 提再高也不会更快（实测单次详情 1.333s）。要提速只能从"少发请求"入手。
 
 规模变大后才需要看的：
 
@@ -224,6 +271,28 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ---
 
-## 设计任务
+## 设计任务（opendesign）
 
-详细工作流见 `CLAUDE.md`。摘要：检查 `./opendesign/design-systems/*/` → 输出到 `./opendesign/mockups/<task-slug>/` 附带 `manifest.json`。约束：无滥用渐变、不用 emoji 当图标、避免 Inter/Roboto/Arial、触控目标 >= 44px。
+设计类需求（UI 设计、原型、幻灯片、设计系统、品牌设计等）走 opendesign 工作流，**不要按普通前端任务处理**。
+
+**核心原则**：以设计师身份产出，HTML 是输出媒介；有品味有观点，但受上下文约束；不做模板工。
+
+**工作流**：
+
+1. 检查现有设计系统：扫描 `./opendesign/design-systems/*/`
+2. 需求收集：对模糊任务做结构化提问（受众、语气、fidelity、输出格式、变体数量等）
+3. 收集上下文：读取选中的设计系统、UI kit、代码库、品牌参考
+4. 规划：写出简短计划，明确审美选择
+5. 构建：输出到 `./opendesign/mockups/<task-slug>/`，并生成 `manifest.json`
+6. 校验：fork 校验子代理检查输出是否符合需求
+7. 总结：只讲 caveats 和下一步
+
+**设计规范**：
+
+- 无渐变滥用，无 emoji 当图标，无圆角左彩色边框卡片
+- 不手绘复杂 SVG，用带等宽标签的占位符
+- 避免 Inter / Roboto / Arial 等过度使用的字体
+- 触控目标 ≥ 44px；deck 文字 ≥ 24px（1920×1080）
+- 占位符标记优于手绘近似
+
+**入口**：用户会说 `/opendesign 设计一个XX页面`、`/opendesign 做一个品牌幻灯片`、`/opendesign 从代码提取设计系统`。技能文件位置：`C:\Users\FLOW\.claude\plugins\marketplaces\manalkaff-opendesign\skills\`。

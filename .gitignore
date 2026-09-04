@@ -15,3 +15,6 @@ build/
 
 # brainstorm visual companion session files
 .superpowers/
+
+# local agent memory
+.workbuddy/
