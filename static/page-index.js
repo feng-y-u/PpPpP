@@ -6,6 +6,9 @@ let nextCursor = null;
 let currentPage = 1;
 let hasMore = false;
 let currentSearchType = null;
+// 搜索代数：每次发起新搜索 +1。搜索中途改条件重搜时，旧任务的轮询
+// 通过比对代数静默失效（服务端同时会取消旧任务），旧结果不再渲染
+let searchGeneration = 0;
 
 const R18_STATE_KEY = 'pixiv_r18_mode';
 const SEARCH_STATE_KEY = 'pv_search_state';
@@ -155,6 +158,8 @@ async function loadNextPage() {
   }
 
   if (!nextCursor) return;
+  // 翻页期间用户改条件重搜：doSearch 会升代数，本函数的轮询静默失效
+  const gen = searchGeneration;
   $('#nextPageBtn').disabled = true;
   $('#nextPageBtn').textContent = '加载中...';
   const restoreBtn = () => {
@@ -166,6 +171,7 @@ async function loadNextPage() {
     const params = new URLSearchParams();
     params.set('cursor', nextCursor);
     const resp = await fetch('/search?' + params.toString());
+    if (gen !== searchGeneration) return;  // 已被新搜索取代
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       if (err.error_code === 'CURSOR_EXPIRED') {
@@ -188,6 +194,7 @@ async function loadNextPage() {
       return;
     }
     const data = await resp.json();
+    if (gen !== searchGeneration) return;
     // 异步任务：按钮状态由轮询回调恢复（done 时 renderPaginationBar，
     // 失败/404 时 restoreBtn），避免用旧 hasMore 提前恢复导致重复翻页
     pollSearch(data.task_id, (res) => {
@@ -214,8 +221,10 @@ async function loadNextPage() {
       renderPaginationBar();
       saveSearchState();
       maybeToastFetchStats(res.fetch_stats);
-    }, restoreBtn);
-  } catch { showToast('网络错误', true); restoreBtn(); }
+    }, restoreBtn, gen);
+  } catch {
+    if (gen === searchGeneration) { showToast('网络错误', true); restoreBtn(); }
+  }
 }
 
 async function doSearch() {
@@ -224,6 +233,8 @@ async function doSearch() {
   const minBookmarks = parseInt($('#minBookmarks').value) || 0;
   if (type === 'user' && !query) { showToast('请输入画师ID'); return; }
 
+  // 校验通过才升代数：升了代数，仍在轮询的旧任务就成了"上一代"，静默失效
+  const gen = ++searchGeneration;
   const sort = $('#sortOrder').value || 'date_d';
   const tagMode = $('#tagMode').value || 'or';
   const r18Mode = $('#r18Mode').value;
@@ -241,6 +252,7 @@ async function doSearch() {
     else url = `/search?${new URLSearchParams({type,query,min_bookmarks:minBookmarks,sort,tag_mode:tagMode,r18_mode:r18Mode})}`;
 
     const resp = await fetch(url);
+    if (gen !== searchGeneration) return;  // 期间又发起了新搜索，本次作废
     if (!resp.ok) {
       if (resp.status === 401) {
         showToast('Cookie 已过期，请更新 cookies.txt', true);
@@ -259,12 +271,13 @@ async function doSearch() {
       return;
     }
     const data = await resp.json();
+    if (gen !== searchGeneration) return;
     if (type === 'following') {
       finishSearch(data);
       return;
     }
-    pollSearch(data.task_id, finishSearch);
-  } catch { showToast('网络错误', true); showLoading(false); }
+    pollSearch(data.task_id, finishSearch, undefined, gen);
+  } catch { if (gen === searchGeneration) { showToast('网络错误', true); showLoading(false); } }
 }
 
 function finishSearch(data) {
@@ -301,9 +314,13 @@ function dedupResults(items) {
   return items.filter(r => !seen.has(r.pixiv_id));
 }
 
-function pollSearch(taskId, onDone, onFail) {
+function pollSearch(taskId, onDone, onFail, gen) {
+  // gen：发起本次轮询的搜索代数。新搜索会升代数 —— 旧任务的轮询发现代数
+  // 不匹配就静默退出，不弹错误、不碰 UI（新搜索正在接管界面）
+  const stale = () => gen !== undefined && gen !== searchGeneration;
   fetch(`/api/search/status/${taskId}`)
     .then(async resp => {
+      if (stale()) return;
       if (resp.status === 404) {
         showToast('搜索任务已失效，请重新搜索', true);
         showLoading(false);
@@ -311,8 +328,18 @@ function pollSearch(taskId, onDone, onFail) {
         return;
       }
       const data = await resp.json();
+      if (stale()) return;
       if (data.status === 'running') {
-        setTimeout(() => pollSearch(taskId, onDone, onFail), 2000);
+        setTimeout(() => pollSearch(taskId, onDone, onFail, gen), 2000);
+        return;
+      }
+      if (data.status === 'cancelled') {
+        // 服务端取消了本任务（正常只发生在被新搜索取代时 —— 那种情况代数
+        // 已经不匹配、上面就 return 了）。能走到这里说明当前搜索被取消但
+        // 没有新搜索接管，按失败处理并恢复按钮
+        showToast('搜索已取消，请重新搜索', true);
+        showLoading(false);
+        if (onFail) onFail();
         return;
       }
       if (data.status === 'error') {
@@ -328,7 +355,7 @@ function pollSearch(taskId, onDone, onFail) {
       }
       onDone(data);
     })
-    .catch(() => { showToast('网络错误', true); showLoading(false); if (onFail) onFail(); });
+    .catch(() => { if (!stale()) { showToast('网络错误', true); showLoading(false); if (onFail) onFail(); } });
 }
 
 // ── UI Toggle ──
@@ -482,7 +509,8 @@ function pollBatch(ids) {
 let loadingHintTimer = null;
 function showLoading(on) {
   $('#loadingIndicator').style.display = on ? 'block' : 'none';
-  $('#searchBtn').disabled = on;
+  // 搜索按钮保持可点：搜索中改条件再点搜索 = 取消旧任务、按新条件重搜
+  // （服务端提交新任务时自动取消在途任务，见 _submit_search_task）
   const hint = $('#loadingHint');
   if (loadingHintTimer) { clearTimeout(loadingHintTimer); loadingHintTimer = null; }
   if (on) {

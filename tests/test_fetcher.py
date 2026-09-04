@@ -825,3 +825,104 @@ class TestSearchDetailBudget:
         t.join()
         assert seen['exhausted_in_thread'] is True
         assert fetcher.budget_exhausted() is False, '主线程不应看到子线程的预算'
+
+
+class TestSearchCancellation:
+    """搜索任务取消：用户改条件重搜时中止在途搜索（routes_search 提交新任务
+    时把旧任务的取消事件置位，fetcher 在检查点抛 SearchCancelledError）。
+    """
+
+    def test_cancel_before_first_page_raises(self):
+        """提交前就置位（用户手速快于线程启动）：一页都不拉。"""
+        ev = threading.Event()
+        ev.set()
+        fetcher._cancel_begin(ev.is_set)
+        try:
+            with pytest.raises(fetcher.SearchCancelledError):
+                fetcher.paginated_search(
+                    lambda page, remaining=None: ([], True), {'type': 'user'}, 24)
+        finally:
+            fetcher._cancel_end()
+
+    def test_cancel_between_pages_raises(self):
+        """第 2 页拉取期间取消：第 2 页已入库（search_fn 内部提交），此后中止。"""
+        ev = threading.Event()
+        calls = []
+
+        def fn(page, remaining=None):
+            calls.append(page)
+            if page >= 2:
+                ev.set()
+            return ([{'pixiv_id': 100 + page, 'bookmarkCount': 1}], True)
+
+        fetcher._cancel_begin(ev.is_set)
+        try:
+            with pytest.raises(fetcher.SearchCancelledError):
+                fetcher.paginated_search(fn, {'type': 'user'}, 24)
+        finally:
+            fetcher._cancel_end()
+        assert calls == [1, 2], '第 1 页正常拉取，第 2 页后中止，不应有第 3 页'
+
+    def test_no_cancel_state_never_cancelled(self):
+        """预取/后台补全线程没有取消状态：恒为未取消，行为不受影响。"""
+        assert fetcher._cancelled() is False
+        fetcher._cancel_begin(None)
+        try:
+            assert fetcher._cancelled() is False
+        finally:
+            fetcher._cancel_end()
+
+    def test_cancel_is_thread_local(self):
+        """并发的两个搜索任务各自持各自的取消事件，互不可见。"""
+        ev = threading.Event()
+        ev.set()
+        seen = {}
+
+        def child():
+            fetcher._cancel_begin(ev.is_set)
+            seen['child'] = fetcher._cancelled()
+            fetcher._cancel_end()
+
+        t = threading.Thread(target=child)
+        t.start()
+        t.join()
+        assert seen['child'] is True
+        assert fetcher._cancelled() is False, '主线程不应看到子线程的取消状态'
+
+    def test_cancelled_fetch_skips_all_requests(self):
+        """取消后再进 _fetch_details_parallel：一个请求都不发、不计 attempted。"""
+        ev = threading.Event()
+        ev.set()
+        with patch('fetcher._get_illust_detail') as mock_detail:
+            fetcher._cancel_begin(ev.is_set)
+            try:
+                details, attempted = fetcher._fetch_details_parallel([1, 2, 3, 4, 5])
+            finally:
+                fetcher._cancel_end()
+        assert details == {}
+        assert attempted == 0
+        mock_detail.assert_not_called()
+
+    def test_cancel_keeps_in_flight_results(self):
+        """在途请求照常处理完并保留（与 early_stop 同款语义：已付出的请求
+        结果入库，下次同条件搜索命中 existing_map 免重拉）。用 Barrier 保证
+        第一批 worker 全部处于在途状态时才触发取消，之后的任务全部跳过。
+        """
+        ids = list(range(1, 13))
+        first_batch = min(fetcher.FETCH_DETAIL_WORKERS, len(ids))
+        barrier = threading.Barrier(first_batch)
+        ev = threading.Event()
+
+        def fake_detail(session, pixiv_id, limiter=None):
+            barrier.wait(timeout=5)
+            ev.set()   # 第一批全部在途时用户取消
+            return {'id': pixiv_id, 'title': f'p{pixiv_id}'}
+
+        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+            fetcher._cancel_begin(ev.is_set)
+            try:
+                details, attempted = fetcher._fetch_details_parallel(ids)
+            finally:
+                fetcher._cancel_end()
+        assert len(details) == first_batch
+        assert attempted == first_batch, '取消的不计 attempted，在途的才计'

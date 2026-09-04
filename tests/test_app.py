@@ -1,5 +1,6 @@
 import base64
 import json
+import threading
 import time
 from unittest.mock import patch
 
@@ -189,6 +190,72 @@ class TestSearch:
     def test_search_user_non_digit_returns_400(self, client):
         resp = client.get('/search?type=user&query=abc')
         assert resp.status_code == 400
+
+    @patch('app.paginated_search')
+    def test_new_search_cancels_running_task(self, mock_paginated, client):
+        """搜索中途改条件重搜：提交新任务自动取消在途旧任务。
+
+        旧任务在下一个检查点（翻页前/后、详情请求前）以 cancelled 终态结束，
+        不再继续烧令牌桶；新任务不受影响，正常完成。
+        """
+        started = threading.Event()
+        calls = []
+
+        def slow_paginated(search_fn, query_params, items_per_page,
+                           cursor_data=None, detail_budget=0):
+            calls.append(1)
+            if len(calls) > 1:
+                return ([{'pixiv_id': 1, 'title': 't'}], None, False)
+            started.set()   # 第一个任务：挂起等取消
+            deadline = time.time() + 10
+            while time.time() < deadline and not fetcher._cancelled():
+                time.sleep(0.01)
+            raise fetcher.SearchCancelledError()
+
+        mock_paginated.side_effect = slow_paginated
+
+        resp1 = client.get('/search?type=user&query=12345')
+        task1 = resp1.get_json()['task_id']
+        assert started.wait(5), '旧任务应已开始运行'
+
+        # 改条件（min_bookmarks 100 -> 20）重搜
+        resp2 = client.get('/search?type=user&query=12345&min_bookmarks=20')
+        task2 = resp2.get_json()['task_id']
+        assert task1 != task2
+
+        final1 = self._poll(client, task1)
+        assert final1.status_code == 200, 'cancelled 不是错误，不应走 502'
+        data1 = final1.get_json()
+        assert data1['status'] == 'cancelled'
+        assert data1['results'] == []
+
+        final2 = self._poll(client, task2)
+        assert final2.get_json()['status'] == 'done'
+        assert len(final2.get_json()['results']) == 1
+
+    @patch('app.paginated_search')
+    def test_cancel_event_set_synchronously_on_submit(self, mock_paginated, client):
+        """取消在提交新任务的请求内同步完成，不等旧任务自然结束。"""
+        from runtime import _search_tasks
+        started = threading.Event()
+
+        def blocking_fn(*args, **kwargs):
+            started.set()
+            deadline = time.time() + 10
+            while time.time() < deadline and not fetcher._cancelled():
+                time.sleep(0.01)
+            raise fetcher.SearchCancelledError()
+
+        mock_paginated.side_effect = blocking_fn
+        resp1 = client.get('/search?type=user&query=111')
+        task1 = resp1.get_json()['task_id']
+        assert started.wait(5), '旧任务应已开始运行'
+
+        client.get('/search?type=user&query=222')   # 提交新搜索
+        assert _search_tasks[task1]['cancel_event'].is_set()
+
+        final = self._poll(client, task1)
+        assert final.get_json()['status'] == 'cancelled'
 
     def test_search_long_query_returns_400(self, client):
         resp = client.get('/search?type=tag&query=' + 'a' * 201)

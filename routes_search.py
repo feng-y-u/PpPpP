@@ -36,7 +36,7 @@ def _cleanup_search_tasks() -> None:
     now = time.time()
     with _search_tasks_lock:
         for tid in [t for t, v in _search_tasks.items()
-                    if v['status'] in ('done', 'error')
+                    if v['status'] in ('done', 'error', 'cancelled')
                     and v.get('finished_at') and now - v['finished_at'] > app.SEARCH_TASK_TTL]:
             del _search_tasks[tid]
 
@@ -45,8 +45,15 @@ def _submit_search_task(fn) -> str:
     """提交搜索任务到后台线程，返回 task_id。
 
     fn 返回元组 (results, cursor, has_more)。
+    提交即取消所有在途任务：单人应用同时只该有一个搜索在跑，旧任务继续
+    拉详情只会烧令牌桶（每次详情 1.33s），把新搜索拖得更慢。
     """
     _cleanup_search_tasks()
+    with _search_tasks_lock:
+        for other in _search_tasks.values():
+            ev = other.get('cancel_event')
+            if other['status'] == 'running' and ev is not None:
+                ev.set()
     task_id = secrets.token_hex(8)
     task: dict = {
         'status': 'running',
@@ -57,13 +64,20 @@ def _submit_search_task(fn) -> str:
         'fetch_stats': {},
         'created_at': time.time(),
         'finished_at': None,
+        'cancel_event': threading.Event(),
     }
     with _search_tasks_lock:
         _search_tasks[task_id] = task
 
     def _run() -> None:
         try:
-            results, next_cursor, has_more = fn()
+            # 取消事件绑定到本线程（fetcher 的检查点只认任务线程自己的事件），
+            # fn 全程结束后必须解绑 —— 线程池线程会被复用，残留状态会污染下一个任务
+            fetcher._cancel_begin(task['cancel_event'].is_set)
+            try:
+                results, next_cursor, has_more = fn()
+            finally:
+                fetcher._cancel_end()
             task['results'] = results
             task['cursor'] = next_cursor
             task['has_more'] = has_more
@@ -75,6 +89,9 @@ def _submit_search_task(fn) -> str:
                 f'failed={task["fetch_stats"].get("detail_failed", 0)} '
                 f'seconds={(time.time() - task["created_at"]):.1f}'
             )
+        except fetcher.SearchCancelledError:
+            logger.info(f'[search] 取消 task={task_id}（被新搜索取代）')
+            task['status'] = 'cancelled'
         except PixivAuthError:
             logger.warning(f'搜索任务 {task_id} 认证失败')
             task['status'] = 'error'

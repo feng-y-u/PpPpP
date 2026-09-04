@@ -110,6 +110,44 @@ def budget_exhausted() -> bool:
     return remaining is not None and remaining <= 0
 
 
+# ── 搜索任务取消 ──
+#
+# 用户在搜索中途改条件重搜：路由层提交新任务时把旧任务的取消事件置位
+# （见 routes_search._submit_search_task），旧任务在下一个检查点中止。
+# 检查点：paginated_search 翻页前后 + _fetch_details_parallel 每个 worker
+# 发起请求前 —— 取消延迟 ≤ 最慢的在途详情请求（≈1.4s）。页内已拉到的详情
+# 照常入库（下次同条件搜索命中 existing_map 免重拉），只是不再继续翻页。
+#
+# 与预算同款 threading.local：只有任务线程自己能看到自己的取消事件，
+# 预取/后台补全线程不受影响。
+
+
+class SearchCancelledError(Exception):
+    """搜索任务被新搜索取代（用户改了条件重搜），调用链据此中止。"""
+
+
+_cancel_state = threading.local()
+
+
+def _cancel_begin(should_stop: Callable[[], bool] | None) -> None:
+    _cancel_state.should_stop = should_stop
+
+
+def _cancel_end() -> None:
+    _cancel_state.should_stop = None
+
+
+def _cancelled() -> bool:
+    """当前搜索是否已被取消。非搜索线程（预取/补全/主线程）恒为 False。"""
+    cb = getattr(_cancel_state, 'should_stop', None)
+    return cb is not None and cb()
+
+
+# _fetch_details_parallel 的 worker 返回"已取消"哨兵：不发起请求、不计入
+# attempted。用哨兵而非抛异常，避免与 worker 内真正的请求异常（记失败）混淆
+_CANCELLED_FETCH = object()
+
+
 def paginated_search(search_fn, query_params: dict, items_per_page: int,
                      cursor_data: dict | None = None, *,
                      detail_budget: int = 0) -> tuple:
@@ -146,10 +184,16 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
                     f'paginated_search: 详情预算 {detail_budget} 条已耗尽，'
                     f'已收集 {len(collected)}/{items_per_page} 件，停止翻页')
                 break
+            # 取消同理：不再开新的一页。已收集的批次直接作废（结果永远不会被
+            # 前端渲染 —— 取消者是新搜索，旧结果渲染了也是错的）
+            if _cancelled():
+                raise SearchCancelledError()
             try:
                 remaining = items_per_page - len(collected)
                 results, has_more = search_fn(page=pixiv_page, remaining=remaining)
             except PixivAuthError:
+                raise
+            except SearchCancelledError:
                 raise
             except Exception as e:
                 logger.error(f'paginated_search: page {pixiv_page} failed: {e}')
@@ -157,6 +201,11 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
                 # （已收集的批次照常返回，前端显示已有数据、无下一页）
                 pixiv_has_more = False
                 break
+
+            # 页内取消（_fetch_details_parallel 提前返回了部分结果）：当前页
+            # 已在 search_fn 内提交入库，这里直接中止，不把残缺页当正常结果返回
+            if _cancelled():
+                raise SearchCancelledError()
 
             if not results and not has_more:
                 pixiv_has_more = False
@@ -511,10 +560,15 @@ def _fetch_details_parallel(pixiv_ids: list[int],
         return {}, 0
     results = {}
     attempted = 0
+    # 取消回调在**调用线程**（搜索任务线程）读取后闭包进 worker：threading.local
+    # 在线程池线程里读不到任务线程的值。Event.is_set 线程安全，worker 里随时可查。
+    cancel_cb = getattr(_cancel_state, 'should_stop', None)
 
     def _worker(pid: int) -> tuple[int, dict | None]:
         # 用线程内连接池：本线程处理的多个 pid 复用同一条连接（旧代码每个 pid
         # 都新建 Session，24~60 个作品就是 24~60 次 TCP + TLS 握手）
+        if cancel_cb is not None and cancel_cb():
+            return pid, _CANCELLED_FETCH
         session = get_pooled_session()
         return pid, _get_illust_detail(session, pid, limiter)
 
@@ -529,6 +583,13 @@ def _fetch_details_parallel(pixiv_ids: list[int],
             except Exception as e:
                 logger.error(f'Parallel fetch failed for {futures[future]}: {e}')
                 detail = None
+            if detail is _CANCELLED_FETCH:
+                # 搜索被取消：与 early_stop 同款语义 —— 取消未启动的请求，已启动的
+                # 照常处理完（其结果会入库，下次搜索免重拉）。取消的请求不计入
+                # attempted，统计不误报"失败"。
+                for f in futures:
+                    f.cancel()
+                continue
             attempted += 1
             if detail is not None:
                 results[pid] = detail
