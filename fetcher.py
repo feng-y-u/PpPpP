@@ -22,7 +22,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from config import (
-    COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE,
+    COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE, ITEMS_PER_PAGE,
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
     PROXY, SSL_VERIFY, CURSOR_SECRET,
 )
@@ -73,9 +73,46 @@ def decode_cursor(cursor: str) -> dict | None:
 
 _MAX_SCAN_PAGES = 10
 
+# ── 单次搜索的详情拉取预算 ──
+#
+# 背景：作者搜索的过滤条件（hide_r18 / min_bookmarks）必须拿到详情的 tags 才能
+# 判定，而 `_process_items` 的 early_stop 只数"**通过过滤**"的条数。筛选严格时
+# 一页可能一条都不通过，paginated_search 于是继续翻页，最坏扫满 _MAX_SCAN_PAGES
+# 页 × 整页详情 —— 10 × 24 × 1.33s ≈ 5 分钟起步。
+#
+# 预算把"一次搜索最多拉多少条详情"变成硬上限，在翻下一页前检查额度，耗尽即停。
+# 代价：筛选极严时返回不足一屏就结束（宁可少给，也不要卡几分钟）。
+#
+# 状态放 threading.local：搜索任务跑在自己的线程里，天然按搜索隔离，无需加锁；
+# 且不会像模块级变量那样被并发的另一次搜索污染。
+USER_SEARCH_DETAIL_BUDGET_PAGES = 2   # 作者搜索预算 = ITEMS_PER_PAGE × 该倍数
+_detail_budget = threading.local()
+
+
+def _budget_begin(total: int) -> None:
+    if total > 0:
+        _detail_budget.remaining = float(total)
+
+
+def _budget_end() -> None:
+    _detail_budget.remaining = None
+
+
+def _budget_consume(n: int) -> None:
+    remaining = getattr(_detail_budget, 'remaining', None)
+    if remaining is not None:
+        _detail_budget.remaining = max(0.0, remaining - n)
+
+
+def budget_exhausted() -> bool:
+    """当前搜索的详情预算是否已耗尽。未启用预算时恒为 False。"""
+    remaining = getattr(_detail_budget, 'remaining', None)
+    return remaining is not None and remaining <= 0
+
 
 def paginated_search(search_fn, query_params: dict, items_per_page: int,
-                     cursor_data: dict | None = None) -> tuple:
+                     cursor_data: dict | None = None, *,
+                     detail_budget: int = 0) -> tuple:
     """游标驱动的分页搜索。
 
     Args:
@@ -84,6 +121,9 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
         query_params: {type, query, sort, tag_mode, r18_mode, min_bookmarks}
         items_per_page: 每页件数
         cursor_data: 解码后的游标，None 表示新搜索
+        detail_budget: 本次搜索允许拉取的详情总条数上限（0 = 不限）。
+            仅作者搜索需要 —— 它的详情是"必须拉完才知道能不能要"的成本，
+            其余路径要么不拉详情（defer），要么代价是常数级。
 
     Returns:
         (results, next_cursor, has_more)
@@ -96,44 +136,55 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
     pixiv_has_more = True
     effective_start = pixiv_page  # 实际开始收集的页号（跳过整页后会滞后）
 
-    while len(collected) < items_per_page and pages_scanned < _MAX_SCAN_PAGES:
-        try:
-            remaining = items_per_page - len(collected)
-            results, has_more = search_fn(page=pixiv_page, remaining=remaining)
-        except PixivAuthError:
-            raise
-        except Exception as e:
-            logger.error(f'paginated_search: page {pixiv_page} failed: {e}')
-            # 失败页不可靠：结束分页，避免游标卡在失败页反复重试
-            # （已收集的批次照常返回，前端显示已有数据、无下一页）
-            pixiv_has_more = False
-            break
+    _budget_begin(detail_budget)
+    try:
+        while len(collected) < items_per_page and pages_scanned < _MAX_SCAN_PAGES:
+            # 预算在**翻下一页之前**检查：本页已发起的详情不打断（early_stop 负责
+            # 页内提前终止），耗尽后不再开新的一页。
+            if budget_exhausted():
+                logger.info(
+                    f'paginated_search: 详情预算 {detail_budget} 条已耗尽，'
+                    f'已收集 {len(collected)}/{items_per_page} 件，停止翻页')
+                break
+            try:
+                remaining = items_per_page - len(collected)
+                results, has_more = search_fn(page=pixiv_page, remaining=remaining)
+            except PixivAuthError:
+                raise
+            except Exception as e:
+                logger.error(f'paginated_search: page {pixiv_page} failed: {e}')
+                # 失败页不可靠：结束分页，避免游标卡在失败页反复重试
+                # （已收集的批次照常返回，前端显示已有数据、无下一页）
+                pixiv_has_more = False
+                break
 
-        if not results and not has_more:
-            pixiv_has_more = False
-            break
+            if not results and not has_more:
+                pixiv_has_more = False
+                break
 
-        if skip_count > 0 and results:
-            if len(results) <= skip_count:
-                skip_count -= len(results)
-                pages_scanned += 1
-                pixiv_page += 1
-                effective_start = pixiv_page
-                if not has_more:
-                    pixiv_has_more = False
-                    break
-                continue
-            else:
-                results = results[skip_count:]
-                skip_count = 0
+            if skip_count > 0 and results:
+                if len(results) <= skip_count:
+                    skip_count -= len(results)
+                    pages_scanned += 1
+                    pixiv_page += 1
+                    effective_start = pixiv_page
+                    if not has_more:
+                        pixiv_has_more = False
+                        break
+                    continue
+                else:
+                    results = results[skip_count:]
+                    skip_count = 0
 
-        collected.extend(results)
-        page_sizes.append(len(results))
-        pages_scanned += 1
-        pixiv_page += 1
+            collected.extend(results)
+            page_sizes.append(len(results))
+            pages_scanned += 1
+            pixiv_page += 1
 
-        if not has_more:
-            pixiv_has_more = False
+            if not has_more:
+                pixiv_has_more = False
+    finally:
+        _budget_end()
 
     if pages_scanned == _MAX_SCAN_PAGES and len(collected) < items_per_page:
         logger.info(f'paginated_search: 扫描 {_MAX_SCAN_PAGES} 页未攒够 {items_per_page} 件')
@@ -553,29 +604,46 @@ def _kick_background_fill(pixiv_ids: list[int]) -> None:
 
 # ── 短期搜索结果缓存 ──
 
-_SEARCH_CACHE: 'OrderedDict[str, tuple[float, tuple[list[dict], bool]]]' = OrderedDict()
+_SEARCH_CACHE: 'OrderedDict[str, tuple[float, float, tuple[list[dict], bool]]]' = OrderedDict()
 _SEARCH_CACHE_TTL = 30.0
 _SEARCH_CACHE_MAX = 64
 _search_cache_lock = threading.Lock()
 
+# 作者搜索专用的、长得多的 TTL。
+# 标签搜索 30 秒足够：它的成本是 1 次 HTTP，缓存主要是挡住重复点击。
+# 作者搜索一页要发整页详情请求（24 条 × 1.33s ≈ 32s），30 秒的缓存会在用户
+# 看完这一屏之前就失效，等于白缓存 —— 这里给 10 分钟。
+# 代价是结果新鲜度，故作者搜索的缓存键必须带上屏蔽标签指纹（见
+# _blocked_fingerprint），否则改完屏蔽标签要等十分钟才见效。
+_USER_SEARCH_CACHE_TTL = 600.0
 
-def _cache_get(key: str) -> tuple[list[dict], bool] | None:
+
+def _blocked_fingerprint(blocked: set[str]) -> str:
+    """屏蔽标签集合的短指纹，用于把"屏蔽标签变了"反映到缓存键里。
+
+    hash() 带进程级随机盐，只在进程内稳定 —— 这正是内存缓存需要的范围。
+    """
+    return f'{len(blocked)}:{hash(frozenset(blocked)) & 0xfffffff:x}'
+
+
+def _cache_get(key: str, ttl: float | None = None) -> tuple[list[dict], bool] | None:
     now = time.time()
     with _search_cache_lock:
         v = _SEARCH_CACHE.get(key)
         if v is None:
             return None
-        ts, value = v
-        if now - ts > _SEARCH_CACHE_TTL:
+        ts, entry_ttl, value = v
+        if now - ts > entry_ttl:
             _SEARCH_CACHE.pop(key, None)
             return None
         _SEARCH_CACHE.move_to_end(key)
         return value
 
 
-def _cache_put(key: str, value: tuple[list[dict], bool]) -> None:
+def _cache_put(key: str, value: tuple[list[dict], bool], ttl: float | None = None) -> None:
+    entry_ttl = _SEARCH_CACHE_TTL if ttl is None else ttl
     with _search_cache_lock:
-        _SEARCH_CACHE[key] = (time.time(), value)
+        _SEARCH_CACHE[key] = (time.time(), entry_ttl, value)
         _SEARCH_CACHE.move_to_end(key)
         while len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
             _SEARCH_CACHE.popitem(last=False)
@@ -681,6 +749,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
     # 处理需要重新拉取详情的已有记录
     if to_refetch:
         details, attempted = _fetch_details_parallel(to_refetch, limiter=limiter)
+        _budget_consume(attempted)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
         for pixiv_id in to_refetch:
@@ -730,6 +799,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         details, attempted = _fetch_details_parallel(
             to_fetch, early_stop=_early_stop if max_results > 0 else None,
             limiter=limiter)
+        _budget_consume(attempted)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
         for pixiv_id in to_fetch:
@@ -958,22 +1028,50 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
                    hide_r18: bool = False,
                    max_results: int = 0,
                    limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
-    """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。"""
+    """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。
+
+    与 search_by_tag 的两处关键差异，改动前务必先读：
+
+    1. **这是唯一强制同步拉详情的搜索路径**。`profile/all` 只给作品 id，
+       而过滤条件（hide_r18 / min_bookmarks）要拿到详情的 tags 才能判定，
+       所以本页每个未入库的 id 都要发一次详情请求。`defer_details` 在这里
+       用不上 —— `_illust_from_detail` 必须有 detail 才能造出可展示的记录。
+       单次搜索的详情总量由 paginated_search 的 detail_budget 兜底。
+    2. **切片用 ITEMS_PER_PAGE（24）而不是 PER_PAGE（60）**。PER_PAGE 是
+       标签搜索从 Pixiv 上游"白拿"的页大小（一次 HTTP 就回来 60 条，多拿
+       不花额外请求）；这里每多切一条就多一次详情请求，60 是纯浪费。
+       注意这会改变 cursor 里 pixiv_page 的步长，见 routes_search 的 ps 字段。
+    """
+    with get_session() as db:
+        blocked = _get_blocked_tags(db)
+
+    cache_key = (
+        f'user|q={user_id}|p={page}|mb={min_bookmarks}|r={hide_r18}'
+        f'|mr={max_results}|bt={_blocked_fingerprint(blocked)}'
+    )
+    cached = _cache_get(cache_key, ttl=_USER_SEARCH_CACHE_TTL)
+    if cached is not None:
+        # 缓存命中：本次未拉取详情，清零统计避免把上次搜索的耗时/失败归属到本次
+        _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
+        return cached
+
     session = build_pixiv_session()
     all_ids = _get_user_profile_ids(session, user_id)
     if not all_ids:
+        # 拉不到（画师无作品 / Cookie 失效 / 网络故障）一律不缓存：
+        # 后两者是暂时性的，缓存空结果会让用户在 TTL 内怎么刷新都是空的。
         return [], False
 
     total = len(all_ids)
-    start = (page - 1) * PER_PAGE
-    end = min(start + PER_PAGE, total)
+    page_size = ITEMS_PER_PAGE
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
     page_ids = all_ids[start:end]
 
     if not page_ids:
         return [], False
 
     with get_session() as db:
-        blocked = _get_blocked_tags(db)
         results = _process_items(
             db, page_ids,
             id_extractor=lambda x: x,
@@ -986,8 +1084,13 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
         )
         safe_commit(db)
 
-    max_pages = (total + PER_PAGE - 1) // PER_PAGE
+    max_pages = (total + page_size - 1) // page_size
     has_more = page < max_pages
+
+    # 预算在这一页中途耗尽的，结果是残缺的（本页还有 id 没判定就收工），
+    # 不缓存 —— 否则下次命中缓存会拿到同一份残缺结果，且 has_more 失真。
+    if not budget_exhausted():
+        _cache_put(cache_key, (results, has_more), ttl=_USER_SEARCH_CACHE_TTL)
     return results, has_more
 
 

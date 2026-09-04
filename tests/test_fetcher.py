@@ -9,7 +9,8 @@ import pytest
 import requests
 
 import fetcher
-from models import Illust
+from config import ITEMS_PER_PAGE, PER_PAGE
+from models import BlockedTag, Illust
 
 
 class TestDetailRateLimiter:
@@ -607,3 +608,220 @@ class TestFetchFollowingR18Filter:
         )
         assert [r['pixiv_id'] for r in results] == [6004, 6005]
 
+
+
+class TestUserSearchPageSize:
+    """作者搜索按 ITEMS_PER_PAGE 切片，而不是标签搜索那个 PER_PAGE。
+
+    PER_PAGE=60 是标签搜索从 Pixiv 上游"白拿"的页大小（一次 HTTP 回来 60 条，
+    多拿不花额外请求）。作者搜索每多切一条就多一次详情请求，沿用 60 是纯浪费。
+    """
+
+    @staticmethod
+    def _call(clean_db, mock_ids, mock_fetch, n_works=100, page=1):
+        mock_ids.return_value = list(range(1, n_works + 1))
+        mock_fetch.return_value = ({}, 0)
+        return fetcher.search_by_user('12345', page=page, max_results=ITEMS_PER_PAGE)
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_first_page_slices_items_per_page(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        self._call(clean_db, mock_ids, mock_fetch)
+        requested = mock_fetch.call_args[0][0]
+        assert len(requested) == ITEMS_PER_PAGE
+        assert len(requested) < PER_PAGE
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_last_partial_page_is_clipped(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """作品不足一页时按实际剩余切片，不越界。"""
+        self._call(clean_db, mock_ids, mock_fetch, n_works=30, page=2)
+        assert len(mock_fetch.call_args[0][0]) == 30 - ITEMS_PER_PAGE
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_has_more_uses_new_stride(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """max_pages 跟着新步长算：100 件 / 24 = 5 页。"""
+        _, has_more = self._call(clean_db, mock_ids, mock_fetch, n_works=100, page=5)
+        assert has_more is False
+        _, has_more = self._call(clean_db, mock_ids, mock_fetch, n_works=100, page=4)
+        assert has_more is True
+
+
+class TestUserSearchResultCache:
+    """作者搜索的结果缓存。
+
+    标签搜索的缓存只活 30 秒，那对它够用（成本是 1 次 HTTP）。作者搜索一页要发
+    整页详情请求，30 秒会在用户看完这一屏之前就失效，所以用独立的长 TTL。
+    """
+
+    @staticmethod
+    def _call(mock_fetch, page=1):
+        mock_fetch.return_value = ({}, 0)
+        return fetcher.search_by_user('12345', page=page, max_results=ITEMS_PER_PAGE)
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_repeat_search_is_served_from_cache(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        mock_ids.return_value = list(range(1, 61))
+        fetcher.clear_search_cache()
+        try:
+            self._call(mock_fetch)
+            after_first = mock_fetch.call_count
+            assert after_first == 1
+
+            self._call(mock_fetch)
+            assert mock_fetch.call_count == after_first, '第二次应命中缓存，不再拉详情'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_different_page_is_separate_entry(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        mock_ids.return_value = list(range(1, 61))
+        fetcher.clear_search_cache()
+        try:
+            self._call(mock_fetch, page=1)
+            self._call(mock_fetch, page=2)
+            assert mock_fetch.call_count == 2, '不同页不应共用缓存条目'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_blocked_tag_change_invalidates_cache(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """TTL 长达 10 分钟，屏蔽标签必须计入缓存键，否则改完要等十分钟才见效。"""
+        mock_ids.return_value = list(range(1, 61))
+        fetcher.clear_search_cache()
+        try:
+            self._call(mock_fetch)
+            assert mock_fetch.call_count == 1
+
+            clean_db.add(BlockedTag(tag='a'))
+            clean_db.commit()
+
+            self._call(mock_fetch)
+            assert mock_fetch.call_count == 2, '屏蔽标签变了应重新搜索，不能吃旧缓存'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_cache_hit_zeroes_fetch_stats(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """命中缓存时清零统计，否则上次搜索的耗时会张冠李戴到本次。"""
+        mock_ids.return_value = list(range(1, 61))
+        fetcher.clear_search_cache()
+        try:
+            self._call(mock_fetch)
+            fetcher._last_fetch_stats.update({'detail_fetched': 24, 'seconds': 32.0})
+            self._call(mock_fetch)
+            assert fetcher.get_last_fetch_stats()['detail_fetched'] == 0
+            assert fetcher.get_last_fetch_stats()['seconds'] == 0.0
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_empty_profile_not_cached(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """拉不到作品列表（Cookie 失效/网络故障）不缓存，否则刷新也一直空。"""
+        mock_ids.return_value = []
+        fetcher.clear_search_cache()
+        try:
+            assert self._call(mock_fetch) == ([], False)
+            assert fetcher._SEARCH_CACHE == {}, '空结果不应写入缓存'
+            assert mock_fetch.call_count == 0
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_budget_exhausted_result_not_cached(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """预算中途耗尽的结果是残缺的，缓存它等于把残缺固化到 TTL 结束。"""
+        mock_ids.return_value = list(range(1, 61))
+        fetcher.clear_search_cache()
+        try:
+            fetcher._budget_begin(1)
+            fetcher._budget_consume(1)
+            assert fetcher.budget_exhausted() is True
+
+            self._call(mock_fetch)
+            assert not any(k.startswith('user|q=12345') for k in fetcher._SEARCH_CACHE)
+        finally:
+            fetcher._budget_end()
+            fetcher.clear_search_cache()
+
+
+class TestSearchDetailBudget:
+    """单次搜索的详情拉取总预算。
+
+    early_stop 只数"通过过滤"的条数：筛选严格时一页可能一条都不通过，
+    paginated_search 会一直翻页，最坏扫满 _MAX_SCAN_PAGES 页。
+    """
+
+    @staticmethod
+    def _scanning_fn(calls, cost_per_page):
+        def fake_fn(page, remaining=None):
+            calls.append(page)
+            fetcher._budget_consume(cost_per_page)
+            return ([], True)   # 一页都没通过过滤，永远凑不满
+        return fake_fn
+
+    def test_unlimited_by_default(self):
+        """不传 detail_budget 时行为不变 —— 标签/发现/关注路径不受影响。"""
+        calls = []
+        fetcher.paginated_search(
+            self._scanning_fn(calls, cost_per_page=5), {'type': 'tag'},
+            items_per_page=24, cursor_data=None)
+        assert len(calls) == fetcher._MAX_SCAN_PAGES
+
+    def test_budget_stops_scanning(self):
+        calls = []
+        fetcher.paginated_search(
+            self._scanning_fn(calls, cost_per_page=12), {'type': 'user'},
+            items_per_page=24, cursor_data=None, detail_budget=24)
+        assert calls == [1, 2], '预算 24 条、每页耗 12 条 → 只应扫两页'
+
+    def test_budget_not_consumed_by_productive_pages(self):
+        """过滤宽松、一页就凑满时预算不该被触发。"""
+        calls = []
+
+        def fake_fn(page, remaining=None):
+            calls.append(page)
+            return ([{'id': str(1000 + page), 'bookmarkCount': 999}], True)
+
+        results, _cursor, has_more = fetcher.paginated_search(
+            fake_fn, {'type': 'user'}, items_per_page=1, cursor_data=None,
+            detail_budget=2)
+        assert results and len(calls) == 1
+        assert has_more is True
+
+    def test_budget_state_does_not_leak_out(self):
+        fetcher.paginated_search(
+            self._scanning_fn([], cost_per_page=100), {'type': 'user'},
+            items_per_page=24, cursor_data=None, detail_budget=24)
+        assert fetcher.budget_exhausted() is False, '预算必须随搜索结束而释放'
+
+    def test_budget_is_thread_local(self):
+        """并发的两次搜索不能互相污染预算额度。"""
+        seen = {}
+
+        def run():
+            fetcher._budget_begin(1)
+            fetcher._budget_consume(1)
+            seen['exhausted_in_thread'] = fetcher.budget_exhausted()
+            fetcher._budget_end()
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        assert seen['exhausted_in_thread'] is True
+        assert fetcher.budget_exhausted() is False, '主线程不应看到子线程的预算'

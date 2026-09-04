@@ -1,10 +1,13 @@
 import base64
 import json
+import time
 from unittest.mock import patch
 
 from sqlalchemy import text
 
+import fetcher
 import models
+from config import ITEMS_PER_PAGE
 
 
 class TestIndexRoute:
@@ -145,6 +148,43 @@ class TestSearch:
         task_id = resp.get_json()['task_id']
         self._poll(client, task_id)
         mock_search.assert_called_once()
+
+    @patch('app.paginated_search')
+    def test_search_user_passes_detail_budget(self, mock_paginated, client):
+        """作者搜索是唯一需要详情预算的路径，标签搜索仍是默认的不限。"""
+        mock_paginated.return_value = ([], None, False)
+        resp = client.get('/search?type=user&query=12345')
+        self._poll(client, resp.get_json()['task_id'])
+        assert mock_paginated.call_args.kwargs['detail_budget'] > 0
+
+        mock_paginated.reset_mock()
+        resp = client.get('/search?type=tag&query=test')
+        self._poll(client, resp.get_json()['task_id'])
+        assert mock_paginated.call_args.kwargs.get('detail_budget', 0) == 0
+
+    @patch('app.paginated_search')
+    def test_user_cursor_carries_page_stride(self, mock_paginated, client):
+        """游标带上切片步长，供下次请求校验。"""
+        mock_paginated.return_value = ([], None, False)
+        resp = client.get('/search?type=user&query=12345')
+        self._poll(client, resp.get_json()['task_id'])
+        query_params = mock_paginated.call_args[0][1]
+        assert query_params['ps'] == ITEMS_PER_PAGE
+
+    @patch('app.paginated_search')
+    def test_user_cursor_with_stale_stride_restarts(self, mock_paginated, client):
+        """步长对不上（旧版游标）→ 丢弃游标重新搜索，而不是在错误的 id 区间翻页。"""
+        mock_paginated.return_value = ([], None, False)
+        stale = fetcher.encode_cursor({
+            'type': 'user', 'query': '12345', 'sort': 'date_d', 'tag_mode': 'or',
+            'r18_mode': 'safe', 'min_bookmarks': 0,
+            'pixiv_page': 3, 'skip_count': 0, 'ps': 60,   # 旧步长
+            'created_at': int(time.time()),
+        })
+        resp = client.get(f'/search?type=user&query=12345&cursor={stale}')
+        assert resp.status_code == 200
+        self._poll(client, resp.get_json()['task_id'])
+        assert mock_paginated.call_args[0][3] is None, '旧步长游标应被丢弃，按新搜索处理'
 
     def test_search_user_non_digit_returns_400(self, client):
         resp = client.get('/search?type=user&query=abc')

@@ -141,6 +141,11 @@ def search() -> Response:
         tag_mode = cursor_data.get('tag_mode', tag_mode)
         r18_mode = cursor_data.get('r18_mode', r18_mode)
         min_bookmarks = cursor_data.get('min_bookmarks', min_bookmarks)
+        # 作者搜索的切片大小就是游标里 pixiv_page 的步长。步长对不上（部署前后
+        # ITEMS_PER_PAGE 变过、或游标来自旧版代码）就丢弃游标重新搜索 —— 沿用旧
+        # 步长会在错误的 id 区间上翻页，表现为跳件/重复，比重新搜一遍难排查得多。
+        if search_type == 'user' and cursor_data.get('ps', ITEMS_PER_PAGE) != ITEMS_PER_PAGE:
+            cursor_data = None
 
     query_params = {
         'type': search_type,
@@ -173,12 +178,19 @@ def search() -> Response:
         if not cursor_str and not query.isdigit():
             return jsonify({'error': '画师ID必须为数字'}), 400
 
+        # ps 写进游标一起带出去，供下次请求校验步长（见上方游标恢复处的说明）
+        query_params['ps'] = ITEMS_PER_PAGE
+
         def _user_fn(page, remaining=None):
             return app.search_by_user(query, min_bookmarks, page, hide_r18=(r18_mode == 'safe'),
                                       max_results=remaining or ITEMS_PER_PAGE)
 
         def _fn():
-            return app.paginated_search(_user_fn, query_params, ITEMS_PER_PAGE, cursor_data)
+            # 作者搜索是唯一"必须拉完详情才知道能不能要"的路径，给它一个总预算，
+            # 免得筛选严格时扫满 _MAX_SCAN_PAGES 页。其余路径走默认 0（不限）。
+            return app.paginated_search(
+                _user_fn, query_params, ITEMS_PER_PAGE, cursor_data,
+                detail_budget=ITEMS_PER_PAGE * fetcher.USER_SEARCH_DETAIL_BUDGET_PAGES)
 
     task_id = _submit_search_task(_fn)
     logger.info(
