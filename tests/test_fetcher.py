@@ -262,6 +262,75 @@ class TestProcessItemsBookmarkFill:
         assert all(r['bookmark_count'] == 500 for r in results)
 
 
+class TestInsertNewIllusts:
+    """INSERT ... ON CONFLICT DO NOTHING：并发/重复 pid 不再炸整批。
+
+    回归：服务器曾出现 `UNIQUE constraint failed: illusts.pixiv_id` ——
+    `_process_items` 的查重→拉详情（网络耗时）→INSERT 之间有并发窗口，
+    同一 pid 被其他线程或本批重复条目插入两次，普通 flush 撞 UNIQUE 且整批作废。
+    """
+
+    def test_conflict_with_existing_row_returns_existing(self, clean_db):
+        """已存在 pid（模拟并发线程先入库）→ 静默跳过并返回既有行。"""
+        clean_db.add(Illust(pixiv_id=3001, title='existing'))
+        clean_db.commit()
+
+        winners = fetcher._insert_new_illusts(clean_db, [
+            Illust(pixiv_id=3001, title='dup'),
+            Illust(pixiv_id=3002, title='fresh'),
+        ])
+
+        assert set(winners) == {3001, 3002}
+        assert winners[3001].title == 'existing'   # 赢家是现有行
+        clean_db.commit()
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 3002).first() is not None
+
+    def test_duplicate_within_batch_merges_to_one_row(self, clean_db):
+        winners = fetcher._insert_new_illusts(clean_db, [
+            Illust(pixiv_id=3003, title='a'),
+            Illust(pixiv_id=3003, title='b'),
+        ])
+        clean_db.commit()
+        assert len(winners) == 1
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 3003).count() == 1
+
+
+class TestProcessItemsDuplicateInsert:
+    """同一批输入含重复 pixiv_id 时：结果去重、库内一行、不抛 IntegrityError。"""
+
+    @patch('fetcher._kick_background_fill')
+    @patch('fetcher._fetch_details_parallel')
+    def test_duplicate_items_in_non_defer_batch(self, mock_fetch, mock_fill, clean_db):
+        mock_fetch.return_value = ({2001: {'bookmark_count': 100, 'tags': ['a']}}, 1)
+
+        results = fetcher._process_items(
+            clean_db, [_item(2001), _item(2001)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=1,
+            defer_details=False,
+        )
+
+        assert len(results) == 1
+        assert results[0]['pixiv_id'] == 2001
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 2001).count() == 1
+
+    @patch('fetcher._kick_background_fill')
+    def test_duplicate_items_in_defer_batch(self, mock_fill, clean_db):
+        results = fetcher._process_items(
+            clean_db, [_item(2002), _item(2002)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=0,
+            defer_details=True,
+        )
+
+        assert len(results) == 1
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 2002).count() == 1
+
+
 class TestPaginatedSearchRemaining:
     def test_remaining_decreases_across_pages(self):
         """跨页累计：paginated_search 每页把"还需收集的条数"传给 search_fn。"""

@@ -26,6 +26,7 @@ from config import (
     DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
     PROXY, SSL_VERIFY, CURSOR_SECRET,
 )
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import Illust, BlockedTag, get_session, get_favorite_pids, safe_commit
 
 logger = logging.getLogger(__name__)
@@ -796,6 +797,28 @@ def _mark_favorites(db: Any, results: list[dict]) -> list[dict]:
     return results
 
 
+def _insert_new_illusts(db, illusts: list[Illust]) -> dict[int, Illust]:
+    """批量写新作品，撞 UNIQUE（pixiv_id 已存在）时静默跳过，返回赢家 pid→行 映射。
+
+    必须用 `INSERT ... ON CONFLICT DO NOTHING`：`_process_items` 的"查重 → 拉详情
+    （网络耗时）→ INSERT"之间存在并发窗口——同一 pid 可能已由并发线程（其他标签的
+    预取、手动刷新、用户在途搜索）或本批重复条目插入；普通 `db.flush()` 会抛
+    `UNIQUE constraint failed` 且整个事务作废、本页其余新作品全部丢失。
+    冲突降级为 no-op 后再按 pid 回查赢家行（不区分谁赢，结果一致）。
+    需要 SQLite ≥ 3.24（ON CONFLICT 语法；仓库最低要求本就高于此）。
+    """
+    pids = [i.pixiv_id for i in illusts]
+    if not pids:
+        return {}
+    values = [
+        {c.key: getattr(i, c.key) for c in Illust.__table__.columns if c.key != 'id'}
+        for i in illusts
+    ]
+    db.execute(sqlite_insert(Illust).on_conflict_do_nothing(), values)
+    rows = db.query(Illust).filter(Illust.pixiv_id.in_(pids)).all()
+    return {i.pixiv_id: i for i in rows}
+
+
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
                    min_bookmarks: int = 0, hide_r18: bool = False, defer_details: bool = False,
                    max_results: int = 0, limiter: _TokenBucket | None = None) -> list[dict]:
@@ -899,10 +922,15 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             results.append(existing.to_dict())
 
     if new_illusts:
-        db.add_all(new_illusts)
-        db.flush()
+        # 冲突容忍写入：并发/本批重复 pid 不炸整批（见 _insert_new_illusts）；
+        # 同 pid 只进结果一次（本批重复条目在写入层被合并成一行）
+        winners = _insert_new_illusts(db, new_illusts)
+        seen_pids: set[int] = set()
         for illust in new_illusts:
-            results.append(illust.to_dict())
+            pid = illust.pixiv_id
+            if pid in winners and pid not in seen_pids:
+                seen_pids.add(pid)
+                results.append(winners[pid].to_dict())
 
     if to_fill:
         _kick_background_fill(to_fill)
@@ -931,7 +959,15 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         _budget_consume(attempted)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
+        # 收集本页新作品，最后做一次冲突容忍批量写入（避免逐条 flush 撞 UNIQUE
+        # 时整批事务作废；并发/重复 pid 的赢家行已存在，回查后结果一致）
+        batch_illusts: list[Illust] = []
+        batch_pids: list[int] = []
+        seen_pids: set[int] = set()
         for pixiv_id in to_fetch:
+            if pixiv_id in seen_pids:
+                continue  # 本批重复条目并入一次
+            seen_pids.add(pixiv_id)
             detail = details.get(pixiv_id)
             if detail is None:
                 continue
@@ -946,9 +982,14 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
             illust = illust_factory(item, detail)
             illust.bookmark_updated_at = now_utc  # 详情同步拉取成功，收藏数为当前值
-            db.add(illust)
-            db.flush()
-            results.append(illust.to_dict())
+            batch_illusts.append(illust)
+            batch_pids.append(pixiv_id)
+
+        if batch_illusts:
+            winners = _insert_new_illusts(db, batch_illusts)
+            for pid in batch_pids:
+                if pid in winners:
+                    results.append(winners[pid].to_dict())
 
     if max_results > 0:
         fetch_stats['seconds'] = time.time() - fetch_start
