@@ -56,6 +56,9 @@ _prefetch_state = {
     'interval': PREFETCH_INTERVAL,
     'pages': PREFETCH_PAGES,
     'max_illusts': PREFETCH_MAX_ILLUSTS,
+    # 最近一轮"最终收藏数刷新"的结构化统计（background._prefetch_refresh_bookmarks
+    # 每轮结束/中止时整份替换；键固定，供 /api/prefetch/status 暴露）
+    'refresh_stats': None,
 }
 
 # ── 下载队列/进度/取消/线程池 ──

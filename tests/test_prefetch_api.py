@@ -232,14 +232,98 @@ class TestPrefetchTagsAPI:
 
 
 class TestPrefetchStatusAPI:
-    def test_status_returns_fields(self, client):
+    def test_status_returns_fields_and_health_counts(self, client, clean_db):
+        now = datetime.now(timezone.utc)
+        clean_db.add_all([
+            Illust(pixiv_id=9001, title='a', prefetch_source=1),              # 未刷新
+            Illust(pixiv_id=9002, title='b', prefetch_source=1,
+                   prefetch_refresh_at=now),                                  # 已刷新
+            Illust(pixiv_id=9003, title='c', prefetch_source=1,
+                   refresh_failed_at=now),                                    # 退避中
+            Illust(pixiv_id=9004, title='d'),                                 # 非预取来源
+        ])
+        safe_commit(clean_db)
+
         resp = client.get('/api/prefetch/status')
         assert resp.status_code == 200
         data = resp.get_json()
-        assert set(data) == {'running', 'last_check', 'interval'}
+        assert set(data) == {'running', 'last_check', 'interval', 'refresh',
+                             'pending_refresh', 'failed_backoff'}
         assert data['running'] == app._prefetch_state['running']
         assert data['last_check'] == app._prefetch_state['last_check']
         assert data['interval'] == app._prefetch_state['interval']
+        assert data['pending_refresh'] == 2   # 9001 未刷新 + 9003 退避中
+        assert data['failed_backoff'] == 1    # 9003
+        assert data['refresh'] == app._prefetch_state['refresh_stats']
+
+
+class TestPrefetchRefreshResetAPI:
+    def _setup(self, clean_db):
+        now = datetime.now(timezone.utc)
+        clean_db.add_all([
+            SearchCache(tag='t', illust_ids='[9101, 9102]', status='done'),
+            Illust(pixiv_id=9101, title='a', prefetch_source=1,
+                   prefetch_refresh_at=now),          # 已刷新（含 force-done）
+            Illust(pixiv_id=9102, title='b', prefetch_source=1,
+                   refresh_failed_at=now),            # 退避中
+            Illust(pixiv_id=9103, title='c', prefetch_source=1,
+                   refresh_failed_at=now),            # 不在该标签列表
+        ])
+        safe_commit(clean_db)
+
+    def test_reset_by_tag_clears_markers_for_tag_only(self, client, clean_db):
+        self._setup(clean_db)
+        token = _get_token(client)
+        resp = client.post('/api/prefetch/refresh-reset',
+                           data=json.dumps({'tag': 't'}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert resp.get_json() == {'status': 'reset', 'count': 2}
+        clean_db.expire_all()
+        a = clean_db.query(Illust).filter(Illust.pixiv_id == 9101).first()
+        b = clean_db.query(Illust).filter(Illust.pixiv_id == 9102).first()
+        c = clean_db.query(Illust).filter(Illust.pixiv_id == 9103).first()
+        assert a.prefetch_refresh_at is None and a.refresh_failed_at is None
+        assert b.prefetch_refresh_at is None and b.refresh_failed_at is None
+        assert c.refresh_failed_at is not None  # 其他标签/范围外不动
+
+    def test_reset_by_pixiv_id(self, client, clean_db):
+        self._setup(clean_db)
+        token = _get_token(client)
+        resp = client.post('/api/prefetch/refresh-reset',
+                           data=json.dumps({'pixiv_id': 9102}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert resp.get_json()['count'] == 1
+        clean_db.expire_all()
+        b = clean_db.query(Illust).filter(Illust.pixiv_id == 9102).first()
+        assert b.refresh_failed_at is None
+        a = clean_db.query(Illust).filter(Illust.pixiv_id == 9101).first()
+        assert a.prefetch_refresh_at is not None  # 未指定范围的不动
+
+    def test_reset_without_scope_400(self, client, clean_db):
+        token = _get_token(client)
+        resp = client.post('/api/prefetch/refresh-reset',
+                           data=json.dumps({}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 400
+
+    def test_reset_missing_tag_404(self, client, clean_db):
+        token = _get_token(client)
+        resp = client.post('/api/prefetch/refresh-reset',
+                           data=json.dumps({'tag': 'nope'}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 404
+
+    def test_reset_without_csrf_403(self, client):
+        resp = client.post('/api/prefetch/refresh-reset',
+                           data=json.dumps({'pixiv_id': 1}),
+                           content_type='application/json')
+        assert resp.status_code == 403
 
 
 class TestPrefetchRefreshAPI:

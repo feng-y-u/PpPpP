@@ -89,12 +89,64 @@ function renderPrefetchTags() {
   list.innerHTML = prefetchTags.map(t => {
     return `<span class="badge" style="background:var(--accent);font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;" data-tag="${escAttr(t.tag)}" title="状态: ${escAttr(t.status)} · 条数: ${t.total || 0}">
       ${escHtml(t.tag)}
+      <span data-reset="${escAttr(t.tag)}" title="重置刷新状态（清空刷新完成/失败退避标记，下一轮预取重新拉取收藏数）" style="opacity:.75;">&#8635;</span>
       <span style="opacity:.6;">&times;</span>
     </span>`;
   }).join('');
+  list.querySelectorAll('[data-reset]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      resetPrefetchRefresh(el.dataset.reset);
+    });
+  });
   list.querySelectorAll('[data-tag]').forEach(el => {
     el.addEventListener('click', () => removePrefetchTag(el.dataset.tag));
   });
+}
+
+async function loadPrefetchStatus() {
+  const el = $('#prefetchRefreshStats');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/prefetch/status');
+    const s = await r.json();
+    const parts = [`未完成刷新 ${s.pending_refresh ?? 0} 条`,
+                   `退避中 ${s.failed_backoff ?? 0} 条`];
+    const rs = s.refresh;
+    if (rs && rs.at) {
+      const detail = [`成功 ${rs.ok || 0}`, `低收藏删除 ${rs.deleted_low || 0}`,
+                      `永久删除 ${rs.deleted_dead || 0}`, `失败退避 ${rs.failed_transient || 0}`,
+                      `强制完成 ${rs.force_done || 0}`];
+      if (rs.failed_global) detail.push(`限流/网络失败 ${rs.failed_global}`);
+      if (rs.aborted) {
+        const reason = rs.aborted === 'rate_limit' ? '限流熔断'
+                     : rs.aborted === 'auth' ? '认证失效' : 'Cookie 缺失';
+        detail.push(`中止：${reason}`);
+      }
+      parts.push(`最近一轮 ${new Date(rs.at).toLocaleString('zh-CN')}：${detail.join(' · ')}`);
+    } else {
+      parts.push('最近一轮：尚未执行');
+    }
+    el.textContent = parts.join(' · ');
+  } catch { el.textContent = '—'; }
+}
+
+async function resetPrefetchRefresh(tag) {
+  if (!confirm(`重置「${tag}」的刷新状态？\n（清空刷新完成/失败退避标记，下一轮预取重新拉取收藏数）`)) return;
+  try {
+    const resp = await fetch('/api/prefetch/refresh-reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+      body: JSON.stringify({tag}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      showToast(`已重置 ${data.count || 0} 条（下一轮预取生效）`, false);
+      loadPrefetchStatus();
+    } else {
+      showToast(data.error || '重置失败', true);
+    }
+  } catch { showToast('网络错误', true); }
 }
 
 async function addPrefetchTag() {
@@ -114,6 +166,7 @@ async function addPrefetchTag() {
       showToast('已添加预取标签', false);
       input.value = '';
       loadPrefetchTags();
+      loadPrefetchStatus();
     } else {
       showToast(err.error || '添加失败', true);
     }
@@ -130,6 +183,7 @@ async function removePrefetchTag(tag) {
     if (resp.ok) {
       showToast('已删除', false);
       loadPrefetchTags();
+      loadPrefetchStatus();
     } else {
       const err = await resp.json().catch(() => ({}));
       showToast(err.error || '删除失败', true);
@@ -142,8 +196,9 @@ $('#prefetchTagInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') addPrefetchTag();
 });
 
-// 页面加载时拉取清单
+// 页面加载时拉取清单与刷新健康指标
 loadPrefetchTags();
+loadPrefetchStatus();
 
 // ── Collection Management ──
 let deleteCollectionId = null;

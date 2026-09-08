@@ -138,11 +138,56 @@ def prefetch_tags_delete(tag: str) -> Response:
 
 @bp.route('/api/prefetch/status', methods=['GET'])
 def prefetch_status_get() -> Response:
+    """预取状态 + 最终收藏数刷新的健康指标（供设置页与运维观察）。
+
+    pending_refresh：尚未完成最终刷新的预取作品数（这批被容量清理豁免，
+    长期积压说明刷新吞吐跟不上入库）；failed_backoff：带失败退避标记的数量。
+    """
+    with get_session() as db:
+        pending = db.query(Illust).filter(
+            Illust.prefetch_source == 1,
+            Illust.prefetch_refresh_at.is_(None),
+        ).count()
+        failed = db.query(Illust).filter(
+            Illust.prefetch_source == 1,
+            Illust.refresh_failed_at.isnot(None),
+        ).count()
     return jsonify({
         'running': _prefetch_state['running'],
         'last_check': _prefetch_state['last_check'],
         'interval': _prefetch_state['interval'],
+        'refresh': _prefetch_state.get('refresh_stats'),
+        'pending_refresh': pending,
+        'failed_backoff': failed,
     })
+
+
+@bp.route('/api/prefetch/refresh-reset', methods=['POST'])
+@_csrf_required
+def prefetch_refresh_reset_post() -> Response:
+    """把预取作品重新放回最终收藏数刷新队列（清空刷新完成与失败退避标记）。
+
+    用途：Cookie 权限修复后救回被"14 天强制完成"或"永久失败退避"的作品；
+    也可让某个标签的收藏数重新拉一遍。生效时机为下一轮预取。
+    """
+    import app  # 延迟导入：tests monkeypatch('app.reset_prefetch_refresh')
+    body = _get_json_body()
+    tag = str(body.get('tag', '') or '').strip()
+    raw_pid = body.get('pixiv_id')
+    if not tag and raw_pid is None:
+        return jsonify({'error': '需要 tag 或 pixiv_id'}), 400
+    pixiv_id = None
+    if raw_pid is not None:
+        try:
+            pixiv_id = int(raw_pid)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'pixiv_id 必须是整数'}), 400
+    if tag:
+        with get_session() as db:
+            if db.query(SearchCache).filter(SearchCache.tag == tag).first() is None:
+                return jsonify({'error': '标签不存在'}), 404
+    count = app.reset_prefetch_refresh(tag=tag or None, pixiv_id=pixiv_id)
+    return jsonify({'status': 'reset', 'count': count})
 
 
 @bp.route('/api/prefetch/refresh', methods=['POST'])

@@ -40,7 +40,7 @@ from background import (
     _shutdown_background_threads, _reset_stuck_downloads, _reset_stuck_prefetch,
     _prefetch_one_tag,
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
-    _start_prefetch_thread,
+    _start_prefetch_thread, reset_prefetch_refresh,
 )
 # 路由 Blueprint（搜索/缓存/关注 + 图库/详情/图片/收藏 + 下载/预取/收藏夹/设置）；
 # _cleanup_search_tasks 经 from-import 保持在 app 命名空间（tests/test_app.py 直接调用 app._cleanup_search_tasks()）；

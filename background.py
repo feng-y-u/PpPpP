@@ -238,6 +238,32 @@ def _remove_pids_from_search_caches(db, pids: list[int]) -> None:
 
 
 def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
+    """入口：跑一轮最终收藏数刷新，并把结构化统计写入 `_prefetch_state['refresh_stats']`。
+
+    统计无论正常结束、无候选提前返回还是中途中止都要落盘（供 /api/prefetch/status
+    与设置页展示"这轮刷新了什么"），故用 try/finally 包裹；具体逻辑见
+    `_refresh_bookmarks_pass`。
+    """
+    stats = {
+        'processed': 0,          # 本轮实际发起的详情请求数
+        'ok': 0,                 # 成功拿到详情并写入收藏数
+        'deleted_low': 0,        # 其中因最终收藏数 < 10 被删除
+        'deleted_dead': 0,       # 永久失败（404/删除类）被删除
+        'kept_dead': 0,          # 永久失败但已下载/已收藏 → 保留并标记完成
+        'failed_transient': 0,   # 暂时性失败 → 写退避标记
+        'failed_global': 0,      # 限流/连接错误（全局性，不写标记）
+        'force_done': 0,         # 失败超期被强制标记完成
+        'aborted': '',           # '' | 'rate_limit' | 'auth' | 'cookie_missing'
+        'at': None,
+    }
+    try:
+        _refresh_bookmarks_pass(max_items, stats)
+    finally:
+        stats['at'] = datetime.now(timezone.utc).isoformat()
+        _prefetch_state['refresh_stats'] = dict(stats)
+
+
+def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
     """最终收藏数刷新：入库满 1 天、尚未最终刷新的预取作品，拉详情更新收藏数一次。
 
     规则（用户需求）：
@@ -279,6 +305,7 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
         for illust in aged:
             illust.prefetch_refresh_at = now
             illust.refresh_failed_at = None
+            stats['force_done'] += 1
             logger.info(
                 f'[prefetch] 刷新失败超过 {PREFETCH_REFRESH_FORCE_DONE // 86400} 天，'
                 f'强制标记完成 {illust.pixiv_id}')
@@ -305,14 +332,17 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
             session = app.build_pixiv_session()
             global_fail_streak = 0
             for pid in pids:
+                stats['processed'] += 1
                 detail = fetcher._get_illust_detail(
                     session, pid, limiter=fetcher._fill_limiter, return_dead=True)
                 if detail is fetcher.RETRYABLE_GLOBAL_DETAIL:
                     # 限流（403/429）或连接错误是账户级/环境级状态，不是该作品的
                     # 问题：不写退避标记（否则 Cookie/网络恢复后还要白等 24h），
                     # 连续达到阈值即中止本轮，避免把整队列刷上失败标记。
+                    stats['failed_global'] += 1
                     global_fail_streak += 1
                     if global_fail_streak >= PREFETCH_REFRESH_ABORT_STREAK:
+                        stats['aborted'] = 'rate_limit'
                         logger.warning(
                             f'[prefetch] 连续 {global_fail_streak} 条详情请求遭遇限流/连接失败，'
                             f'中止本轮最终收藏数刷新（不写退避标记，下轮重试）')
@@ -330,18 +360,21 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
                         if not protected:
                             _remove_pids_from_search_caches(db, [pid])
                             db.delete(illust)
+                            stats['deleted_dead'] += 1
                             logger.info(f'[prefetch] 永久失败（已删除/非公開），删除缓存作品 {pid}')
                             safe_commit(db)
                             continue
                         # 已下载/已收藏：保留作品，标记完成退出刷新队列
                         illust.prefetch_refresh_at = now
                         illust.refresh_failed_at = None
+                        stats['kept_dead'] += 1
                         safe_commit(db)
                         logger.info(f'[prefetch] 永久失败但已下载/收藏，保留并标记完成 {pid}')
                         continue
                     if detail is None:
                         # 暂时性失败：写退避时间戳，backoff 期内不再尝试
                         illust.refresh_failed_at = now
+                        stats['failed_transient'] += 1
                         safe_commit(db)
                         continue
                     bookmark_count = detail.get('bookmark_count', 0)
@@ -349,20 +382,62 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
                     illust.bookmark_updated_at = now
                     illust.prefetch_refresh_at = now
                     illust.refresh_failed_at = None
+                    stats['ok'] += 1
                     if bookmark_count < 10 and not protected:
                         _remove_pids_from_search_caches(db, [pid])
                         db.delete(illust)
+                        stats['deleted_low'] += 1
                         logger.info(f'[prefetch] 最终收藏数 {bookmark_count} < 10，删除缓存作品 {pid}')
                     safe_commit(db)
         except fetcher.PixivAuthError as e:
             # 认证失效是全局状态：中止本轮、不写退避标记（Cookie 修好后自动继续）。
             # 关键是别让异常冒泡 —— 否则 _prefetch_loop 里的容量清理会被跳过，上限失效。
+            stats['aborted'] = 'auth'
             logger.error(f'[prefetch] 认证失效，本轮最终收藏数刷新中止（未写退避标记）: {e}')
         except FileNotFoundError as e:
+            stats['aborted'] = 'cookie_missing'
             logger.error(f'[prefetch] Cookie 文件缺失，本轮最终收藏数刷新中止: {e}')
     finally:
         if session is not None:
             session.close()
+
+
+def reset_prefetch_refresh(tag: str | None = None, pixiv_id: int | None = None) -> int:
+    """把预取作品重新放回"最终收藏数"刷新队列（清空刷新完成与失败退避标记）。
+
+    用途：Cookie 权限修复后救回被 14 天强制完成或永久失败退避的作品；或让某个
+    标签的收藏数重新拉一遍。返回受影响条数。必须指定范围（tag 或 pixiv_id），
+    避免误伤全库；作品是否再次成功仍由下一轮刷新的真实请求决定。
+    """
+    with get_session() as db:
+        if pixiv_id is not None:
+            where, params = 'illusts.pixiv_id = :pid', {'pid': pixiv_id}
+        elif tag:
+            row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+            if row is None:
+                return 0
+            try:
+                ids = json.loads(row.illust_ids) if row.illust_ids else []
+            except (json.JSONDecodeError, TypeError):
+                ids = []
+            ids = [i for i in ids if isinstance(i, int)]
+            if not ids:
+                return 0
+            # json_each 下推整个 id 数组（单个绑定参数）：拼 IN 在万级 id 时
+            # 会生成上万个绑定参数，超 SQLite 变量上限（同 helpers._pid_filter）
+            where = 'illusts.pixiv_id IN (SELECT value FROM json_each(:ids))'
+            params = {'ids': json.dumps(ids)}
+        else:
+            return 0
+        result = db.execute(text(
+            'UPDATE illusts SET prefetch_refresh_at = NULL, refresh_failed_at = NULL '
+            f'WHERE prefetch_source = 1 AND {where} '
+            'AND (prefetch_refresh_at IS NOT NULL OR refresh_failed_at IS NOT NULL)'
+        ), params)
+        count = result.rowcount or 0
+        if count:
+            safe_commit(db)
+        return count
 
 
 def _prefetch_capacity_cleanup() -> None:

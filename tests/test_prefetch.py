@@ -705,6 +705,114 @@ class TestPrefetchRefreshBookmarks:
         marked = clean_db.query(Illust).filter(Illust.pixiv_id == 5041).first()
         assert marked.refresh_failed_at is not None  # 普通失败照常写退避
 
+    def test_refresh_stats_recorded(self, clean_db, monkeypatch):
+        """每轮刷新写入结构化统计（供 /api/prefetch/status 与设置页展示）。"""
+        self._old_illust(clean_db, 5060)                          # 成功
+        self._old_illust(clean_db, 5061)                          # 低收藏 → 删除
+        self._old_illust(clean_db, 5062)                          # 暂时性失败
+        self._old_illust(clean_db, 5063)                          # 永久失败 → 删除
+        self._old_illust(clean_db, 5064, download_status='done')  # 永久失败但已下载 → 保留
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        seq = [{'bookmark_count': 100}, {'bookmark_count': 3}, None,
+               fetcher.DEAD_DETAIL, fetcher.DEAD_DETAIL]
+        calls = []
+
+        def _fake(s, pid, limiter=None, return_dead=False):
+            calls.append(pid)
+            return seq[len(calls) - 1]
+
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _fake)
+
+        app._prefetch_refresh_bookmarks()
+
+        stats = app._prefetch_state['refresh_stats']
+        assert stats['processed'] == 5
+        assert stats['ok'] == 2            # 5060 + 5061（5061 随后按低收藏删除）
+        assert stats['deleted_low'] == 1
+        assert stats['deleted_dead'] == 1
+        assert stats['kept_dead'] == 1
+        assert stats['failed_transient'] == 1
+        assert stats['failed_global'] == 0
+        assert stats['aborted'] == ''
+        assert stats['at'] is not None
+
+    def test_refresh_stats_records_abort_reason(self, clean_db, monkeypatch):
+        """中止原因写进统计（认证失效/限流熔断要能在设置页看见）。"""
+        self._old_illust(clean_db, 5070)
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        def _raise_auth(s, pid, limiter=None, return_dead=False):
+            raise fetcher.PixivAuthError('HTTP 401')
+
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _raise_auth)
+
+        app._prefetch_refresh_bookmarks()
+
+        stats = app._prefetch_state['refresh_stats']
+        assert stats['aborted'] == 'auth'
+        assert stats['processed'] == 1
+
+
+class TestResetPrefetchRefresh:
+    """手动把作品放回刷新队列：必须指定范围，只影响预取来源作品。"""
+
+    def test_reset_requires_scope(self, clean_db):
+        clean_db.add(Illust(pixiv_id=9200, title='a', prefetch_source=1,
+                            refresh_failed_at=datetime.now(timezone.utc)))
+        safe_commit(clean_db)
+
+        assert app.reset_prefetch_refresh() == 0
+        clean_db.expire_all()
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 9200).first()
+        assert illust.refresh_failed_at is not None
+
+    def test_reset_missing_tag_returns_zero(self, clean_db):
+        assert app.reset_prefetch_refresh(tag='nope') == 0
+
+    def test_reset_tag_ignores_non_prefetch_and_other_tags(self, clean_db):
+        clean_db.add_all([
+            SearchCache(tag='t', illust_ids='[9201, 9202]'),
+            Illust(pixiv_id=9201, title='a', prefetch_source=1,
+                   refresh_failed_at=datetime.now(timezone.utc)),
+            Illust(pixiv_id=9202, title='b',
+                   refresh_failed_at=datetime.now(timezone.utc)),  # 非预取来源
+            Illust(pixiv_id=9203, title='c', prefetch_source=1,
+                   refresh_failed_at=datetime.now(timezone.utc)),  # 不在该标签列表
+        ])
+        safe_commit(clean_db)
+
+        assert app.reset_prefetch_refresh(tag='t') == 1
+        clean_db.expire_all()
+        assert clean_db.query(Illust).filter(
+            Illust.pixiv_id == 9201).first().refresh_failed_at is None
+        assert clean_db.query(Illust).filter(
+            Illust.pixiv_id == 9202).first().refresh_failed_at is not None
+        assert clean_db.query(Illust).filter(
+            Illust.pixiv_id == 9203).first().refresh_failed_at is not None
+
+    def test_reset_tag_with_large_id_list_uses_json_each(self, clean_db):
+        """整条 id 数组走 json_each 下推（单个绑定参数），不拼上万参数的 IN。"""
+        ids = list(range(9300, 9400))
+        clean_db.add(SearchCache(tag='big', illust_ids=json.dumps(ids)))
+        clean_db.add_all([
+            Illust(pixiv_id=i, title='x', prefetch_source=1,
+                   refresh_failed_at=datetime.now(timezone.utc)) for i in ids
+        ])
+        safe_commit(clean_db)
+
+        assert app.reset_prefetch_refresh(tag='big') == 100
+
 
 class TestDownloadLockRegistry:
     """同一作品的下载锁：收尾时只能注销自己那把。
