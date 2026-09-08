@@ -130,7 +130,9 @@ def test_legacy_database_upgrades_without_losing_data():
     assert {"file_size", "downloaded_at", "bookmark_updated_at"}.issubset(
         illust_columns
     )
-    assert {"prefetch_source", "prefetch_refresh_at"}.issubset(illust_columns)
+    assert {"prefetch_source", "prefetch_refresh_at", "refresh_failed_at"}.issubset(
+        illust_columns
+    )
     assert {"description", "is_favorite", "favorited_at"}.isdisjoint(
         illust_columns
     )

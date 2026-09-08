@@ -11,9 +11,10 @@ from datetime import datetime, timedelta, timezone
 import fetcher
 import helpers
 import runtime
-from sqlalchemy import text
+from sqlalchemy import or_, text
 
-from config import PAGE_DOWNLOAD_INTERVAL
+from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_REFRESH_BACKOFF,
+                    PREFETCH_REFRESH_FORCE_DONE)
 from fetcher import build_pixiv_session, fetch_following
 from helpers import _get_download_dir, _extract_ext
 from models import (get_session, Illust, CollectionItem, SearchCache,
@@ -242,40 +243,93 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
     规则（用户需求）：
     - 拉取的作品给足一天时间涨收藏，之后只刷新这一次（prefetch_refresh_at 标记）；
     - 刷新后的最终收藏数 < 10 且未下载未收藏的，直接从缓存删除；
-    - 详情拉取失败跳过，等下一轮重试。
+    - 已下载 / 已收藏的不删（保护）。
+
+    失败处理（2026-09-08 持久化状态机，见 docs/superpowers/specs/
+    2026-09-08-prefetch-refresh-retry-backoff-design.md）：
+    - 暂时性失败（详情返回 None）→ 写 refresh_failed_at，退避期内不再入选，
+      防止永久失败的死作品每轮占满名额（head-of-line blocking）；
+    - 永久失败（DEAD_DETAIL：404 / 删除类报错）→ 未下载未收藏的当场删除出清，
+      已下载 / 已收藏的标记刷新完成、保留作品；
+    - 失败超过 PREFETCH_REFRESH_FORCE_DONE → 强制标记完成、退出刷新队列，
+      交由容量清理按低收藏优先淘汰（防"未刷新"积压单独顶破容量上限）。
     每轮预取执行一次，最多处理 max_items 条，避免单轮耗时过长。
     """
     import app  # 延迟导入读取 app.build_pixiv_session：tests monkeypatch('app.build_pixiv_session')
-    deadline = datetime.now(timezone.utc) - timedelta(days=1)
+    now = datetime.now(timezone.utc)
+    deadline = now - timedelta(days=1)
+    backoff_before = now - timedelta(seconds=PREFETCH_REFRESH_BACKOFF)
+    force_done_before = now - timedelta(seconds=PREFETCH_REFRESH_FORCE_DONE)
+
+    fav_ids: set[int] = set()
+    pids: list[int] = []
     with get_session() as db:
+        # 长期失败兜底先行：失败超过阈值仍未成功 → 强制标记完成、退出刷新队列
+        #（先处理再查候选，否则本轮还会把 aged 行选进候选白跑一次详情请求）
+        aged = db.query(Illust).filter(
+            Illust.prefetch_source == 1,
+            Illust.prefetch_refresh_at.is_(None),
+            Illust.refresh_failed_at.isnot(None),
+            Illust.refresh_failed_at < force_done_before,
+        ).order_by(Illust.created_at.asc()).limit(max_items).all()
+        for illust in aged:
+            illust.prefetch_refresh_at = now
+            illust.refresh_failed_at = None
+            logger.info(
+                f'[prefetch] 刷新失败超过 {PREFETCH_REFRESH_FORCE_DONE // 86400} 天，'
+                f'强制标记完成 {illust.pixiv_id}')
+        if aged:
+            safe_commit(db)
+
         candidates = db.query(Illust).filter(
             Illust.prefetch_source == 1,
             Illust.prefetch_refresh_at.is_(None),
             Illust.created_at < deadline,
+            or_(Illust.refresh_failed_at.is_(None),
+                Illust.refresh_failed_at < backoff_before),
         ).order_by(Illust.created_at.asc()).limit(max_items).all()
+        if candidates:
+            pids = [c.pixiv_id for c in candidates]
+            fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
         if not candidates:
             return
-        pids = [c.pixiv_id for c in candidates]
-        fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
 
     # 网络请求放在 DB session 外
     session = app.build_pixiv_session()
     try:
         for pid in pids:
-            detail = fetcher._get_illust_detail(session, pid, limiter=fetcher._fill_limiter)
-            if detail is None:
-                continue
-            bookmark_count = detail.get('bookmark_count', 0)
+            detail = fetcher._get_illust_detail(
+                session, pid, limiter=fetcher._fill_limiter, return_dead=True)
             now = datetime.now(timezone.utc)
             with get_session() as db:
                 illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
                 if not illust or illust.prefetch_refresh_at is not None:
                     continue
+                protected = (illust.download_status in ('done', 'downloading')
+                             or illust.local_paths_list or pid in fav_ids)
+                if detail is fetcher.DEAD_DETAIL:
+                    if not protected:
+                        _remove_pids_from_search_caches(db, [pid])
+                        db.delete(illust)
+                        logger.info(f'[prefetch] 永久失败（已删除/非公開），删除缓存作品 {pid}')
+                        safe_commit(db)
+                        continue
+                    # 已下载/已收藏：保留作品，标记完成退出刷新队列
+                    illust.prefetch_refresh_at = now
+                    illust.refresh_failed_at = None
+                    safe_commit(db)
+                    logger.info(f'[prefetch] 永久失败但已下载/收藏，保留并标记完成 {pid}')
+                    continue
+                if detail is None:
+                    # 暂时性失败：写退避时间戳，backoff 期内不再尝试
+                    illust.refresh_failed_at = now
+                    safe_commit(db)
+                    continue
+                bookmark_count = detail.get('bookmark_count', 0)
                 illust.bookmark_count = bookmark_count
                 illust.bookmark_updated_at = now
                 illust.prefetch_refresh_at = now
-                protected = (illust.download_status in ('done', 'downloading')
-                             or illust.local_paths_list or pid in fav_ids)
+                illust.refresh_failed_at = None
                 if bookmark_count < 10 and not protected:
                     _remove_pids_from_search_caches(db, [pid])
                     db.delete(illust)

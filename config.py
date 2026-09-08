@@ -57,6 +57,12 @@ FETCH_DETAIL_WORKERS = 5   # 详情 API 并行获取线程数
 PREFETCH_INTERVAL = 3600        # 预取间隔（秒），0 禁用
 PREFETCH_PAGES = 3              # 每标签预取页数
 PREFETCH_MAX_ILLUSTS = 10000    # 预取来源作品最大数量
+# 预取"最终收藏数"刷新失败退避（秒）：失败后该时长内不再尝试该作品，
+# 防止永久失败的死作品每轮占满 100 个名额（head-of-line blocking）。
+PREFETCH_REFRESH_BACKOFF = 86400
+# 刷新失败强制完成阈值（秒）：连续失败超过该时长仍未成功 → 视为处理完毕，
+# 退出刷新队列交由容量清理按低收藏优先淘汰（防"未刷新"积压顶破容量上限）。
+PREFETCH_REFRESH_FORCE_DONE = 14 * 86400
 
 # 显示设置
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下

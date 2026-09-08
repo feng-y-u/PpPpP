@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app
+import fetcher
 from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
 
 
@@ -395,8 +396,20 @@ class TestPrefetchRefreshBookmarks:
         calls = []
         monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
         monkeypatch.setattr(app.fetcher, '_get_illust_detail',
-                            lambda s, pid, limiter=None: (calls.append(pid) or
-                                                          {'bookmark_count': bookmark_count}))
+                            lambda s, pid, limiter=None, return_dead=False:
+                            (calls.append(pid) or {'bookmark_count': bookmark_count}))
+        return calls
+
+    def _mock_dead_detail(self, monkeypatch):
+        class _FakeSession:
+            def close(self):
+                pass
+
+        calls = []
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail',
+                            lambda s, pid, limiter=None, return_dead=False:
+                            (calls.append(pid) or fetcher.DEAD_DETAIL))
         return calls
 
     def test_refresh_updates_bookmark_once(self, clean_db, monkeypatch):
@@ -454,7 +467,12 @@ class TestPrefetchRefreshBookmarks:
         illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5004).first()
         assert illust.prefetch_refresh_at is None
 
-    def test_refresh_failure_keeps_candidate_for_retry(self, clean_db, monkeypatch):
+    def test_refresh_failure_writes_backoff_marker(self, clean_db, monkeypatch):
+        """暂时性失败：写 refresh_failed_at，退避期内下一轮不再入选。
+
+        回归背景：旧实现失败静默 continue、无任何标记，永久失败的死作品
+        每轮占满 100 个名额（head-of-line blocking），后续作品被饿死。
+        """
         self._old_illust(clean_db, 5005)
         safe_commit(clean_db)
 
@@ -462,15 +480,116 @@ class TestPrefetchRefreshBookmarks:
             def close(self):
                 pass
 
+        calls = []
         monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
         monkeypatch.setattr(app.fetcher, '_get_illust_detail',
-                            lambda s, pid, limiter=None: None)  # 详情失败
+                            lambda s, pid, limiter=None, return_dead=False:
+                            (calls.append(pid) or None))  # 暂时性失败
 
         app._prefetch_refresh_bookmarks()
 
         illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5005).first()
         assert illust is not None
-        assert illust.prefetch_refresh_at is None  # 未标记，下轮重试
+        assert illust.prefetch_refresh_at is None
+        assert illust.refresh_failed_at is not None  # 退避标记已写
+
+        # 退避期内第二轮：不再尝试该作品
+        app._prefetch_refresh_bookmarks()
+        assert calls == [5005]
+
+    def test_refresh_failure_within_backoff_skipped(self, clean_db, monkeypatch):
+        """1 小时前刚失败 → 本轮不入选（不浪费名额）。"""
+        recent = datetime.now(timezone.utc) - timedelta(hours=1)
+        self._old_illust(clean_db, 5006)
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5006).first()
+        illust.refresh_failed_at = recent
+        safe_commit(clean_db)
+        calls = self._mock_detail(monkeypatch, 100)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert calls == []
+
+    def test_refresh_retries_after_backoff_expired(self, clean_db, monkeypatch):
+        """退避过期（2 天前失败）→ 重新入选并重试，成功后清掉失败标记。"""
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        self._old_illust(clean_db, 5007)
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5007).first()
+        illust.refresh_failed_at = old
+        safe_commit(clean_db)
+        calls = self._mock_detail(monkeypatch, 200)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert calls == [5007]
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5007).first()
+        assert illust.prefetch_refresh_at is not None
+        assert illust.refresh_failed_at is None  # 成功清标记
+
+    def test_refresh_deletes_permanently_dead(self, clean_db, monkeypatch):
+        """永久失败（DEAD_DETAIL，404/删除类）：未下载未收藏 → 删行 + 摘除全部缓存引用。"""
+        self._old_illust(clean_db, 5008)
+        clean_db.add(SearchCache(tag='t', illust_ids='[5008]', status='done'))
+        clean_db.add(SearchCache(tag='t2', illust_ids='[5008, 900]', status='done'))
+        safe_commit(clean_db)
+        self._mock_dead_detail(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5008).first() is None
+        sc = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert json.loads(sc.illust_ids) == []
+        sc2 = clean_db.query(SearchCache).filter(SearchCache.tag == 't2').first()
+        assert json.loads(sc2.illust_ids) == [900]
+
+    def test_refresh_keeps_dead_downloaded(self, clean_db, monkeypatch):
+        """永久失败但已下载 → 保留行、标记刷新完成退出队列。"""
+        self._old_illust(clean_db, 5009, download_status='done')
+        safe_commit(clean_db)
+        self._mock_dead_detail(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5009).first()
+        assert illust is not None
+        assert illust.prefetch_refresh_at is not None
+        assert illust.refresh_failed_at is None
+
+    def test_refresh_keeps_dead_collected(self, clean_db, monkeypatch):
+        """永久失败但已收藏 → 保留行、标记刷新完成退出队列。"""
+        self._old_illust(clean_db, 5010)
+        fav = Collection(name='我的收藏')
+        clean_db.add(fav)
+        safe_commit(clean_db)
+        clean_db.add(CollectionItem(collection_id=fav.id, pixiv_id=5010))
+        safe_commit(clean_db)
+        self._mock_dead_detail(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5010).first()
+        assert illust is not None
+        assert illust.prefetch_refresh_at is not None
+
+    def test_refresh_force_done_after_long_failure(self, clean_db, monkeypatch):
+        """失败超过 FORCE_DONE（14 天）→ 无网络请求，直接强制标记完成。
+
+        兜底意义：未刷新的作品豁免容量淘汰，长期失败不兜底会无限累积、
+        单独顶破容量上限。
+        """
+        long_ago = datetime.now(timezone.utc) - timedelta(days=15)
+        self._old_illust(clean_db, 5011)
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5011).first()
+        illust.refresh_failed_at = long_ago
+        safe_commit(clean_db)
+        calls = self._mock_detail(monkeypatch, 100)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert calls == []  # 未发起任何详情请求
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5011).first()
+        assert illust.prefetch_refresh_at is not None
+        assert illust.refresh_failed_at is None
 
 
 class TestDownloadLockRegistry:

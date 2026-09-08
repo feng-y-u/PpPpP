@@ -118,9 +118,22 @@ def repair_illust_schema(conn: Connection) -> None:
     migrate_illust_schema(conn)
 
 
+def add_illust_refresh_failed_at(conn: Connection) -> None:
+    """补 illusts.refresh_failed_at（v4）：预取刷新失败退避时间戳。
+
+    失败写、成功清；backoff 期内该作品不再入选刷新候选，防止永久失败
+    的死作品占住队列名额（head-of-line blocking）。幂等：已存在则跳过。
+    """
+    if "refresh_failed_at" not in _column_names(conn, "illusts"):
+        conn.exec_driver_sql(
+            'ALTER TABLE illusts ADD COLUMN "refresh_failed_at" DATETIME'
+        )
+
+
 MIGRATIONS = (
     (1, migrate_collection_positions),
     (2, migrate_illust_schema),
     (3, repair_illust_schema),
+    (4, add_illust_refresh_failed_at),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

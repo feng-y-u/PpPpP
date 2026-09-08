@@ -78,6 +78,9 @@ class Illust(Base):
     prefetch_source: Mapped[int] = mapped_column(Integer, default=0)
     # 预取作品"最终收藏数"刷新标记：入库满 1 天后刷新一次收藏数并写入该时间戳
     prefetch_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    # 预取刷新失败退避时间戳：失败写、成功清；退避期内不再入选候选，
+    # 防止永久失败的死作品占住刷新队列名额（配合 _prefetch_refresh_bookmarks）
+    refresh_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property

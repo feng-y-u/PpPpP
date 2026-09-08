@@ -485,6 +485,24 @@ _detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
 _fill_limiter = _TokenBucket(FILL_RATE_PER_MINUTE)
 _total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
 
+# 详情"永久死亡"哨兵：作品已删除/非公開/不存在，重试无意义。
+# 仅 _prefetch_refresh_bookmarks 经 return_dead=True 请求它；其余调用方
+# （搜索/后台补全）不传该参数，保持收到 None 的旧语义。
+DEAD_DETAIL = object()
+
+# 删除类报错关键词（保守集合）：命中即永久死亡。R18 权限类 message
+# （如「年龄确认」）不在其中，按暂时性失败退避重试 —— 换好 Cookie 后可恢复，
+# 绝不误删。可按服务器日志（'Detail API error for ...'）实测报文微调。
+_PERMANENT_REMOVE_KEYWORDS = frozenset((
+    '削除', '删除', '被删除', '不存在', '非公開', '非公开',
+    'not found', 'not exist',
+))
+
+
+def _is_permanently_removed_message(msg: str) -> bool:
+    low = msg.lower()
+    return any(k.lower() in low for k in _PERMANENT_REMOVE_KEYWORDS)
+
 # 最近一次搜索的详情拉取统计（供前端展示"为什么慢"）
 _last_fetch_stats: dict = {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0}
 
@@ -494,7 +512,14 @@ def get_last_fetch_stats() -> dict:
 
 
 def _get_illust_detail(session: requests.Session, pixiv_id: int,
-                       limiter: _TokenBucket | None = None) -> dict | None:
+                       limiter: _TokenBucket | None = None,
+                       return_dead: bool = False) -> dict | None | object:
+    """拉取单条作品详情。
+
+    return_dead=True 时，对"永久死亡"（404 / 删除类报错）返回 DEAD_DETAIL 哨兵，
+    供调用方直接出清；其余调用方保持收到 None（暂时性失败，可重试/跳过）。
+    404 不再按一般错误重试：资源已不存在，重试是纯浪费。
+    """
     url = f'{PIXIV_BASE_URL}/ajax/illust/{pixiv_id}'
     (limiter or _detail_limiter).wait()
     _total_limiter.wait()
@@ -507,6 +532,9 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                 msg = str(data.get('message', ''))
                 if _is_auth_error(msg):
                     raise PixivAuthError(msg)
+                if _is_permanently_removed_message(msg):
+                    logger.warning(f'Detail API 永久失败（已删除/非公開）{pixiv_id}: {msg}')
+                    return DEAD_DETAIL if return_dead else None
                 logger.warning(f'Detail API error for {pixiv_id}: {msg}')
                 return None
             body = data['body']
@@ -535,6 +563,10 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                 # 认证失效（cookie 过期等）：重试无意义，与检索路径一致上报，
                 # 避免 _process_items 把整页作品静默过滤成空结果。
                 raise PixivAuthError('Pixiv API returned HTTP 401 (认证已失效，请更新 cookies.txt)')
+            if status == 404:
+                # 作品不存在/已删除：确定性永久失败，重试纯浪费。
+                logger.warning(f'Detail API 404（作品不存在/已删除）{pixiv_id}')
+                return DEAD_DETAIL if return_dead else None
             logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
             if attempt < DETAIL_MAX_RETRIES:
                 # 429/403 均为 Pixiv 限流（并发过高时返回 403），递增退避（3s/9s）

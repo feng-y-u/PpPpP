@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import os
 import time
+import json
 import threading
 from datetime import datetime, timezone, timedelta
 
@@ -489,6 +490,70 @@ class TestDetailRetryPolicy:
         assert isinstance(result, fetcher.PixivAuthError)
         assert calls == 1
         mock_sleep.assert_not_called()
+
+    # ── 永久失败（404 / 删除类报错）→ 哨兵 / 立即返回 ──
+
+    class _StaticSession:
+        """get() 返回固定响应（用于 404 与 error:true JSON 分支）。"""
+
+        def __init__(self, resp):
+            self.resp = resp
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            return self.resp
+
+    @staticmethod
+    def _http_resp(status):
+        resp = requests.Response()
+        resp.status_code = status
+        resp._content = b'{}'
+        return resp
+
+    @staticmethod
+    def _json_resp(payload):
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = json.dumps(payload).encode()
+        return resp
+
+    def _run_static(self, monkeypatch, resp, return_dead=False):
+        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        session = self._StaticSession(resp)
+        with patch('fetcher.time.sleep') as mock_sleep:
+            result = fetcher._get_illust_detail(
+                session, 123, limiter=fetcher._TokenBucket(6000),
+                return_dead=return_dead)
+        return session.calls, mock_sleep, result
+
+    def test_404_returns_none_immediately(self, monkeypatch):
+        """404 = 确定性永久失败：默认调用方收到 None，且不重试不退避。"""
+        calls, mock_sleep, result = self._run_static(
+            monkeypatch, self._http_resp(404))
+        assert result is None
+        assert calls == 1
+        mock_sleep.assert_not_called()
+
+    def test_404_returns_dead_sentinel_when_requested(self, monkeypatch):
+        """return_dead=True 时 404 → DEAD_DETAIL 哨兵（供刷新路径直接出清）。"""
+        calls, mock_sleep, result = self._run_static(
+            monkeypatch, self._http_resp(404), return_dead=True)
+        assert result is fetcher.DEAD_DETAIL
+        assert calls == 1
+        mock_sleep.assert_not_called()
+
+    def test_deleted_message_returns_dead_sentinel(self, monkeypatch):
+        """error:true 且 message 命中删除类关键词 → DEAD_DETAIL。"""
+        resp = self._json_resp({'error': True, 'message': '作品已被删除，或作品ID不正确。'})
+        _calls, _sleep, result = self._run_static(monkeypatch, resp, return_dead=True)
+        assert result is fetcher.DEAD_DETAIL
+
+    def test_age_check_message_is_transient(self, monkeypatch):
+        """权限类 message（年龄确认）不判死 → None（暂时性，走退避重试）。"""
+        resp = self._json_resp({'error': True, 'message': '年齢確認が必要です。'})
+        _calls, _sleep, result = self._run_static(monkeypatch, resp, return_dead=True)
+        assert result is None
 
     def test_session_does_not_retry_connect_errors(self, monkeypatch):
         """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。"""
