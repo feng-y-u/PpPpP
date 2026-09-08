@@ -11,8 +11,8 @@
 | `runtime.py` | 进程内存状态（`-w 1` 单进程语义，全部模块级变量） | `_scan_cache`/`_SCAN_CACHE_TTL`、`_db_pids_cache`、`_thumb_sem`/`_thumb_failed`/`_THUMB_FAIL_COOLDOWN`、`_auto_follow_state`/`_auto_follow_stop`、`_prefetch_state`、`_queued_downloads`/`_download_progress`/`download_cancellations`/`download_executor`、`_search_tasks`/`_search_tasks_lock`/`SEARCH_TASK_TTL`、`_rate_limit_store` |
 | `helpers.py` | 纯工具函数与库内查询 | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`、`_delete_illust_files`、`_next_collection_position`、`_compute_move_position` |
 | `middleware.py` | 认证/CSRF/限流/安全头；app 级钩子随 `middleware_bp` 注册即全局生效 | `_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_csrf_required`、`_require_login`（`before_app_request`）、`_security_headers`（`after_app_request`）、`_safe_next`、`_is_authed` |
-| `background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
-| `fetcher.py` | Pixiv API 封装 | Cookie/OAuth 认证、`search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、作品详情、`clear_search_cache` |
+| `background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh`/`_is_user_owned` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
+| `fetcher.py` | Pixiv API 封装 | Cookie/OAuth 认证、`search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、作品详情、`clear_search_cache`、`get_detail_error_samples` |
 | `models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/Collection/CollectionItem/SearchCache |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` import 时覆盖 | `DOWNLOAD_DIR`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE`、`ITEMS_PER_PAGE` 等；**import 时执行全部副作用**（读 `.env`/settings.json、生成密钥） |
 | `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `/search`、`/api/search/status/<task_id>`、`/api/cache/*`、`/api/following`；`_submit_search_task`/`_cleanup_search_tasks` |
@@ -57,7 +57,7 @@ helpers / runtime（叶子）→ middleware → background → routes_* → app.
 | `_rate_limit_store` | test_auth.py 清空（与 middleware 共享同一 dict） |
 | `_scan_cache`、`_db_pids_cache` | conftest.py 重置 `ts` |
 | `_prefetch_state` | test_prefetch.py / test_prefetch_api.py 原地改写 |
-| `_prefetch_one_tag`、`_prefetch_capacity_cleanup`、`_prefetch_loop`、`_start_prefetch_thread`、`_prefetch_refresh_bookmarks`、`reset_prefetch_refresh`、`_reset_stuck_prefetch` | test_prefetch.py / test_prefetch_api.py（`refresh-reset` 路由经 `app.reset_prefetch_refresh`） |
+| `_prefetch_one_tag`、`_prefetch_capacity_cleanup`、`_prefetch_loop`、`_start_prefetch_thread`、`_prefetch_refresh_bookmarks`、`reset_prefetch_refresh`、`_is_user_owned`、`_reset_stuck_prefetch` | test_prefetch.py / test_prefetch_api.py（`refresh-reset` 路由经 `app.reset_prefetch_refresh`） |
 | `build_pixiv_session`、`fetcher`（模块导入） | test_prefetch.py |
 | `_SETTINGS_PATH`、`_load_settings` | test_prefetch_api.py 夹具 `setattr(app, '_SETTINGS_PATH', ...)` |
 | `ACCESS_PASSWORD`、`SETTINGS_PASSWORD` | test_auth.py |

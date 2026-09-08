@@ -190,3 +190,73 @@
   → 74 passed；
 - 前端：`node --check static/page-settings.js` 通过（无构建步骤，语法上限 ES2020）；
 - 全量：`run_tests.ps1 -q` → **294 passed**，4 例环境性失败（同基线）。
+
+## 迭代修订（2026-09-08 · 第四批：剩余缺口全量收口）
+
+第一批复盘中列出的剩余缺口（关键词核对、入库/吞吐矛盾、fav_ids 快照、下载失败态保护、
+死作品删除日志、索引、迁移兜底）在本批一次性收口。
+
+### 需求 A · 未识别报错自曝（替代"等服务器日志核对关键词"）
+
+- `fetcher` 新增模块级采样器：`_record_detail_error(msg)` + `get_detail_error_samples()`，
+  记录**未命中删除关键词**的 `error:true` 报文（message → 次数，上限
+  `_DETAIL_ERROR_SAMPLE_LIMIT = 20` 种，加锁保护；进程内、重启即清）；
+- `/api/prefetch/status` 新增 `detail_errors`，设置页健康行展示前 3 条；
+- 意义：关键词清单不再依赖 SSH grep 日志——真实报文直接显示在页面上，需要补关键词时
+  照抄即可（`_PERMANENT_REMOVE_KEYWORDS` 是模块级 frozenset）。
+
+### 需求 B · 入库节流阀（正面处理"入库 > 刷新吞吐"）
+
+- `_prefetch_loop` 在入库前统计 `pending_refresh`（未完成刷新的预取作品数）：
+  - 未暂停时：`pending ≥ max_illusts × PREFETCH_INTAKE_PAUSE_RATIO`（0.8）→ 本轮**跳过全部标签的预取入库**；
+  - 已暂停时：`pending < max_illusts × PREFETCH_INTAKE_RESUME_RATIO`（0.6）才恢复入库（滞回，避免每轮抖动）；
+- 暂停期间仍照常执行刷新与容量清理（积压会被消化）；`intake_paused` 写入
+  `_prefetch_state` 并在 status/设置页展示，暂停时记 warning 日志；
+- 用比例而非绝对值：用户调大 `prefetch_max_illusts` 时阈值自动跟随。
+
+### 需求 C/D · 保护判定收口（老坑）
+
+- 新增 `background._is_user_owned(db, pixiv_id)`：收藏夹里有，或有**用户操作类**
+  下载日志（`start`/`failed`/`cancelled`/`done`/`deleted`）→ 视为"用户拥有"，不当缓存垃圾；
+- 刷新路径改为**逐条查询**（每轮 ≤100 条，查询代价可忽略），修掉 `fav_ids` 整轮快照
+  导致"循环中新增收藏仍可能被删"的窗口；
+- 容量清理仍预加载集合（一次查询），但补上下载日志集合；
+- 取舍：点过下载但失败的作品被永久保护，不再被缓存淘汰——符合"用户明确要过"的意图，
+  代价是它们会长期占用缓存名额（已下载的作品本就被保护，量级可控）。
+
+### 需求 E · 死作品删除写日志
+
+- 永久失败删除时写 `DownloadLog(action='prefetch_deleted', message='预取永久失败清理（已删除/非公開）')`；
+- 新增独立 action 值的原因：`_is_user_owned` 只认用户操作类 action，避免"被缓存清理删过"
+  反而让同一 pid 将来获得保护。
+
+### 需求 F · 索引决策（用数据说话，而非想当然）
+
+- 在 1 万行预取数据的临时库上实测候选查询与 force-done 查询耗时；若在毫秒级则**不加索引**
+  （避免每行写入的额外开销），并把实测数字与"何时再加"的触发条件记入本文档。
+
+### 需求 G · v4 列的启动兜底
+
+- `init_db()` 在 `repair_illust_schema` 之后**额外调用一次** `add_illust_refresh_failed_at(conn)`
+  （幂等），覆盖"库被外部改动丢掉该列"的漂移场景；**不改 v2/v3 已发布迁移函数**。
+
+### 验证结果（第四批）
+
+- **索引决策（实测，1 万行预取数据的临时库）**：
+
+  | 查询 | 每轮/每次耗时 |
+  |---|---|
+  | 刷新候选（每轮 1 次） | 0.81 ms |
+  | force-done 扫描（每轮 1 次） | 0.65 ms |
+  | status pending 计数 | 0.44 ms |
+  | status failed 计数 | 0.49 ms |
+  | 容量清理候选加载 | 6.04 ms |
+
+  → **不建索引**：全部毫秒级，索引只会给每行写入增加开销。触发再议的条件：
+  预取行数超过 **10 万**，或候选查询实测超过 **20 ms**；届时加
+  `(prefetch_source, prefetch_refresh_at)` 复合索引。
+- 定向：`tests/test_prefetch.py`（+7 例：用户下载日志保护、`prefetch_deleted` 不算保护、
+  入库暂停/恢复/滞回）、`tests/test_prefetch_api.py`（status 新字段）、
+  `tests/test_fetcher.py`（+3 例采样器）→ **142 passed**；
+- `node --check static/page-settings.js` 通过；
+- 全量：`run_tests.ps1 -q` → **304 passed**，4 例环境性失败（同基线）。

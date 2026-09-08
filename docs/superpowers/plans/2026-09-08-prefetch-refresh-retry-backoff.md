@@ -71,3 +71,23 @@
 7. **文档**：AGENTS.md（观测与手动干预段）、`docs/architecture.md`（background 符号、
    routes_prefetch 路由表、测试契约表）、本 spec/plan 回写。
 8. **验证**：定向 74 passed；`node --check` 通过；全量 294 passed（4 例环境性失败同基线）。
+
+## 迭代修订（2026-09-08 · 第四批：剩余缺口全量收口）
+
+1. **fetcher**：未识别报错采样器（`_record_detail_error` / `get_detail_error_samples`，
+   上限 20 种、加锁）；`error:true` 未判死分支调用它。
+2. **config**：`PREFETCH_INTAKE_PAUSE_RATIO = 0.8` / `PREFETCH_INTAKE_RESUME_RATIO = 0.6`。
+3. **runtime**：`_prefetch_state` 加固定键 `intake_paused`。
+4. **background**：
+   - 新增 `_is_user_owned(db, pid)`（收藏 + 用户操作类 DownloadLog，逐条查询）；
+   - 刷新路径改用它（替换整轮 `fav_ids` 快照）；死作品删除写
+     `DownloadLog(action='prefetch_deleted')`；
+   - 容量清理预加载下载日志集合，跳过用户拥有过的作品；
+   - `_prefetch_loop` 加入库节流阀（积压 ≥ max×0.8 暂停入库、< max×0.6 恢复，滞回）。
+5. **models**：`init_db()` 在 `repair_illust_schema` 后额外幂等调用 `add_illust_refresh_failed_at`
+   （不改已发布迁移函数）。
+6. **routes_prefetch**：status 增加 `intake_paused` / `detail_errors`。
+7. **前端**：设置页健康行显示"入库已暂停"与未识别报错样本。
+8. **索引**：1 万行实测（候选 0.81ms / force-done 0.65ms / 计数 ~0.45ms / 容量清理 6.04ms）
+   → 不建索引，触发条件记入 spec。
+9. **验证**：定向 142 passed；`node --check` 通过；全量 304 passed（4 例环境性失败同基线）。
