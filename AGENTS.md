@@ -153,6 +153,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 ### 数据库
 
 - **写入必须用 `safe_commit()`，不要直接 `db.commit()`**。注意其语义：**失败时 `rollback()` 后原样抛出，不做内部重试**（重试只会得到一次空提交、静默掩盖数据丢失）。`PRAGMA busy_timeout=10000` 提供 10 秒等锁窗口。
+- **入库去重走 `fetcher._insert_new_illusts()`（`INSERT ... ON CONFLICT DO NOTHING`）**：`_process_items` 的查重→拉详情（网络耗时）→INSERT 之间有并发窗口（其他标签预取/手动刷新/用户在途搜索可能先插入同一 pid），普通 `db.add()+flush()` 撞 `UNIQUE constraint failed` 会让**整批事务作废**。任何新插作品都经这个冲突容忍写入 + 按 pid 回查赢家行，别改回逐条 flush。
 - **获取 session 用 `get_session()`**，不要直接 `Session(engine)`（`init_db()` 等启动逻辑除外）。
 - **轻量迁移系统**：启动时 `create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行；当前版本 v1 `migrate_collection_positions`（补 `collection_items.position` 并回填）、v2 `migrate_illust_schema`（补 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`，DROP `description`/`is_favorite`/`favorited_at`）、v3 `repair_illust_schema`、v4 `add_illust_refresh_failed_at`（补 `refresh_failed_at` 刷新失败退避时间戳）。`init_db()` 在迁移后**无条件再跑一次** `repair_illust_schema` 兜底，并额外幂等调用一次 `add_illust_refresh_failed_at`（v4 列不在 v2 的列集里，用于覆盖外部改动丢列）。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。**新增 schema 变更必须追加新版本，不得修改已发布版本。**
 - **收藏语义完全由 Collection 驱动**：切换收藏即在"我的收藏"收藏夹增删 `CollectionItem`。`Illust.is_favorite` 列已废弃删除，不要再依赖；判断收藏用 `models.get_favorite_pids()`。

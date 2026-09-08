@@ -300,8 +300,53 @@
 
 - 定向：`tests/test_prefetch.py` + `tests/test_prefetch_api.py` → **82 passed**
   （新增三层淘汰 4 例 + "入库永不停" 1 例，删除节流阀 3 例）；
-- 全量：`run_tests.ps1 -q` → **304 passed**，4 例环境性失败（同基线）；
+- 全量：`run_tests.ps1 -q` → **305 passed**，4 例环境性失败（同基线）；
 - `node --check static/page-settings.js` 通过；
 - 端到端冒烟：`GET /settings` 200 且含统计元素；`/api/prefetch/status` 返回
   `pending_refresh` / `failed_backoff` / `refresh` / `detail_errors`（不再有 `intake_paused`）；
   `POST /api/prefetch/refresh-reset` 生效（count=1，退避清零）。
+
+## 迭代修订（2026-09-08 · 第六批：入库 UNIQUE 竞态修复）
+
+### 动机（服务器真实报错）
+
+服务器日志出现：
+
+```
+sqlite3.IntegrityError: UNIQUE constraint failed: illusts.pixiv_id
+[SQL: INSERT INTO illusts (..., pixiv_id, ...) VALUES (...)]
+```
+
+产生链路：`_process_items` 先查重（`existing_map`）→ 并行拉详情（**网络耗时**）→
+`db.add(illust) + db.flush()` 写库。查重与 INSERT 之间的窗口里，同一 pixiv_id 可能被
+**并发线程**（其他标签的预取、`/api/prefetch/refresh` 手动刷新、用户在途搜索）或
+**本批重复条目**（上游结果含重复 id，`to_fetch` 无去重）插入两次——普通 flush 撞
+UNIQUE 约束，且 SQLAlchemy 事务性失败让**整批新作品全部作废**，`_prefetch_one_tag`
+捕获后把标签标记为 `error`。
+
+### 需求（根因修复，而非只加 try/except）
+
+1. **冲突容忍写入**：`fetcher._insert_new_illusts(db, illusts)`——用
+   `INSERT ... ON CONFLICT DO NOTHING`（SQLite ≥ 3.24）批量写入，冲突降级为 no-op，
+   之后按 pid 回查**赢家行**（不区分是并发线程还是本批先插，结果一致）。
+   从根上消除竞态：不依赖锁、不依赖提交时序、不弹异常。
+2. **两处插入点统一改用它**：
+   - defer 路径（`min_bookmarks=0` 或显式 defer）：`db.add_all + flush` → 批量冲突容忍；
+   - 非 defer 路径：原逐条 `db.add + flush` → 收集整页后一次性批量写入；
+   - 两处都按 pid **去重后再进结果**（本批重复条目只出现一次）。
+3. 保留行为：`bookmark_updated_at` 时间戳、结果顺序、`_mark_favorites`、后台补全踢起
+   （`to_fill`）均不变。
+
+### 取舍
+
+- 用 SQLite 原语而非进程内锁：锁方案需要覆盖"查重→INSERT→**COMMIT**"全程（commit 在
+  各调用方外面），且跨 `--threads 8` 的所有线程，散落且易漏；`ON CONFLICT DO NOTHING`
+  是数据层原子保证，单点修复。
+- 赢家行数据可能来自并发线程（如带/不带详情字段略有差异）——可接受：那是"标准答案"行。
+
+### 验证结果（第六批）
+
+- 定向：`tests/test_fetcher.py::TestInsertNewIllusts`（+2 例：已存在 pid 返回既有行、
+  本批重复合并一行）、`TestProcessItemsDuplicateInsert`（+2 例：非 defer/defer 路径
+  重复输入 → 结果 1 条、库内 1 行）→ 65 passed；
+- 全量：`run_tests.ps1 -q` → **309 passed**，4 例环境性失败（同基线）。

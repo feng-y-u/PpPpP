@@ -104,4 +104,14 @@
    - 新增 `_naive_utc()`；`_prefetch_refresh_bookmarks` 默认批量改为 `PREFETCH_REFRESH_BATCH`。
 4. **routes_prefetch / 前端**：去掉 `intake_paused` 字段与"入库已暂停"提示。
 5. **测试**：删除节流阀 3 例 + 新增三层淘汰 4 例 + "入库永不停" 1 例；status 字段断言同步。
-6. **验证**：定向 82 passed；全量 304 passed；`node --check` 通过；端到端冒烟通过。
+6. **验证**：定向 82 passed；`node --check` 通过；全量 305 passed；端到端冒烟通过。
+
+## 迭代修订（2026-09-08 · 第六批：入库 UNIQUE 竞态修复）
+
+1. **fetcher**：新增 `_insert_new_illusts(db, illusts)`（`INSERT ... ON CONFLICT DO NOTHING`
+   批量写入 + 按 pid 回查赢家行，SQLite ≥ 3.24）；`_process_items` 两处插入点
+   （defer `db.add_all` / 非 defer 逐条 `db.add+flush`）统一改用它，两处都按 pid 去重
+   再进结果；顶部加 `from sqlalchemy.dialects.sqlite import insert as sqlite_insert`。
+2. **测试**：`TestInsertNewIllusts`（+2）、`TestProcessItemsDuplicateInsert`（+2）。
+3. **文档**：本 plan/spec 回写（第六批）+ AGENTS.md「数据库」补一条入库冲突容忍约定。
+4. **验证**：定向 65 passed；全量 309 passed（4 例环境性失败同基线）。
