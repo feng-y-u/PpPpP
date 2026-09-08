@@ -579,6 +579,28 @@ class TestDetailRetryPolicy:
             monkeypatch, self._http_error(500), return_dead=True)
         assert result is None
 
+    # ── 未识别报错采样（供设置页核对删除关键词清单）──
+
+    def test_unmatched_error_message_recorded(self, monkeypatch):
+        monkeypatch.setattr(fetcher, '_detail_error_samples', {})
+        resp = self._json_resp({'error': True, 'message': '謎のエラー'})
+        self._run_static(monkeypatch, resp, return_dead=True)
+        assert fetcher.get_detail_error_samples() == {'謎のエラー': 1}
+
+    def test_unmatched_error_message_counted_once_per_message(self, monkeypatch):
+        monkeypatch.setattr(fetcher, '_detail_error_samples', {})
+        resp = self._json_resp({'error': True, 'message': '謎のエラー'})
+        self._run_static(monkeypatch, resp, return_dead=True)
+        self._run_static(monkeypatch, resp, return_dead=True)
+        assert fetcher.get_detail_error_samples() == {'謎のエラー': 2}
+
+    def test_permanent_and_auth_messages_not_sampled(self, monkeypatch):
+        """已判死/认证类报文不进样本（前者已处理，后者另有上报路径）。"""
+        monkeypatch.setattr(fetcher, '_detail_error_samples', {})
+        dead = self._json_resp({'error': True, 'message': '作品已被删除'})
+        self._run_static(monkeypatch, dead, return_dead=True)
+        assert fetcher.get_detail_error_samples() == {}
+
     def test_session_does_not_retry_connect_errors(self, monkeypatch):
         """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。"""
         monkeypatch.setattr(fetcher, '_load_cookie', lambda: None)

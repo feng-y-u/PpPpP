@@ -67,6 +67,11 @@ PREFETCH_REFRESH_FORCE_DONE = 14 * 86400
 # 限流是账户级状态，不该按单作品记退避；熔断避免把整队列刷上 24h 退避并白烧
 # 3s+9s 的退避时间。
 PREFETCH_REFRESH_ABORT_STREAK = 3
+# 入库节流阀（占 prefetch_max_illusts 的比例）：未完成刷新的积压达到 pause 比例
+# 时跳过预取入库（只跑刷新+容量清理），回落到 resume 比例以下才恢复——滞回避免抖动。
+# 目的：正面处理"入库速率 > 刷新吞吐"导致积压顶破上限的问题。
+PREFETCH_INTAKE_PAUSE_RATIO = 0.8
+PREFETCH_INTAKE_RESUME_RATIO = 0.6
 
 # 显示设置
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下

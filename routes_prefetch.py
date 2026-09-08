@@ -12,6 +12,7 @@ import threading
 from flask import Blueprint, Response, jsonify, request
 
 from background import _collect_other_tag_pids
+from fetcher import get_detail_error_samples
 from middleware import _csrf_required, _get_json_body
 from models import (CollectionItem, Illust, SearchCache, get_session,
                     safe_commit)
@@ -159,6 +160,9 @@ def prefetch_status_get() -> Response:
         'refresh': _prefetch_state.get('refresh_stats'),
         'pending_refresh': pending,
         'failed_backoff': failed,
+        'intake_paused': bool(_prefetch_state.get('intake_paused')),
+        # 未命中删除关键词的详情报错样本（message → 次数）：据此核对/补充关键词清单
+        'detail_errors': get_detail_error_samples(),
     })
 
 

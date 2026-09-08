@@ -234,12 +234,15 @@ def _rebuild_illusts_table(drop_cols: set[str]) -> None:
 def init_db() -> None:
     Base.metadata.create_all(engine)
     from migrations import MIGRATIONS, run_migrations
-    from migrations.versions import repair_illust_schema
+    from migrations.versions import add_illust_refresh_failed_at, repair_illust_schema
 
     run_migrations(engine, MIGRATIONS)
     # Keep the historical startup behavior that repairs externally drifted columns.
+    # add_illust_refresh_failed_at 是 v4 列，而 repair_illust_schema 只认 v2 的列集
+    #（不得修改已发布版本），故这里额外幂等补一次，覆盖"库被外部改动丢列"的场景。
     with engine.begin() as conn:
         repair_illust_schema(conn)
+        add_illust_refresh_failed_at(conn)
 
 
 def get_session() -> Session:

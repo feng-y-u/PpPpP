@@ -112,6 +112,7 @@ async function loadPrefetchStatus() {
     const s = await r.json();
     const parts = [`未完成刷新 ${s.pending_refresh ?? 0} 条`,
                    `退避中 ${s.failed_backoff ?? 0} 条`];
+    if (s.intake_paused) parts.push('⚠ 入库已暂停（积压过高）');
     const rs = s.refresh;
     if (rs && rs.at) {
       const detail = [`成功 ${rs.ok || 0}`, `低收藏删除 ${rs.deleted_low || 0}`,
@@ -126,6 +127,12 @@ async function loadPrefetchStatus() {
       parts.push(`最近一轮 ${new Date(rs.at).toLocaleString('zh-CN')}：${detail.join(' · ')}`);
     } else {
       parts.push('最近一轮：尚未执行');
+    }
+    const errs = s.detail_errors;
+    if (errs && Object.keys(errs).length) {
+      const samples = Object.keys(errs).slice(0, 3)
+        .map(msg => `「${msg}」×${errs[msg]}`).join('、');
+      parts.push(`未识别的详情报错：${samples}`);
     }
     el.textContent = parts.join(' · ');
   } catch { el.textContent = '—'; }

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app
+import background
 import config
 import fetcher
 from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
@@ -121,6 +122,41 @@ class TestPrefetchOneTag:
 
 
 class TestCapacityCleanup:
+    def test_capacity_cleanup_skips_user_download_logged(self, clean_db, monkeypatch):
+        """用户点过下载的作品（DownloadLog）不当缓存垃圾清掉。"""
+        from models import DownloadLog
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        clean_db.add_all([
+            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=1,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='touched', prefetch_source=1, bookmark_count=2,
+                   prefetch_refresh_at=refreshed),
+            DownloadLog(pixiv_id=2, action='failed', message='下载失败待重试'),
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 1)
+
+        app._prefetch_capacity_cleanup()
+
+        remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
+        assert remaining == {2}  # 只有无下载日志的低收藏作品被淘汰
+
+    def test_capacity_cleanup_ignores_prefetch_deleted_log(self, clean_db, monkeypatch):
+        """缓存清理自己写的 prefetch_deleted 不算"用户拥有"，否则会永久保护。"""
+        from models import DownloadLog
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        clean_db.add_all([
+            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=1,
+                   prefetch_refresh_at=refreshed),
+            DownloadLog(pixiv_id=1, action='prefetch_deleted', message='之前被清理过'),
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 0)
+
+        app._prefetch_capacity_cleanup()
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is None
+
     def test_capacity_cleanup_low_bookmark_first(self, clean_db):
         # 超过上限时优先删除最终收藏数最低的预取作品，并从所有标签列表移除
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
@@ -283,6 +319,50 @@ class TestCapacityCleanup:
         # 标签列表查询异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
         app._prefetch_loop()
         assert app._prefetch_state['running'] is False
+
+    def _intake_probe(self, clean_db, monkeypatch, pending, paused, max_illusts=10):
+        """准备一次预取循环：pending 条未刷新积压、给定暂停状态，返回入库标签记录。"""
+        clean_db.add(SearchCache(tag='t'))
+        clean_db.add_all([
+            Illust(pixiv_id=7000 + i, title='x', prefetch_source=1)
+            for i in range(pending)
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', max_illusts)
+        monkeypatch.setitem(app._prefetch_state, 'intake_paused', paused)
+        fetched = []
+        monkeypatch.setattr(app, 'search_by_tag',
+                            lambda tag, **kwargs: (fetched.append(tag) or ([], False)))
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: None)
+        return fetched
+
+    def test_prefetch_loop_pauses_intake_when_backlog_high(self, clean_db, monkeypatch):
+        """积压 ≥ max×PAUSE_RATIO → 跳过入库（刷新与容量清理照常）。"""
+        fetched = self._intake_probe(clean_db, monkeypatch, pending=9, paused=False)
+
+        app._prefetch_loop()
+
+        assert fetched == []
+        assert app._prefetch_state['intake_paused'] is True
+
+    def test_prefetch_loop_resumes_intake_below_resume_ratio(self, clean_db, monkeypatch):
+        """已暂停且积压回落到 max×RESUME_RATIO 以下 → 恢复入库。"""
+        fetched = self._intake_probe(clean_db, monkeypatch, pending=5, paused=True)
+
+        app._prefetch_loop()
+
+        assert fetched == ['t']
+        assert app._prefetch_state['intake_paused'] is False
+
+    def test_intake_stays_paused_between_thresholds(self, clean_db, monkeypatch):
+        """滞回：处于 resume~pause 之间时保持暂停，避免每轮抖动。"""
+        fetched = self._intake_probe(clean_db, monkeypatch, pending=7, paused=True)
+
+        app._prefetch_loop()
+
+        assert fetched == []
+        assert app._prefetch_state['intake_paused'] is True
 
 
 class TestQueryCachedTagSort:
@@ -571,6 +651,35 @@ class TestPrefetchRefreshBookmarks:
         illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5010).first()
         assert illust is not None
         assert illust.prefetch_refresh_at is not None
+
+    def test_refresh_keeps_dead_with_download_log(self, clean_db, monkeypatch):
+        """永久失败但用户点过下载（DownloadLog）→ 保留行、标记完成。"""
+        from models import DownloadLog
+        self._old_illust(clean_db, 5012)
+        clean_db.add(DownloadLog(pixiv_id=5012, action='failed', message='下载失败'))
+        safe_commit(clean_db)
+        self._mock_dead_detail(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5012).first()
+        assert illust is not None
+        assert illust.prefetch_refresh_at is not None
+
+    def test_dead_deletion_writes_prefetch_deleted_log(self, clean_db, monkeypatch):
+        """死作品被清理时写 DownloadLog(action='prefetch_deleted')，且该 action 不构成保护。"""
+        from models import DownloadLog
+        self._old_illust(clean_db, 5013)
+        safe_commit(clean_db)
+        self._mock_dead_detail(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5013).first() is None
+        log = clean_db.query(DownloadLog).filter(DownloadLog.pixiv_id == 5013).first()
+        assert log is not None
+        assert log.action == 'prefetch_deleted'
+        assert background._is_user_owned(clean_db, 5013) is False
 
     def test_refresh_force_done_after_long_failure(self, clean_db, monkeypatch):
         """失败超过 FORCE_DONE（14 天）→ 无网络请求，直接强制标记完成。

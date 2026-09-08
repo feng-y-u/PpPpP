@@ -13,7 +13,8 @@ import helpers
 import runtime
 from sqlalchemy import or_, text
 
-from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_REFRESH_ABORT_STREAK,
+from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_INTAKE_PAUSE_RATIO,
+                    PREFETCH_INTAKE_RESUME_RATIO, PREFETCH_REFRESH_ABORT_STREAK,
                     PREFETCH_REFRESH_BACKOFF, PREFETCH_REFRESH_FORCE_DONE)
 from fetcher import build_pixiv_session, fetch_following
 from helpers import _get_download_dir, _extract_ext
@@ -237,6 +238,21 @@ def _remove_pids_from_search_caches(db, pids: list[int]) -> None:
             sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
 
 
+def _is_user_owned(db, pixiv_id: int) -> bool:
+    """用户"拥有"这件作品：在收藏夹里，或有用户操作类下载日志。
+
+    这类作品不能当缓存垃圾清掉：收藏=明确意图；下载日志（含失败/取消待重试）
+    =用户点过下载。逐条查询而非整轮快照，避免"循环中新增收藏仍可能被删"的窗口。
+    只认用户操作类 action —— `prefetch_deleted` 是缓存清理自己写的，不算。
+    """
+    if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).first():
+        return True
+    return db.query(DownloadLog).filter(
+        DownloadLog.pixiv_id == pixiv_id,
+        DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
+    ).first() is not None
+
+
 def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
     """入口：跑一轮最终收藏数刷新，并把结构化统计写入 `_prefetch_state['refresh_stats']`。
 
@@ -321,7 +337,6 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
         ).order_by(Illust.created_at.asc()).limit(max_items).all()
         if candidates:
             pids = [c.pixiv_id for c in candidates]
-            fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
         if not candidates:
             return
 
@@ -355,10 +370,14 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
                     if not illust or illust.prefetch_refresh_at is not None:
                         continue
                     protected = (illust.download_status in ('done', 'downloading')
-                                 or illust.local_paths_list or pid in fav_ids)
+                                 or illust.local_paths_list
+                                 or _is_user_owned(db, pid))
                     if detail is fetcher.DEAD_DETAIL:
                         if not protected:
                             _remove_pids_from_search_caches(db, [pid])
+                            db.add(DownloadLog(
+                                pixiv_id=pid, action='prefetch_deleted',
+                                message='预取永久失败清理（已删除/非公開）'))
                             db.delete(illust)
                             stats['deleted_dead'] += 1
                             logger.info(f'[prefetch] 永久失败（已删除/非公開），删除缓存作品 {pid}')
@@ -454,6 +473,13 @@ def _prefetch_capacity_cleanup() -> None:
         need_free = count - max_illusts
 
         fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
+        # 用户操作过下载的作品（含失败/取消待重试）不当缓存垃圾；缓存清理自己写的
+        # prefetch_deleted 不算（否则同一 pid 再次入库后会获得"永久保护"）
+        dl_pids = {
+            p[0] for p in db.query(DownloadLog.pixiv_id).filter(
+                DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
+            ).distinct().all()
+        }
         candidates: list[Illust] = []
         for i in db.query(Illust).filter(
                 Illust.prefetch_source == 1,
@@ -461,7 +487,7 @@ def _prefetch_capacity_cleanup() -> None:
         ).all():
             if i.download_status in ('done', 'downloading') or i.local_paths_list:
                 continue
-            if i.pixiv_id in fav_ids:
+            if i.pixiv_id in fav_ids or i.pixiv_id in dl_pids:
                 continue
             candidates.append(i)
 
@@ -487,16 +513,33 @@ def _prefetch_loop() -> None:
         try:
             with app.get_session() as db:
                 tags = [t[0] for t in db.query(SearchCache.tag).all()]
+                pending = db.query(Illust).filter(
+                    Illust.prefetch_source == 1,
+                    Illust.prefetch_refresh_at.is_(None),
+                ).count()
         except Exception as e:
             # 标签列表查询失败不退出线程，等待下个 interval 重试
             logger.error(f'[prefetch] 读取标签列表失败: {e}')
             return
         if not tags:
             return
-        logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
+        # 入库节流阀：未完成刷新的积压逼近容量上限时，本轮不再新增入库（只跑刷新
+        # 与容量清理），避免"入库 > 刷新吞吐"把上限顶破。滞回避免每轮抖动。
+        limit = _prefetch_state['max_illusts']
+        pause_at = int(limit * PREFETCH_INTAKE_PAUSE_RATIO)
+        resume_at = int(limit * PREFETCH_INTAKE_RESUME_RATIO)
+        was_paused = bool(_prefetch_state.get('intake_paused'))
+        paused = pending >= (resume_at if was_paused else pause_at)
+        _prefetch_state['intake_paused'] = paused
+        if paused:
+            logger.warning(
+                f'[prefetch] 未完成刷新积压 {pending} 条（阈值 {resume_at if was_paused else pause_at}），'
+                f'本轮跳过入库，只执行刷新与容量清理')
         try:
-            for tag in tags:
-                _prefetch_one_tag(tag)
+            if not paused:
+                logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
+                for tag in tags:
+                    _prefetch_one_tag(tag)
             # 先刷新最终收藏数（满 1 天的作品），再按最终收藏数做容量清理
             #（仅已完成最终刷新的作品参与淘汰，未刷新的等下一轮）
             _prefetch_refresh_bookmarks()

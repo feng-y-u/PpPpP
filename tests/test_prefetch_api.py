@@ -248,13 +248,16 @@ class TestPrefetchStatusAPI:
         assert resp.status_code == 200
         data = resp.get_json()
         assert set(data) == {'running', 'last_check', 'interval', 'refresh',
-                             'pending_refresh', 'failed_backoff'}
+                             'pending_refresh', 'failed_backoff', 'intake_paused',
+                             'detail_errors'}
         assert data['running'] == app._prefetch_state['running']
         assert data['last_check'] == app._prefetch_state['last_check']
         assert data['interval'] == app._prefetch_state['interval']
         assert data['pending_refresh'] == 2   # 9001 未刷新 + 9003 退避中
         assert data['failed_backoff'] == 1    # 9003
         assert data['refresh'] == app._prefetch_state['refresh_stats']
+        assert data['intake_paused'] is False
+        assert isinstance(data['detail_errors'], dict)
 
 
 class TestPrefetchRefreshResetAPI:

@@ -509,6 +509,29 @@ def _is_permanently_removed_message(msg: str) -> bool:
     low = msg.lower()
     return any(k.lower() in low for k in _PERMANENT_REMOVE_KEYWORDS)
 
+
+# 未识别详情报错采样：记录**没命中**删除关键词的 error:true 报文（message → 次数）。
+# 用途：不必 SSH 翻日志就能在设置页看到 Pixiv 的真实措辞，据此补充关键词清单。
+# 进程内、重启即清；上限 _DETAIL_ERROR_SAMPLE_LIMIT 种，避免无界增长。
+_DETAIL_ERROR_SAMPLE_LIMIT = 20
+_detail_error_samples: dict[str, int] = {}
+_detail_error_lock = threading.Lock()
+
+
+def _record_detail_error(msg: str) -> None:
+    key = (msg or '').strip()[:200] or '(空 message)'
+    with _detail_error_lock:
+        if key in _detail_error_samples:
+            _detail_error_samples[key] += 1
+        elif len(_detail_error_samples) < _DETAIL_ERROR_SAMPLE_LIMIT:
+            _detail_error_samples[key] = 1
+
+
+def get_detail_error_samples() -> dict[str, int]:
+    """未识别报错样本（message → 次数），供 /api/prefetch/status 展示。"""
+    with _detail_error_lock:
+        return dict(_detail_error_samples)
+
 # 最近一次搜索的详情拉取统计（供前端展示"为什么慢"）
 _last_fetch_stats: dict = {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0}
 
@@ -543,6 +566,7 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                 if _is_permanently_removed_message(msg):
                     logger.warning(f'Detail API 永久失败（已删除/非公開）{pixiv_id}: {msg}')
                     return DEAD_DETAIL if return_dead else None
+                _record_detail_error(msg)
                 logger.warning(f'Detail API error for {pixiv_id}: {msg}')
                 return None
             body = data['body']
