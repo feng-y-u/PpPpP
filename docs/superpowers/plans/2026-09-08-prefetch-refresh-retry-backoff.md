@@ -43,3 +43,16 @@
 6. **回写与提交**
    - spec/plan 标记「已实现 + 验证结果」；
    - 提交：`feat: 预取刷新失败退避 + 永久失败清理（防死作品占坑顶破容量上限）`（迁移/模型/背景/fetcher 一体）+ `docs: spec/plan 标记已实现并记录验证结果`。
+
+## 迭代修订（2026-09-08 · 第二批：需求 2/3/5）
+
+1. **fetcher**：新增 `RETRYABLE_GLOBAL_DETAIL` 哨兵；`requests.ConnectionError` 分支与
+   「403/429 重试耗尽」分支按 `return_dead` 返回它（新增 `last_status` 记录最后一次状态码）；
+   默认调用方（搜索/后台补全）仍收 `None`。
+2. **config**：`PREFETCH_REFRESH_ABORT_STREAK = 3`。
+3. **background**：`_prefetch_refresh_bookmarks` 内层加 `try/except (PixivAuthError,
+   FileNotFoundError)`（中止本轮、不写标记、不冒泡）；循环维护 `global_fail_streak`
+   并在达到阈值时 `break`；`session` 关闭加 `None` 守卫。
+4. **测试**：`test_prefetch.py` 加 4 例、`test_fetcher.py` 加 3 例（清单见 spec 第二批验证结果）。
+5. **文档**：AGENTS.md 两处同步（预取缓存失败状态机条目 + 迁移 v4）。
+6. **验证**：定向 46 passed；全量 `run_tests.ps1 -q` → 283 passed（4 例环境性失败与基线一致）。

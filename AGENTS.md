@@ -148,12 +148,13 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **详情拉取的重试是分类的**：连接错误立即放弃、限流（403/429）退避重试 —— 详见文末「重试策略」，不要在两处同时放开。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址。
 - **预取缓存**：手动在设置页配置预取标签，后台线程按 `prefetch_interval` 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）预取，写入 `Illust`（`prefetch_source=1`）+ `SearchCache`。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果由独立 `/cache` 页浏览（`GET /api/cache/items`，库内过滤排序分页）。预取作品入库满 1 天刷新一次"最终收藏数"，< 10 且未下载未收藏的删除；超出 `prefetch_max_illusts`（默认 10000）按最终收藏数低优先清理（已下载/下载中/已收藏保护）。
+- **最终收藏数刷新有持久化失败状态机**（`illusts.refresh_failed_at`，迁移 v4）：暂时性失败写时间戳、退避 `PREFETCH_REFRESH_BACKOFF`（24h）期内不再入选——**这是防"永久失败的死作品每轮占满 100 个名额"的关键，不要退回"失败即静默 continue"**；404 / 删除类报错返回 `fetcher.DEAD_DETAIL`，未下载未收藏的当场删除（已下载/已收藏标记完成保留）；限流/连接错误返回 `fetcher.RETRYABLE_GLOBAL_DETAIL`，**不记在作品头上**，连续 `PREFETCH_REFRESH_ABORT_STREAK`（3）条即中止本轮；认证失效（`PixivAuthError`）/ Cookie 缺失只中止本轮、不写标记、**不冒泡**（冒泡会让 `_prefetch_loop` 跳过容量清理、上限失效）；失败满 `PREFETCH_REFRESH_FORCE_DONE`（14 天）强制标记完成，交容量清理淘汰。
 
 ### 数据库
 
 - **写入必须用 `safe_commit()`，不要直接 `db.commit()`**。注意其语义：**失败时 `rollback()` 后原样抛出，不做内部重试**（重试只会得到一次空提交、静默掩盖数据丢失）。`PRAGMA busy_timeout=10000` 提供 10 秒等锁窗口。
 - **获取 session 用 `get_session()`**，不要直接 `Session(engine)`（`init_db()` 等启动逻辑除外）。
-- **轻量迁移系统**：启动时 `create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行；当前版本 v1 `migrate_collection_positions`（补 `collection_items.position` 并回填）、v2 `migrate_illust_schema`（补 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`，DROP `description`/`is_favorite`/`favorited_at`）、v3 `repair_illust_schema`。`init_db()` 在迁移后**无条件再跑一次** `repair_illust_schema` 兜底。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。**新增 schema 变更必须追加新版本，不得修改已发布版本。**
+- **轻量迁移系统**：启动时 `create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行；当前版本 v1 `migrate_collection_positions`（补 `collection_items.position` 并回填）、v2 `migrate_illust_schema`（补 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`，DROP `description`/`is_favorite`/`favorited_at`）、v3 `repair_illust_schema`、v4 `add_illust_refresh_failed_at`（补 `refresh_failed_at` 刷新失败退避时间戳）。`init_db()` 在迁移后**无条件再跑一次** `repair_illust_schema` 兜底。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。**新增 schema 变更必须追加新版本，不得修改已发布版本。**
 - **收藏语义完全由 Collection 驱动**：切换收藏即在"我的收藏"收藏夹增删 `CollectionItem`。`Illust.is_favorite` 列已废弃删除，不要再依赖；判断收藏用 `models.get_favorite_pids()`。
 - `Illust.to_dict()` **不输出 `local_paths`**（磁盘绝对路径），前端取图走 `/api/image/<pid>/<index>`。
 - `tags` / `original_urls` / `local_paths` 是 JSON 文本列，读写走 `*_list` property。库内标签过滤用 SQLite `json_each()`；单条损坏 JSON 会抛 `OperationalError`，图库/缓存查询都有"降级跳过标签过滤"的兜底。

@@ -83,7 +83,7 @@
 4. 全量测试通过（`run_tests.ps1 -q`，约 270 例）；
 5. 服务器部署后：迁移 v4 自动执行（升级前自动备份），新逻辑下死作品不再占坑。
 
-## 验证结果（2026-09-08）
+## 验证结果（2026-09-08 · 第一批）
 
 - 实现落地：迁移 v4 `add_illust_refresh_failed_at`（幂等补列）、`Illust.refresh_failed_at`、
   `config.PREFETCH_REFRESH_BACKOFF` / `PREFETCH_REFRESH_FORCE_DONE`、fetcher
@@ -96,3 +96,46 @@
   `test_migrations.py`（补 `refresh_failed_at` 列断言）—— 25 例全绿。
 - 全量：`run_tests.ps1 -q` → **276 passed**；`test_test_setup.py` 4 例失败为环境性
   （子进程 PowerShell 被沙箱拦截），基线（stash 对比）同样失败，与本次改动无关。
+
+## 迭代修订（2026-09-08 · 第二批：认证错误、限流熔断、文档同步）
+
+### 动机（第一批实现后复盘出的三个缺口）
+
+1. **认证失效会让整轮刷新中断，并连带跳过容量清理**：`_prefetch_refresh_bookmarks`
+   内 `PixivAuthError` 冒泡到 `_prefetch_loop` 的兜底 → `_prefetch_capacity_cleanup()`
+   不执行 → **10000 上限彻底失效**，日志只有一句笼统的「循环异常」。
+2. **限流被当成单作品失败**：403/429/连接错误是账户级/环境级状态，却给每条被尝试的
+   作品写 24h 退避 —— 冤枉整队列（Pixiv 恢复后还要多等一天），且每条白烧 3s+9s 退避。
+3. **AGENTS.md 未同步**新状态机与迁移 v4。
+
+### 需求
+
+**需求 2 · 全局配置类错误不中断循环、不写退避标记**
+- `_prefetch_refresh_bookmarks` 内部捕获 `fetcher.PixivAuthError`（401/认证类 message）
+  与 `FileNotFoundError`（cookies.txt 缺失）：记 error 日志、**中止本轮**、**不写
+  `refresh_failed_at`**（全局问题不该记在作品头上，Cookie 修好后下一轮自动继续）；
+- 异常不再冒泡 → `_prefetch_loop` 的容量清理照常执行；
+- `session` 关闭加 `None` 守卫（`build_pixiv_session()` 本身可能抛错）。
+
+**需求 3 · 连续全局失败熔断**
+- fetcher 新增第二个哨兵 `RETRYABLE_GLOBAL_DETAIL`：`return_dead=True` 时，限流
+  （403/429 重试耗尽）与连接错误返回它；其余暂时性失败仍返回 `None`（5xx 等按
+  单作品退避处理，不触发熔断）；
+- 刷新循环维护连续计数：遇该哨兵 → 计数 +1、**不写退避标记**；达到
+  `PREFETCH_REFRESH_ABORT_STREAK`（3）→ 记 warning、`break` 中止本轮，剩余候选
+  留待下一轮；非该哨兵的失败重置计数；
+- 取舍：熔断后队首最多重复尝试 2 条/轮（成本可忽略），换来 403 风暴时不再把整队列
+  刷上「冤枉」的 24h 退避、也不再每轮白烧退避时间。
+
+**需求 5 · 文档同步**
+- AGENTS.md「预取缓存」补独立条目说明失败状态机（退避 / 永久失败出清 / 全局失败熔断 /
+  认证失效不冒泡 / 14 天强制完成）与四个常量；
+- AGENTS.md「轻量迁移系统」补 v4 `add_illust_refresh_failed_at`。
+
+### 验证结果（第二批）
+
+- 定向：`tests/test_prefetch.py`（+4 例：认证失效中止且不写标记、`_prefetch_loop`
+  在认证失效后仍执行容量清理、连续全局失败熔断、普通失败重置连续计数）+
+  `tests/test_fetcher.py::TestDetailRetryPolicy`（+3 例：403 耗尽 → 全局哨兵、
+  连接错误 → 全局哨兵、5xx 仍 → None）→ 46 passed；
+- 全量：`run_tests.ps1 -q` → **283 passed**，4 例环境性失败（同第一批基线）。
