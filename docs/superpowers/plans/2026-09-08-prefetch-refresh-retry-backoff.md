@@ -91,3 +91,17 @@
 8. **索引**：1 万行实测（候选 0.81ms / force-done 0.65ms / 计数 ~0.45ms / 容量清理 6.04ms）
    → 不建索引，触发条件记入 spec。
 9. **验证**：定向 142 passed；`node --check` 通过；全量 304 passed（4 例环境性失败同基线）。
+
+## 迭代修订（2026-09-08 · 第五批：撤回节流阀 → 加大清理力度）
+
+1. **config**：删 `PREFETCH_INTAKE_PAUSE_RATIO` / `PREFETCH_INTAKE_RESUME_RATIO`；
+   加 `PREFETCH_REFRESH_BATCH = 300`、`PREFETCH_EVICT_UNREFRESHED_AFTER = 3 * 86400`。
+2. **runtime**：删 `_prefetch_state['intake_paused']`。
+3. **background**：
+   - `_prefetch_loop` 去掉节流分支，恢复每轮入库；
+   - `_prefetch_capacity_cleanup` 改三层淘汰（tier1 已刷新 → tier2 失败/超龄 → tier3 兜底），
+     统计在 bulk delete 前算（否则 `ObjectDeletedError`）；
+   - 新增 `_naive_utc()`；`_prefetch_refresh_bookmarks` 默认批量改为 `PREFETCH_REFRESH_BATCH`。
+4. **routes_prefetch / 前端**：去掉 `intake_paused` 字段与"入库已暂停"提示。
+5. **测试**：删除节流阀 3 例 + 新增三层淘汰 4 例 + "入库永不停" 1 例；status 字段断言同步。
+6. **验证**：定向 82 passed；全量 304 passed；`node --check` 通过；端到端冒烟通过。

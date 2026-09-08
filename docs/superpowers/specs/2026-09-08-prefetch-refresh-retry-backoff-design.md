@@ -260,3 +260,48 @@
   `tests/test_fetcher.py`（+3 例采样器）→ **142 passed**；
 - `node --check static/page-settings.js` 通过；
 - 全量：`run_tests.ps1 -q` → **304 passed**，4 例环境性失败（同基线）。
+
+## 迭代修订（2026-09-08 · 第五批：撤回入库节流阀，改为加大清理力度）
+
+### 动机
+
+第四批的"入库节流阀"（积压达 `0.8 × prefetch_max_illusts` 就跳过本轮入库）被用户否决：
+**要持续入库，不要停预取**。于是把"压住容量"的责任完全交给容量清理，并让它具备
+"**永远能压住上限**"的能力。
+
+### 需求
+
+1. **撤回入库节流阀**：删除 `PREFETCH_INTAKE_PAUSE_RATIO` / `PREFETCH_INTAKE_RESUME_RATIO`、
+   `_prefetch_state['intake_paused']`、status 字段、设置页提示与 3 条相关用例；
+   `_prefetch_loop` 恢复"每轮都入库"。
+2. **容量清理改三层淘汰**（`_prefetch_capacity_cleanup`）：
+   - tier1：已完成最终刷新的作品（收藏数信号可信）→ 优先淘汰；
+   - tier2：未刷新但"**刷新失败过**"或"**入库超过 `PREFETCH_EVICT_UNREFRESHED_AFTER`（3 天）**"
+     —— 刷新队列已证明推不动它；
+   - tier3：其余未刷新作品 —— **兜底**，只有前两层不够时才动；
+   - 层内排序不变（收藏数低优先，并列更早上传优先）；保护判定不变（下载中/已下载/用户拥有）；
+   - 意义：**上限不再依赖暂停入库**——只要还存在未受保护的行，三层就一定能把它压回上限。
+3. **提高每轮刷新批量**：`PREFETCH_REFRESH_BATCH = 300`（原 100）。用的是**已有的**
+   20 条/分钟后台桶预算（300 条 ≈ 15 分钟，仍在 1 小时间隔内），不碰 403 红线；
+   作用是让 tier1 池更快变大，减少降级淘汰。
+4. **比较细节修正**：新增 `background._naive_utc()`——SQLAlchemy SQLite 取出的 `DATETIME`
+   是 naive、内存新建对象可能是 aware，跨层比较前统一成 naive-UTC。
+5. 清理日志附带「已刷新 / 未刷新」拆分，便于观察三层实际生效情况。
+
+### 取舍
+
+- tier2/3 用**入库快照收藏数**排序：新入库作品收藏数天然偏低，因此超限时优先被删，
+  下一轮若它仍在热门结果里会被重新入库——代价是少量 churn，换来"入库不停 + 上限不破"。
+- 3 天窗口是折中：太短会把"还没轮到刷新"的正常作品当垃圾删；太长则积压压不下去。
+- 刷新批量 300 让单轮刷新最长约 15 分钟（受 20/分钟限流约束），与后台补全共享桶时
+  会互相挤占，但仍在可接受范围。
+
+### 验证结果（第五批）
+
+- 定向：`tests/test_prefetch.py` + `tests/test_prefetch_api.py` → **82 passed**
+  （新增三层淘汰 4 例 + "入库永不停" 1 例，删除节流阀 3 例）；
+- 全量：`run_tests.ps1 -q` → **304 passed**，4 例环境性失败（同基线）；
+- `node --check static/page-settings.js` 通过；
+- 端到端冒烟：`GET /settings` 200 且含统计元素；`/api/prefetch/status` 返回
+  `pending_refresh` / `failed_backoff` / `refresh` / `detail_errors`（不再有 `intake_paused`）；
+  `POST /api/prefetch/refresh-reset` 生效（count=1，退避清零）。
