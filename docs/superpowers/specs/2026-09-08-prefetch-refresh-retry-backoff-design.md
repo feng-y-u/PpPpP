@@ -139,3 +139,54 @@
   `tests/test_fetcher.py::TestDetailRetryPolicy`（+3 例：403 耗尽 → 全局哨兵、
   连接错误 → 全局哨兵、5xx 仍 → None）→ 46 passed；
 - 全量：`run_tests.ps1 -q` → **283 passed**，4 例环境性失败（同第一批基线）。
+
+## 迭代修订（2026-09-08 · 第三批：可观测性与手动重置入口）
+
+### 动机（复盘遗留缺口）
+
+- **刷新完全不可观测**：成功/失败/删除各多少、是否熔断，只有日志能看，`/api/prefetch/status`
+  里什么都没有——这次加了状态机却没有配套观测面；
+- **没有任何手动重刷/重置入口**：`refresh_failed_at` 只能改库清空；被 14 天规则
+  强制完成的作品，即使 Cookie 权限修好也不会再回到刷新队列。
+
+### 需求 4 · 可观测性
+
+- `runtime._prefetch_state` 新增固定键 `refresh_stats`（键集合仍在初始化时固定，
+  之后只改值，符合无锁读约定）；
+- `background._prefetch_refresh_bookmarks` 拆为「入口（统计）+ `_refresh_bookmarks_pass`
+  （逻辑）」：无论正常结束、无候选提前返回还是中止，`finally` 都把整份统计写入
+  `refresh_stats`，字段：`processed` / `ok` / `deleted_low` / `deleted_dead` /
+  `kept_dead` / `failed_transient` / `failed_global` / `force_done` / `aborted`
+  （`''` | `rate_limit` | `auth` | `cookie_missing`）/ `at`；
+- `GET /api/prefetch/status` 新增 `refresh`（上一轮统计）、`pending_refresh`
+  （未完成刷新的预取作品数——长期积压即"刷新吞吐跟不上入库"）、`failed_backoff`
+  （退避中数量）；
+- 设置页「搜索预取」卡片新增一行健康信息（未完成刷新 / 退避中 / 最近一轮明细），
+  页面加载与增删标签后刷新。
+
+### 需求 6 · 手动重置入口
+
+- `background.reset_prefetch_refresh(tag=None, pixiv_id=None) -> int`：清空指定范围的
+  `prefetch_refresh_at` 与 `refresh_failed_at`（把作品放回刷新队列），返回受影响条数；
+  **必须指定范围**（tag 或 pixiv_id），否则返回 0，避免误伤全库；只作用于
+  `prefetch_source=1`；标签范围用 `json_each` 下推整条 id 数组（单个绑定参数），
+  不拼万级 `IN`（同 `helpers._pid_filter` 的既有约定）；
+- `POST /api/prefetch/refresh-reset`（CSRF）：body `{tag}` 或 `{pixiv_id}`；
+  两者皆缺 → 400，tag 不存在 → 404；经 `app.reset_prefetch_refresh` 调用（测试 seam，
+  `app.py` from-import 再导出）；
+- 设置页标签徽章内新增 ⟳ 按钮（`stopPropagation`，与"点击标签名删除"不冲突），
+  点击确认后调用接口并提示"已重置 N 条（下一轮预取生效）"。
+
+### 取舍
+
+- 重置**只清标记、不立即触发刷新**：生效时机是下一轮预取（≤ `prefetch_interval`）。
+  这样避免与预取线程并发跑两轮刷新（重复详情请求、互相覆盖统计）。
+- 重置后能否真的成功，仍由下一轮的真实请求决定；死作品会被第二层再次清理。
+
+### 验证结果（第三批）
+
+- 定向：`tests/test_prefetch.py`（+2 例统计、+4 例 reset）、
+  `tests/test_prefetch_api.py`（状态接口字段与健康计数、reset 的 tag/pixiv_id/400/404/403）
+  → 74 passed；
+- 前端：`node --check static/page-settings.js` 通过（无构建步骤，语法上限 ES2020）；
+- 全量：`run_tests.ps1 -q` → **294 passed**，4 例环境性失败（同基线）。

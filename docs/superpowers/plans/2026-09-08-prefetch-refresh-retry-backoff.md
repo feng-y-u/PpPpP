@@ -56,3 +56,18 @@
 4. **测试**：`test_prefetch.py` 加 4 例、`test_fetcher.py` 加 3 例（清单见 spec 第二批验证结果）。
 5. **文档**：AGENTS.md 两处同步（预取缓存失败状态机条目 + 迁移 v4）。
 6. **验证**：定向 46 passed；全量 `run_tests.ps1 -q` → 283 passed（4 例环境性失败与基线一致）。
+
+## 迭代修订（2026-09-08 · 第三批：需求 4/6）
+
+1. **runtime**：`_prefetch_state` 加固定键 `refresh_stats`（初始化即存在）。
+2. **background**：`_prefetch_refresh_bookmarks` 拆为入口（`try/finally` 落统计）+ `_refresh_bookmarks_pass`；
+   新增 `reset_prefetch_refresh(tag=None, pixiv_id=None)`（json_each 下推、必须指定范围）。
+3. **routes_prefetch**：`/api/prefetch/status` 增加 `refresh`/`pending_refresh`/`failed_backoff`；
+   新增 `POST /api/prefetch/refresh-reset`（CSRF、400/404 语义、经 app 命名空间调用）。
+4. **app.py**：from-import `reset_prefetch_refresh` 到 app 命名空间（测试 seam）。
+5. **前端**：`templates/settings.html` 加 `#prefetchRefreshStats` 行；`static/page-settings.js`
+   加 `loadPrefetchStatus()` 与徽章内 ⟳ `resetPrefetchRefresh(tag)`（`stopPropagation`）。
+6. **测试**：`test_prefetch.py` +6 例、`test_prefetch_api.py` 状态字段与 reset 五条路径。
+7. **文档**：AGENTS.md（观测与手动干预段）、`docs/architecture.md`（background 符号、
+   routes_prefetch 路由表、测试契约表）、本 spec/plan 回写。
+8. **验证**：定向 74 passed；`node --check` 通过；全量 294 passed（4 例环境性失败同基线）。
