@@ -490,6 +490,12 @@ _total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
 # （搜索/后台补全）不传该参数，保持收到 None 的旧语义。
 DEAD_DETAIL = object()
 
+# 详情"全局性暂时失败"哨兵：Pixiv 限流（403/429 重试耗尽）或连接错误。
+# 这类失败不是单个作品的问题，刷新路径不能把它记成该作品的退避——否则
+# 限流期间会把整队列刷上 24h 退避、且每条白烧 3s+9s 退避时间。刷新侧
+# 应据此中止本轮（见 background.PREFETCH_REFRESH_ABORT_STREAK）。
+RETRYABLE_GLOBAL_DETAIL = object()
+
 # 删除类报错关键词（保守集合）：命中即永久死亡。R18 权限类 message
 # （如「年龄确认」）不在其中，按暂时性失败退避重试 —— 换好 Cookie 后可恢复，
 # 绝不误删。可按服务器日志（'Detail API error for ...'）实测报文微调。
@@ -516,13 +522,15 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
                        return_dead: bool = False) -> dict | None | object:
     """拉取单条作品详情。
 
-    return_dead=True 时，对"永久死亡"（404 / 删除类报错）返回 DEAD_DETAIL 哨兵，
-    供调用方直接出清；其余调用方保持收到 None（暂时性失败，可重试/跳过）。
+    return_dead=True 时区分两类失败：永久死亡（404 / 删除类报错）→ `DEAD_DETAIL`，
+    全局性暂时失败（403/429 重试耗尽、连接错误）→ `RETRYABLE_GLOBAL_DETAIL`；
+    其余调用方（不传该参数）保持收到 None 的旧语义。
     404 不再按一般错误重试：资源已不存在，重试是纯浪费。
     """
     url = f'{PIXIV_BASE_URL}/ajax/illust/{pixiv_id}'
     (limiter or _detail_limiter).wait()
     _total_limiter.wait()
+    last_status = None
     for attempt in range(DETAIL_MAX_RETRIES + 1):
         try:
             resp = session.get(url, timeout=DETAIL_TIMEOUT)
@@ -556,9 +564,10 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
             # 无谓等待。直接放弃，交由调用方降级——后台补全
             # _kick_background_fill 之后还会兜一次。
             logger.warning(f'Detail API 连接失败 {pixiv_id}: {e}')
-            return None
+            return RETRYABLE_GLOBAL_DETAIL if return_dead else None
         except requests.RequestException as e:
             status = getattr(getattr(e, 'response', None), 'status_code', None)
+            last_status = status
             if status == 401:
                 # 认证失效（cookie 过期等）：重试无意义，与检索路径一致上报，
                 # 避免 _process_items 把整页作品静默过滤成空结果。
@@ -571,6 +580,9 @@ def _get_illust_detail(session: requests.Session, pixiv_id: int,
             if attempt < DETAIL_MAX_RETRIES:
                 # 429/403 均为 Pixiv 限流（并发过高时返回 403），递增退避（3s/9s）
                 time.sleep((3 * (3 ** attempt)) if status in (403, 429) else 1)
+    # 重试耗尽：限流类失败是全局状态（不是该作品的问题），刷新路径据此熔断
+    if return_dead and last_status in (403, 429):
+        return RETRYABLE_GLOBAL_DETAIL
     return None
 
 

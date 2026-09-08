@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app
+import config
 import fetcher
 from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
 
@@ -590,6 +591,119 @@ class TestPrefetchRefreshBookmarks:
         illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5011).first()
         assert illust.prefetch_refresh_at is not None
         assert illust.refresh_failed_at is None
+
+    def test_refresh_auth_error_aborts_without_backoff_marker(self, clean_db, monkeypatch):
+        """认证失效（PixivAuthError）：中止本轮、不写退避标记、异常不逃逸。
+
+        回归背景：① 异常冒泡到 `_prefetch_loop` 会让容量清理被跳过 → 上限彻底失效；
+        ② 若给作品写退避标记，Cookie 修好后这批作品还要白等 24h。
+        """
+        self._old_illust(clean_db, 5020)
+        self._old_illust(clean_db, 5021)
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        calls = []
+
+        def _raise_auth(s, pid, limiter=None, return_dead=False):
+            calls.append(pid)
+            raise fetcher.PixivAuthError('HTTP 401')
+
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _raise_auth)
+
+        app._prefetch_refresh_bookmarks()  # 不应抛异常
+
+        assert calls == [5020]  # 第一条即认证失败 → 中止，不再请求第二条
+        for pid in (5020, 5021):
+            illust = clean_db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            assert illust is not None
+            assert illust.prefetch_refresh_at is None
+            assert illust.refresh_failed_at is None  # 全局问题不记在作品头上
+
+    def test_prefetch_loop_runs_cleanup_after_auth_error(self, clean_db, monkeypatch):
+        """认证失效只中止刷新，容量清理必须照常执行（否则 10000 上限失效）。"""
+        clean_db.add(SearchCache(tag='t'))
+        safe_commit(clean_db)
+        self._old_illust(clean_db, 5022)
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        def _raise_auth(s, pid, limiter=None, return_dead=False):
+            raise fetcher.PixivAuthError('HTTP 401')
+
+        monkeypatch.setattr(app, 'search_by_tag', lambda tag, **kwargs: ([], False))
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _raise_auth)
+        cleaned = []
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup',
+                            lambda: cleaned.append(1))
+
+        app._prefetch_loop()
+
+        assert cleaned == [1]
+
+    def test_refresh_aborts_on_consecutive_global_failures(self, clean_db, monkeypatch):
+        """连续 N 条限流/连接失败 → 中止本轮，且不给这些作品写退避标记。
+
+        限流是账户级状态：按单作品记退避会把整队列刷上 24h，Pixiv 恢复后还要多等一天。
+        """
+        for pid in range(5030, 5036):
+            self._old_illust(clean_db, pid)
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        calls = []
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail',
+                            lambda s, pid, limiter=None, return_dead=False:
+                            (calls.append(pid) or fetcher.RETRYABLE_GLOBAL_DETAIL))
+
+        app._prefetch_refresh_bookmarks()
+
+        assert len(calls) == config.PREFETCH_REFRESH_ABORT_STREAK  # 凑满即熔断
+        for pid in range(5030, 5036):
+            illust = clean_db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            assert illust.refresh_failed_at is None
+            assert illust.prefetch_refresh_at is None
+
+    def test_refresh_global_failure_resets_streak(self, clean_db, monkeypatch):
+        """普通失败会重置连续计数：偶发失败不会导致误熔断。"""
+        for pid in range(5040, 5046):
+            self._old_illust(clean_db, pid)
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        seq = [fetcher.RETRYABLE_GLOBAL_DETAIL, None,
+               fetcher.RETRYABLE_GLOBAL_DETAIL, fetcher.RETRYABLE_GLOBAL_DETAIL,
+               fetcher.RETRYABLE_GLOBAL_DETAIL, {'bookmark_count': 50}]
+        calls = []
+
+        def _fake(s, pid, limiter=None, return_dead=False):
+            calls.append(pid)
+            return seq[len(calls) - 1]
+
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _fake)
+
+        app._prefetch_refresh_bookmarks()
+
+        # 第 2 条普通失败重置计数 → 第 5 条才凑满 3 连击，第 6 条不再尝试
+        assert calls == [5040, 5041, 5042, 5043, 5044]
+        marked = clean_db.query(Illust).filter(Illust.pixiv_id == 5041).first()
+        assert marked.refresh_failed_at is not None  # 普通失败照常写退避
 
 
 class TestDownloadLockRegistry:

@@ -457,14 +457,15 @@ class TestDetailRetryPolicy:
         resp.status_code = status
         return requests.HTTPError(response=resp)
 
-    def _run(self, monkeypatch, exc):
+    def _run(self, monkeypatch, exc, return_dead=False):
         # 旁路令牌桶，让用例只测重试语义、不受全局限速器残留状态影响
         monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
         session = self._FakeSession(exc)
         with patch('fetcher.time.sleep') as mock_sleep:
             try:
                 result = fetcher._get_illust_detail(
-                    session, 123, limiter=fetcher._TokenBucket(6000))
+                    session, 123, limiter=fetcher._TokenBucket(6000),
+                    return_dead=return_dead)
             except fetcher.PixivAuthError as e:
                 result = e
         return session.calls, mock_sleep, result
@@ -553,6 +554,29 @@ class TestDetailRetryPolicy:
         """权限类 message（年龄确认）不判死 → None（暂时性，走退避重试）。"""
         resp = self._json_resp({'error': True, 'message': '年齢確認が必要です。'})
         _calls, _sleep, result = self._run_static(monkeypatch, resp, return_dead=True)
+        assert result is None
+
+    # ── 全局性暂时失败（限流 / 连接错误）→ 哨兵，供刷新侧熔断 ──
+
+    def test_rate_limit_exhausted_returns_global_sentinel(self, monkeypatch):
+        """403 重试耗尽 = 全局性失败：刷新路径收到哨兵以便中止本轮。"""
+        calls, _sleep, result = self._run(
+            monkeypatch, self._http_error(403), return_dead=True)
+        assert result is fetcher.RETRYABLE_GLOBAL_DETAIL
+        assert calls == fetcher.DETAIL_MAX_RETRIES + 1
+
+    def test_connect_error_returns_global_sentinel_when_requested(self, monkeypatch):
+        """连接错误同样是全局性失败（网络/代理问题，不是单个作品的问题）。"""
+        calls, mock_sleep, result = self._run(
+            monkeypatch, requests.ConnectTimeout('connect timeout'), return_dead=True)
+        assert result is fetcher.RETRYABLE_GLOBAL_DETAIL
+        assert calls == 1
+        mock_sleep.assert_not_called()
+
+    def test_server_error_exhausted_returns_none_even_with_return_dead(self, monkeypatch):
+        """5xx 等非限流失败仍按单作品暂时性失败处理（写退避，不触发熔断）。"""
+        _calls, _sleep, result = self._run(
+            monkeypatch, self._http_error(500), return_dead=True)
         assert result is None
 
     def test_session_does_not_retry_connect_errors(self, monkeypatch):

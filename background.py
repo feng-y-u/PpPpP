@@ -13,8 +13,8 @@ import helpers
 import runtime
 from sqlalchemy import or_, text
 
-from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_REFRESH_BACKOFF,
-                    PREFETCH_REFRESH_FORCE_DONE)
+from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_REFRESH_ABORT_STREAK,
+                    PREFETCH_REFRESH_BACKOFF, PREFETCH_REFRESH_FORCE_DONE)
 from fetcher import build_pixiv_session, fetch_following
 from helpers import _get_download_dir, _extract_ext
 from models import (get_session, Illust, CollectionItem, SearchCache,
@@ -252,7 +252,11 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
     - 永久失败（DEAD_DETAIL：404 / 删除类报错）→ 未下载未收藏的当场删除出清，
       已下载 / 已收藏的标记刷新完成、保留作品；
     - 失败超过 PREFETCH_REFRESH_FORCE_DONE → 强制标记完成、退出刷新队列，
-      交由容量清理按低收藏优先淘汰（防"未刷新"积压单独顶破容量上限）。
+      交由容量清理按低收藏优先淘汰（防"未刷新"积压单独顶破容量上限）；
+    - 全局性失败（限流/连接错误，`RETRYABLE_GLOBAL_DETAIL`）不写退避标记，
+      连续 PREFETCH_REFRESH_ABORT_STREAK 条即中止本轮（限流是账户级状态）；
+    - 认证失效（`PixivAuthError`）/ Cookie 缺失只中止本轮、不写标记，且**不冒泡**
+      —— 否则 `_prefetch_loop` 的容量清理会被跳过、上限失效。
     每轮预取执行一次，最多处理 max_items 条，避免单轮耗时过长。
     """
     import app  # 延迟导入读取 app.build_pixiv_session：tests monkeypatch('app.build_pixiv_session')
@@ -295,48 +299,70 @@ def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
             return
 
     # 网络请求放在 DB session 外
-    session = app.build_pixiv_session()
+    session = None
     try:
-        for pid in pids:
-            detail = fetcher._get_illust_detail(
-                session, pid, limiter=fetcher._fill_limiter, return_dead=True)
-            now = datetime.now(timezone.utc)
-            with get_session() as db:
-                illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
-                if not illust or illust.prefetch_refresh_at is not None:
+        try:
+            session = app.build_pixiv_session()
+            global_fail_streak = 0
+            for pid in pids:
+                detail = fetcher._get_illust_detail(
+                    session, pid, limiter=fetcher._fill_limiter, return_dead=True)
+                if detail is fetcher.RETRYABLE_GLOBAL_DETAIL:
+                    # 限流（403/429）或连接错误是账户级/环境级状态，不是该作品的
+                    # 问题：不写退避标记（否则 Cookie/网络恢复后还要白等 24h），
+                    # 连续达到阈值即中止本轮，避免把整队列刷上失败标记。
+                    global_fail_streak += 1
+                    if global_fail_streak >= PREFETCH_REFRESH_ABORT_STREAK:
+                        logger.warning(
+                            f'[prefetch] 连续 {global_fail_streak} 条详情请求遭遇限流/连接失败，'
+                            f'中止本轮最终收藏数刷新（不写退避标记，下轮重试）')
+                        break
                     continue
-                protected = (illust.download_status in ('done', 'downloading')
-                             or illust.local_paths_list or pid in fav_ids)
-                if detail is fetcher.DEAD_DETAIL:
-                    if not protected:
-                        _remove_pids_from_search_caches(db, [pid])
-                        db.delete(illust)
-                        logger.info(f'[prefetch] 永久失败（已删除/非公開），删除缓存作品 {pid}')
+                global_fail_streak = 0
+                now = datetime.now(timezone.utc)
+                with get_session() as db:
+                    illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
+                    if not illust or illust.prefetch_refresh_at is not None:
+                        continue
+                    protected = (illust.download_status in ('done', 'downloading')
+                                 or illust.local_paths_list or pid in fav_ids)
+                    if detail is fetcher.DEAD_DETAIL:
+                        if not protected:
+                            _remove_pids_from_search_caches(db, [pid])
+                            db.delete(illust)
+                            logger.info(f'[prefetch] 永久失败（已删除/非公開），删除缓存作品 {pid}')
+                            safe_commit(db)
+                            continue
+                        # 已下载/已收藏：保留作品，标记完成退出刷新队列
+                        illust.prefetch_refresh_at = now
+                        illust.refresh_failed_at = None
+                        safe_commit(db)
+                        logger.info(f'[prefetch] 永久失败但已下载/收藏，保留并标记完成 {pid}')
+                        continue
+                    if detail is None:
+                        # 暂时性失败：写退避时间戳，backoff 期内不再尝试
+                        illust.refresh_failed_at = now
                         safe_commit(db)
                         continue
-                    # 已下载/已收藏：保留作品，标记完成退出刷新队列
+                    bookmark_count = detail.get('bookmark_count', 0)
+                    illust.bookmark_count = bookmark_count
+                    illust.bookmark_updated_at = now
                     illust.prefetch_refresh_at = now
                     illust.refresh_failed_at = None
+                    if bookmark_count < 10 and not protected:
+                        _remove_pids_from_search_caches(db, [pid])
+                        db.delete(illust)
+                        logger.info(f'[prefetch] 最终收藏数 {bookmark_count} < 10，删除缓存作品 {pid}')
                     safe_commit(db)
-                    logger.info(f'[prefetch] 永久失败但已下载/收藏，保留并标记完成 {pid}')
-                    continue
-                if detail is None:
-                    # 暂时性失败：写退避时间戳，backoff 期内不再尝试
-                    illust.refresh_failed_at = now
-                    safe_commit(db)
-                    continue
-                bookmark_count = detail.get('bookmark_count', 0)
-                illust.bookmark_count = bookmark_count
-                illust.bookmark_updated_at = now
-                illust.prefetch_refresh_at = now
-                illust.refresh_failed_at = None
-                if bookmark_count < 10 and not protected:
-                    _remove_pids_from_search_caches(db, [pid])
-                    db.delete(illust)
-                    logger.info(f'[prefetch] 最终收藏数 {bookmark_count} < 10，删除缓存作品 {pid}')
-                safe_commit(db)
+        except fetcher.PixivAuthError as e:
+            # 认证失效是全局状态：中止本轮、不写退避标记（Cookie 修好后自动继续）。
+            # 关键是别让异常冒泡 —— 否则 _prefetch_loop 里的容量清理会被跳过，上限失效。
+            logger.error(f'[prefetch] 认证失效，本轮最终收藏数刷新中止（未写退避标记）: {e}')
+        except FileNotFoundError as e:
+            logger.error(f'[prefetch] Cookie 文件缺失，本轮最终收藏数刷新中止: {e}')
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def _prefetch_capacity_cleanup() -> None:
