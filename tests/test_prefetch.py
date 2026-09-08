@@ -268,35 +268,77 @@ class TestCapacityCleanup:
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [2]
 
-    def test_capacity_cleanup_uses_only_updated_bookmark(self, clean_db):
-        # 删除决策只看刷新后的最终收藏数：未完成最终刷新（prefetch_refresh_at 为空）
-        # 的作品即使快照收藏数最低也不删，等最终刷新后再参与淘汰
+    def test_capacity_cleanup_prefers_refreshed_rows(self, clean_db, monkeypatch):
+        """三层淘汰：已刷新作品优先淘汰，未刷新作品在够用时不动。"""
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_u', illust_ids='[1, 2, 3]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            # pid1：已最终刷新，最终收藏 10 → 被淘汰
             Illust(pixiv_id=1, title='finalized-low', prefetch_source=1, bookmark_count=10,
                    prefetch_refresh_at=refreshed),
-            # pid2：未刷新，快照收藏仅 1（实际可能很高）→ 不删
             Illust(pixiv_id=2, title='unfinalized', prefetch_source=1, bookmark_count=1),
-            # pid3：未刷新，快照收藏 2 → 不删
             Illust(pixiv_id=3, title='unfinalized2', prefetch_source=1, bookmark_count=2),
         ])
         safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 2)  # need_free = 1
 
-        old = app._prefetch_state['max_illusts']
-        try:
-            app._prefetch_state['max_illusts'] = 1
-            app._prefetch_capacity_cleanup()
-        finally:
-            app._prefetch_state['max_illusts'] = old
+        app._prefetch_capacity_cleanup()
 
-        # 只有最终刷新过的 pid1 被删，pid2/pid3 保留在库和标签列表中
+        # 只删已刷新的 pid1；未刷新的 pid2/pid3 原样保留
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
         assert remaining == {2, 3}
-        ids = json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_u').first().illust_ids)
+        ids = json.loads(clean_db.query(SearchCache).filter(
+            SearchCache.tag == 'tag_u').first().illust_ids)
         assert ids == [2, 3]
+
+    def test_capacity_cleanup_evicts_failed_unrefreshed_as_tier2(self, clean_db, monkeypatch):
+        """第二层：已刷新不够时，淘汰"刷新失败过"的未刷新作品（队列推不动就别占容量）。"""
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        failed_at = datetime.now(timezone.utc)
+        clean_db.add_all([
+            Illust(pixiv_id=1, title='refreshed', prefetch_source=1, bookmark_count=5,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='failed', prefetch_source=1, bookmark_count=1,
+                   refresh_failed_at=failed_at),
+            Illust(pixiv_id=3, title='fresh', prefetch_source=1, bookmark_count=2),
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 1)  # need_free = 2
+
+        app._prefetch_capacity_cleanup()
+
+        # tier1 删 pid1，tier2 删 pid2；全新的 pid3 保留（还没到兜底层）
+        remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
+        assert remaining == {3}
+
+    def test_capacity_cleanup_last_resort_enforces_cap(self, clean_db, monkeypatch):
+        """第三层兜底：全是全新未刷新作品时也把上限压回去（不靠暂停入库）。"""
+        clean_db.add_all([
+            Illust(pixiv_id=i, title=f'new{i}', prefetch_source=1, bookmark_count=i)
+            for i in (1, 2, 3, 4, 5)
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 2)  # need_free = 3
+
+        app._prefetch_capacity_cleanup()
+
+        remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
+        assert len(remaining) == 2
+        assert remaining == {4, 5}  # 收藏数高的留下
+
+    def test_capacity_cleanup_never_evicts_user_owned(self, clean_db, monkeypatch):
+        """兜底层同样不能碰用户拥有过的作品，哪怕它是唯一候选。"""
+        from models import DownloadLog
+        clean_db.add_all([
+            Illust(pixiv_id=1, title='touched', prefetch_source=1, bookmark_count=1),
+            DownloadLog(pixiv_id=1, action='failed', message='下载失败待重试'),
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 0)
+
+        app._prefetch_capacity_cleanup()
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is not None
 
     def test_prefetch_loop_survives_cleanup_error(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='t'))
@@ -320,49 +362,26 @@ class TestCapacityCleanup:
         app._prefetch_loop()
         assert app._prefetch_state['running'] is False
 
-    def _intake_probe(self, clean_db, monkeypatch, pending, paused, max_illusts=10):
-        """准备一次预取循环：pending 条未刷新积压、给定暂停状态，返回入库标签记录。"""
+    def test_prefetch_loop_always_ingests(self, clean_db, monkeypatch):
+        """入库永不停：积压再大也照常预取（容量由三层淘汰压住，不靠暂停入库）。"""
         clean_db.add(SearchCache(tag='t'))
         clean_db.add_all([
             Illust(pixiv_id=7000 + i, title='x', prefetch_source=1)
-            for i in range(pending)
+            for i in range(50)
         ])
         safe_commit(clean_db)
-        monkeypatch.setitem(app._prefetch_state, 'max_illusts', max_illusts)
-        monkeypatch.setitem(app._prefetch_state, 'intake_paused', paused)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 10)
         fetched = []
         monkeypatch.setattr(app, 'search_by_tag',
                             lambda tag, **kwargs: (fetched.append(tag) or ([], False)))
         monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
-        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: None)
-        return fetched
-
-    def test_prefetch_loop_pauses_intake_when_backlog_high(self, clean_db, monkeypatch):
-        """积压 ≥ max×PAUSE_RATIO → 跳过入库（刷新与容量清理照常）。"""
-        fetched = self._intake_probe(clean_db, monkeypatch, pending=9, paused=False)
-
-        app._prefetch_loop()
-
-        assert fetched == []
-        assert app._prefetch_state['intake_paused'] is True
-
-    def test_prefetch_loop_resumes_intake_below_resume_ratio(self, clean_db, monkeypatch):
-        """已暂停且积压回落到 max×RESUME_RATIO 以下 → 恢复入库。"""
-        fetched = self._intake_probe(clean_db, monkeypatch, pending=5, paused=True)
+        cleaned = []
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
 
         app._prefetch_loop()
 
         assert fetched == ['t']
-        assert app._prefetch_state['intake_paused'] is False
-
-    def test_intake_stays_paused_between_thresholds(self, clean_db, monkeypatch):
-        """滞回：处于 resume~pause 之间时保持暂停，避免每轮抖动。"""
-        fetched = self._intake_probe(clean_db, monkeypatch, pending=7, paused=True)
-
-        app._prefetch_loop()
-
-        assert fetched == []
-        assert app._prefetch_state['intake_paused'] is True
+        assert cleaned == [1]
 
 
 class TestQueryCachedTagSort:

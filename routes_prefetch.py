@@ -160,7 +160,6 @@ def prefetch_status_get() -> Response:
         'refresh': _prefetch_state.get('refresh_stats'),
         'pending_refresh': pending,
         'failed_backoff': failed,
-        'intake_paused': bool(_prefetch_state.get('intake_paused')),
         # 未命中删除关键词的详情报错样本（message → 次数）：据此核对/补充关键词清单
         'detail_errors': get_detail_error_samples(),
     })

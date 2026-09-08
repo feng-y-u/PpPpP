@@ -59,8 +59,6 @@ _prefetch_state = {
     # 最近一轮"最终收藏数刷新"的结构化统计（background._prefetch_refresh_bookmarks
     # 每轮结束/中止时整份替换；键固定，供 /api/prefetch/status 暴露）
     'refresh_stats': None,
-    # 入库节流阀状态：积压逼近容量上限时暂停预取入库（只跑刷新+清理）
-    'intake_paused': False,
 }
 
 # ── 下载队列/进度/取消/线程池 ──

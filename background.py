@@ -13,9 +13,9 @@ import helpers
 import runtime
 from sqlalchemy import or_, text
 
-from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_INTAKE_PAUSE_RATIO,
-                    PREFETCH_INTAKE_RESUME_RATIO, PREFETCH_REFRESH_ABORT_STREAK,
-                    PREFETCH_REFRESH_BACKOFF, PREFETCH_REFRESH_FORCE_DONE)
+from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_EVICT_UNREFRESHED_AFTER,
+                    PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
+                    PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE)
 from fetcher import build_pixiv_session, fetch_following
 from helpers import _get_download_dir, _extract_ext
 from models import (get_session, Illust, CollectionItem, SearchCache,
@@ -253,7 +253,7 @@ def _is_user_owned(db, pixiv_id: int) -> bool:
     ).first() is not None
 
 
-def _prefetch_refresh_bookmarks(max_items: int = 100) -> None:
+def _prefetch_refresh_bookmarks(max_items: int = PREFETCH_REFRESH_BATCH) -> None:
     """入口：跑一轮最终收藏数刷新，并把结构化统计写入 `_prefetch_state['refresh_stats']`。
 
     统计无论正常结束、无候选提前返回还是中途中止都要落盘（供 /api/prefetch/status
@@ -459,11 +459,26 @@ def reset_prefetch_refresh(tag: str | None = None, pixiv_id: int | None = None) 
         return count
 
 
-def _prefetch_capacity_cleanup() -> None:
-    """容量清理：超出上限时优先删除最终收藏数最低的未下载未收藏预取作品。
+def _naive_utc(value):
+    """统一成 naive-UTC 再比较：SQLAlchemy SQLite 的 DATETIME 取出来是 naive，
+    而内存里新建的对象可能是 aware；直接比较会抛 offset-naive/aware 错误。"""
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
 
-    删除决策只看刷新后的最终收藏数：未完成最终刷新（prefetch_refresh_at 为空）的
-    作品暂不参与淘汰，避免用抓取时的快照收藏数误删实际收藏很高的新作品。
+
+def _prefetch_capacity_cleanup() -> None:
+    """容量清理：超出上限时按"已刷新优先、低收藏优先"淘汰，保证上限压得住。
+
+    三层（都跳过已下载/下载中/用户拥有过的作品）：
+    1. **已最终刷新**的作品——收藏数信号可信，优先淘汰；
+    2. **未刷新但推不动**的作品（刷新失败过，或入库超过
+       PREFETCH_EVICT_UNREFRESHED_AFTER）——刷新队列已证明它刷不出来，别占容量；
+    3. **兜底**：其余未刷新作品——只有前两层不够时才动，保证"入库 > 刷新吞吐"
+       时上限也不会被顶破（这是**不靠暂停入库**也能维持容量的关键）。
+
+    层内排序：收藏数低优先，并列时更早上传的优先。层 2/3 用的是入库快照收藏数，
+    偏保守的用法是"宁可删新入的低收藏作品，也不删老的已刷新作品"。
     """
     with get_session() as db:
         count = db.query(Illust).filter(Illust.prefetch_source == 1).count()
@@ -480,29 +495,44 @@ def _prefetch_capacity_cleanup() -> None:
                 DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
             ).distinct().all()
         }
-        candidates: list[Illust] = []
-        for i in db.query(Illust).filter(
-                Illust.prefetch_source == 1,
-                Illust.prefetch_refresh_at.isnot(None),
-        ).all():
+        evict_cutoff = _naive_utc(datetime.now(timezone.utc)) - timedelta(
+            seconds=PREFETCH_EVICT_UNREFRESHED_AFTER)
+
+        tiers: list[list[Illust]] = [[], [], []]
+        for i in db.query(Illust).filter(Illust.prefetch_source == 1).all():
             if i.download_status in ('done', 'downloading') or i.local_paths_list:
                 continue
             if i.pixiv_id in fav_ids or i.pixiv_id in dl_pids:
                 continue
-            candidates.append(i)
+            if i.prefetch_refresh_at is not None:
+                tiers[0].append(i)
+            elif i.refresh_failed_at is not None \
+                    or (_naive_utc(i.created_at) or evict_cutoff) < evict_cutoff:
+                tiers[1].append(i)
+            else:
+                tiers[2].append(i)
 
-        # 最终收藏数低优先删除，并列时更早上传的优先
-        candidates.sort(key=lambda x: (x.bookmark_count, x.upload_date or datetime.min))
-        to_delete = [c.pixiv_id for c in candidates[:need_free]]
+        # 收藏数低优先删除，并列时更早上传的优先
+        ordered: list[Illust] = []
+        for tier in tiers:
+            if len(ordered) >= need_free:
+                break
+            tier.sort(key=lambda x: (x.bookmark_count, x.upload_date or datetime.min))
+            ordered.extend(tier[:need_free - len(ordered)])
+        to_delete = [c.pixiv_id for c in ordered]
         if not to_delete:
             return
+        # 统计必须在删除前算：bulk delete 之后 ORM 对象已失效，再读属性会抛 ObjectDeletedError
+        refreshed_count = sum(1 for c in ordered if c.prefetch_refresh_at is not None)
 
         _remove_pids_from_search_caches(db, to_delete)
         safe_commit(db)
 
         db.query(Illust).filter(Illust.pixiv_id.in_(to_delete)).delete(synchronize_session=False)
         safe_commit(db)
-        logger.info(f'[prefetch] 容量清理: 删除 {len(to_delete)} 条低收藏预取作品')
+        logger.info(
+            f'[prefetch] 容量清理: 删除 {len(to_delete)} 条低收藏预取作品'
+            f'（已刷新 {refreshed_count} / 未刷新 {len(to_delete) - refreshed_count}）')
 
 
 def _prefetch_loop() -> None:
@@ -513,35 +543,20 @@ def _prefetch_loop() -> None:
         try:
             with app.get_session() as db:
                 tags = [t[0] for t in db.query(SearchCache.tag).all()]
-                pending = db.query(Illust).filter(
-                    Illust.prefetch_source == 1,
-                    Illust.prefetch_refresh_at.is_(None),
-                ).count()
         except Exception as e:
             # 标签列表查询失败不退出线程，等待下个 interval 重试
             logger.error(f'[prefetch] 读取标签列表失败: {e}')
             return
         if not tags:
             return
-        # 入库节流阀：未完成刷新的积压逼近容量上限时，本轮不再新增入库（只跑刷新
-        # 与容量清理），避免"入库 > 刷新吞吐"把上限顶破。滞回避免每轮抖动。
-        limit = _prefetch_state['max_illusts']
-        pause_at = int(limit * PREFETCH_INTAKE_PAUSE_RATIO)
-        resume_at = int(limit * PREFETCH_INTAKE_RESUME_RATIO)
-        was_paused = bool(_prefetch_state.get('intake_paused'))
-        paused = pending >= (resume_at if was_paused else pause_at)
-        _prefetch_state['intake_paused'] = paused
-        if paused:
-            logger.warning(
-                f'[prefetch] 未完成刷新积压 {pending} 条（阈值 {resume_at if was_paused else pause_at}），'
-                f'本轮跳过入库，只执行刷新与容量清理')
+        logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
         try:
-            if not paused:
-                logger.info(f'[prefetch] 开始预取 {len(tags)} 个标签')
-                for tag in tags:
-                    _prefetch_one_tag(tag)
+            # 入库永不停：容量由 _prefetch_capacity_cleanup 的三层淘汰压住
+            #（"暂停入库"的方案已否决——用户要的是持续入库 + 更狠的清理）
+            for tag in tags:
+                _prefetch_one_tag(tag)
             # 先刷新最终收藏数（满 1 天的作品），再按最终收藏数做容量清理
-            #（仅已完成最终刷新的作品参与淘汰，未刷新的等下一轮）
+            #（已刷新的优先淘汰，不够时才会动未刷新的）
             _prefetch_refresh_bookmarks()
             app._prefetch_capacity_cleanup()
             _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()

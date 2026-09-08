@@ -112,7 +112,6 @@ async function loadPrefetchStatus() {
     const s = await r.json();
     const parts = [`未完成刷新 ${s.pending_refresh ?? 0} 条`,
                    `退避中 ${s.failed_backoff ?? 0} 条`];
-    if (s.intake_paused) parts.push('⚠ 入库已暂停（积压过高）');
     const rs = s.refresh;
     if (rs && rs.at) {
       const detail = [`成功 ${rs.ok || 0}`, `低收藏删除 ${rs.deleted_low || 0}`,
