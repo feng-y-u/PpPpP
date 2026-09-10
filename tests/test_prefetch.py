@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -607,6 +608,28 @@ class TestPrefetchRefreshBookmarks:
         assert illust is not None, '排队中的下载不能被最终收藏数刷新删掉'
         assert illust.prefetch_refresh_at is not None  # kept_dead：保留并标记完成
 
+    def test_refresh_generic_exception_does_not_bubble(self, clean_db, monkeypatch):
+        """未分类异常（如详情解析 KeyError）不许冒泡：否则容量清理被跳过、上限失效。"""
+        self._old_illust(clean_db, 5012)
+        clean_db.add(SearchCache(tag='t', illust_ids='[5012]', status='done'))
+        safe_commit(clean_db)
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+
+        def _boom(session, pid, limiter=None, return_dead=False):
+            raise KeyError('unexpected payload')
+
+        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _boom)
+
+        app._prefetch_refresh_bookmarks()          # 关键：不抛
+
+        assert app._prefetch_state['refresh_stats']['aborted'] == 'unknown'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5012).first() is not None
+
     def test_refresh_skips_fresh_illusts(self, clean_db, monkeypatch):
         from datetime import timedelta
         self._old_illust(clean_db, 5004, days=0)  # 今天入库 → 不满足满 1 天
@@ -1029,3 +1052,79 @@ class TestDownloadLockRegistry:
         import background
         background._release_download_lock(999, threading.Lock())   # 不应抛异常
         assert 999 not in background.download_locks
+
+
+class TestPrefetchRoundResilience:
+    """审计 S4：单轮里任何一段异常都不许让本轮的容量清理被跳过。
+
+    背景：容量清理是 `prefetch_max_illusts` 上限的**唯一**执行者（"暂停入库"
+    方案已否决），一旦被异常跳过，入库就没人压得住，库会无限增长。
+    """
+
+    def _one_tag(self, clean_db):
+        clean_db.add(SearchCache(tag='t'))
+        safe_commit(clean_db)
+
+    def test_prefetch_loop_runs_cleanup_when_refresh_raises(self, clean_db, monkeypatch):
+        self._one_tag(clean_db)
+        monkeypatch.setattr(app, 'search_by_tag', lambda tag, **kwargs: ([], False))
+
+        def _boom():
+            raise RuntimeError('refresh exploded')
+
+        # 循环里用的是裸名，解析发生在 background 的全局命名空间 → 补丁必须打在
+        # background（打 app 命名空间对裸名调用无效）
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', _boom)
+        cleaned = []
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
+
+        app._prefetch_loop()
+
+        assert cleaned == [1], '刷新阶段抛异常时容量清理仍必须执行'
+
+    def test_prefetch_loop_runs_cleanup_when_tag_raises(self, clean_db, monkeypatch):
+        self._one_tag(clean_db)
+
+        def _boom_tag(tag):
+            raise RuntimeError('tag exploded')
+
+        monkeypatch.setattr(background, '_prefetch_one_tag', _boom_tag)
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
+        cleaned = []
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
+
+        app._prefetch_loop()
+
+        assert cleaned == [1], '单个标签抛异常时容量清理仍必须执行'
+
+    def test_prefetch_one_tag_status_write_failure_does_not_raise(self, clean_db, monkeypatch,
+                                                                 caplog):
+        """失败状态回写再失败也不许冒泡（否则整轮中止、且 fetching 残留无人处理）。"""
+        from sqlalchemy.exc import OperationalError
+        clean_db.add(SearchCache(tag='t', status='done'))
+        safe_commit(clean_db)
+
+        def _boom_search(tag, **kwargs):
+            raise RuntimeError('search exploded')
+
+        monkeypatch.setattr(app, 'search_by_tag', _boom_search)
+        real_commit = background.safe_commit
+        calls = {'n': 0}
+
+        def _flaky_commit(db, *args, **kwargs):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return real_commit(db, *args, **kwargs)   # 抢占 fetching 成功
+            db.rollback()                                 # 与真实 safe_commit 同款语义
+            raise OperationalError('UPDATE search_cache', {},
+                                   Exception('database is locked'))
+
+        monkeypatch.setattr(background, 'safe_commit', _flaky_commit)
+
+        with caplog.at_level(logging.ERROR, logger='background'):
+            background._prefetch_one_tag('t')             # 关键：不抛
+
+        assert calls['n'] == 2
+        assert '失败状态回写失败' in caplog.text
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert row.status == 'fetching', '回写失败的残留状态如实保留（由日志暴露）'

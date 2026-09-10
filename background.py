@@ -204,12 +204,17 @@ def _prefetch_one_tag(tag: str) -> None:
                 safe_commit(db)
     except Exception as e:
         logger.error(f'[prefetch] 标签 {tag} 预取失败: {e}')
-        with get_session() as db:
-            row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
-            if row:
-                row.status = 'error'
-                row.error = str(e)
-                safe_commit(db)
+        try:
+            with get_session() as db:
+                row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+                if row:
+                    row.status = 'error'
+                    row.error = str(e)
+                    safe_commit(db)
+        except Exception as write_err:
+            # 状态回写再失败也不能冒泡（审计 S4）：`fetching` 会残留导致该标签被
+            # 永久跳过（只有重启才复位），而异常冒泡还会终止整轮预取、跳过容量清理。
+            logger.error(f'[prefetch] 标签 {tag} 失败状态回写失败（可能残留 fetching）: {write_err}')
 
 
 def _collect_other_tag_pids(db, exclude_tag: str) -> set[int]:
@@ -272,7 +277,7 @@ def _prefetch_refresh_bookmarks(max_items: int = PREFETCH_REFRESH_BATCH) -> None
         'failed_transient': 0,   # 暂时性失败 → 写退避标记
         'failed_global': 0,      # 限流/连接错误（全局性，不写标记）
         'force_done': 0,         # 失败超期被强制标记完成
-        'aborted': '',           # '' | 'rate_limit' | 'auth' | 'cookie_missing'
+        'aborted': '',           # '' | 'rate_limit' | 'auth' | 'cookie_missing' | 'unknown'
         'at': None,
     }
     try:
@@ -424,6 +429,11 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
         except FileNotFoundError as e:
             stats['aborted'] = 'cookie_missing'
             logger.error(f'[prefetch] Cookie 文件缺失，本轮最终收藏数刷新中止: {e}')
+        except Exception as e:
+            # 兜底（与上面两条同款语义）：未分类异常同样不许冒泡 —— 冒泡会跳过
+            # _prefetch_loop 里的容量清理，prefetch_max_illusts 上限随之失效。
+            stats['aborted'] = 'unknown'
+            logger.exception(f'[prefetch] 最终收藏数刷新出现未分类异常，本轮中止: {e}')
     finally:
         if session is not None:
             session.close()
@@ -566,11 +576,19 @@ def _prefetch_loop() -> None:
         try:
             # 入库永不停：容量由 _prefetch_capacity_cleanup 的三层淘汰压住
             #（"暂停入库"的方案已否决——用户要的是持续入库 + 更狠的清理）
-            for tag in tags:
-                _prefetch_one_tag(tag)
+            try:
+                for tag in tags:
+                    _prefetch_one_tag(tag)
+            except Exception as e:
+                # 单个标签出问题不再拖垮本轮（审计 S4）：容量清理是"上限压得住"的
+                # 最后一道闸，任何一段异常都不该让它被跳过。
+                logger.error(f'[prefetch] 标签预取异常，本轮继续执行刷新与容量清理: {e}')
             # 先刷新最终收藏数（满 1 天的作品），再按最终收藏数做容量清理
             #（已刷新的优先淘汰，不够时才会动未刷新的）
-            _prefetch_refresh_bookmarks()
+            try:
+                _prefetch_refresh_bookmarks()
+            except Exception as e:
+                logger.error(f'[prefetch] 最终收藏数刷新异常，本轮继续执行容量清理: {e}')
             app._prefetch_capacity_cleanup()
             _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
         except Exception as e:
