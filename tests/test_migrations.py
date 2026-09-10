@@ -1,6 +1,10 @@
+import shutil
+import sqlite3
+
 import pytest
 from sqlalchemy import create_engine
 
+from migrations import runner
 from migrations.runner import backup_database, run_migrations
 from migrations.versions import LATEST_SCHEMA_VERSION, MIGRATIONS
 
@@ -176,3 +180,86 @@ def test_version_one_database_runs_remaining_schema_upgrade():
         }
     assert "prefetch_refresh_at" in columns
     assert _user_version(engine) == LATEST_SCHEMA_VERSION
+
+
+# ── WAL 备份完整性（审计 S5）──
+
+def _wal_engine(tmp_path, database_name='pixiv.db'):
+    """建一个 WAL 模式的库，并写入一行**只存在于 -wal 中**的数据。"""
+    database = tmp_path / database_name
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar() == "wal"
+        conn.commit()
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.exec_driver_sql("INSERT INTO t (v) VALUES ('only-in-wal')")
+    assert (tmp_path / f"{database_name}-wal").is_file(), "前置条件：-wal 应当存在"
+    return engine, database
+
+
+def _rows_in(db_file):
+    con = sqlite3.connect(db_file)
+    try:
+        return con.execute("SELECT v FROM t").fetchall()
+    finally:
+        con.close()
+
+
+def test_backup_captures_wal_uncheckpointed_data(tmp_path):
+    """备份前必须 checkpoint：否则停在 -wal 里的已提交数据不会进备份。"""
+    engine, database = _wal_engine(tmp_path)
+    # 前置条件：此刻主库文件单独拿出来是读不到这行的（数据确实只在 WAL 里）
+    lone_before = tmp_path / "lone-before.db"
+    shutil.copy2(database, lone_before)
+    with pytest.raises(sqlite3.OperationalError):
+        _rows_in(lone_before)
+
+    run_migrations(engine, ((1, lambda conn: None),))
+
+    backups = sorted((tmp_path / "backups").glob("*.bak"))
+    assert len(backups) == 1
+    assert _rows_in(backups[0]) == [("only-in-wal",)]
+
+    # 证明是 checkpoint（而非复制侧车）起的作用：主库文件本身已含该行
+    lone_after = tmp_path / "lone-after.db"
+    shutil.copy2(database, lone_after)
+    assert _rows_in(lone_after) == [("only-in-wal",)]
+
+
+def test_backup_copies_wal_when_checkpoint_fails(tmp_path, monkeypatch):
+    """checkpoint 失败时的兜底：-wal/-shm 一并复制，副本仍读得到全部数据。"""
+    engine, database = _wal_engine(tmp_path)
+
+    def _boom(engine_):
+        raise RuntimeError("checkpoint busy")
+
+    # raising=False：回退修复后 runner 里没有这个符号，测试也应报"行为不符"而不是
+    # AttributeError（否则证伪检查只证明测试引用了新符号）
+    monkeypatch.setattr(runner, "_checkpoint_wal", _boom, raising=False)
+
+    run_migrations(engine, ((1, lambda conn: None),))
+
+    backups = sorted((tmp_path / "backups").glob("*.bak"))
+    assert len(backups) == 1
+    assert (tmp_path / "backups" / f"{backups[0].name}-wal").is_file(), "-wal 必须一并复制"
+    assert _rows_in(backups[0]) == [("only-in-wal",)], "副本必须包含已提交数据"
+
+
+def test_backup_still_works_on_non_wal_db(tmp_path):
+    """非 WAL 库：checkpoint 是 no-op，备份行为与既有实现一致。"""
+    database = tmp_path / "pixiv.db"
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() != "wal"
+        conn.commit()
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.exec_driver_sql("INSERT INTO t (v) VALUES ('rollback-journal')")
+
+    run_migrations(engine, ((1, lambda conn: None),))
+
+    backups = sorted((tmp_path / "backups").glob("*.bak"))
+    assert len(backups) == 1
+    assert _rows_in(backups[0]) == [("rollback-journal",)]
+    assert not list((tmp_path / "backups").glob("*-wal")), "非 WAL 库不该产生侧车副本"
