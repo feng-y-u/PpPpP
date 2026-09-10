@@ -1,13 +1,19 @@
 # ── 进程内存状态（-w 1 单进程语义，勿多 worker 部署）──
 # 所有后台任务与内存状态都依赖单进程常驻，这是单用户自用场景的有意设计。
+import json
+import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 from config import (
     DOWNLOAD_MAX_WORKERS, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
     THUMB_CONCURRENCY,
 )
+
+logger = logging.getLogger(__name__)
 
 _scan_cache: dict = {'ts': 0.0, 'data': {}}
 _SCAN_CACHE_TTL = 30.0  # 图库目录扫描缓存（秒）：避免每页请求全量重扫磁盘（省 IOPS）
@@ -21,6 +27,91 @@ _thumb_failed: dict[str, float] = {}
 # RuntimeError: dictionary changed size during iteration。
 _thumb_failed_lock = threading.Lock()
 _THUMB_FAIL_COOLDOWN = 30.0
+
+# ── /thumb 越界重定向：自动发现表 + 拒绝计数（仅观测用途）──
+# 跨域重定向跟随成功后记录目标主机，用于回答"Pixiv 图床是不是换域名了"。这里
+# **不做自动提升白名单**：B 级（无凭据）本身就能正常取图，白名单只决定"是否携带
+# 凭据"，所以不需要为了可用性放宽信任 —— 人工确认是官方 CDN 后往
+# config.IMAGE_HOST_ALLOWLIST 加一行即可。
+_thumb_redirect_lock = threading.Lock()
+_thumb_redirect_hosts: dict[str, dict] = {}
+_thumb_redirect_rejected: dict[str, int] = {}
+
+
+def thumb_redirect_state_path() -> str:
+    """发现表落盘路径：跟随 config 的实例目录（S8 引入 PIXIV_INSTANCE_DIR 后自动生效）。"""
+    import config
+    instance_dir = (getattr(config, '_instance_dir', '')
+                    or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance'))
+    return os.path.join(instance_dir, 'thumb_redirect_hosts.json')
+
+
+def _save_thumb_redirect_hosts_locked() -> None:
+    """原子落盘（tmp + os.replace）：进程被杀不会留下半截 JSON。须在锁内调用。"""
+    path = thumb_redirect_state_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'hosts': _thumb_redirect_hosts}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        # 观测数据写不进去不该影响取图；下次变更会重试
+        logger.warning(f'越界重定向发现表落盘失败: {e}')
+
+
+def load_thumb_redirect_hosts() -> int:
+    """启动时恢复发现表（重启不丢）。容忍文件缺失/损坏。"""
+    path = thumb_redirect_state_path()
+    try:
+        with open(path, encoding='utf-8') as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    hosts = payload.get('hosts') if isinstance(payload, dict) else None
+    if not isinstance(hosts, dict):
+        return 0
+    loaded = {h: e for h, e in hosts.items() if isinstance(h, str) and isinstance(e, dict)}
+    with _thumb_redirect_lock:
+        _thumb_redirect_hosts.update(loaded)
+    return len(loaded)
+
+
+def note_thumb_redirect_host(host: str, *, url: str, content_type: str) -> bool:
+    """记录一次跨域重定向发现；返回是否**首次**发现（调用方据此只告警一次）。"""
+    now = datetime.now(timezone.utc).isoformat()
+    with _thumb_redirect_lock:
+        entry = _thumb_redirect_hosts.get(host)
+        first = entry is None
+        if first:
+            entry = {'host': host, 'count': 0, 'first_seen': now, 'last_seen': now,
+                     'sample_url': url, 'last_content_type': content_type}
+            _thumb_redirect_hosts[host] = entry
+        entry['count'] += 1
+        entry['last_seen'] = now
+        entry['sample_url'] = url
+        entry['last_content_type'] = content_type
+        _save_thumb_redirect_hosts_locked()
+    return first
+
+
+def note_thumb_redirect_rejected(host: str) -> None:
+    """记录一次被拒的越界重定向（按目标主机计数，便于发现有人在扫内网）。"""
+    with _thumb_redirect_lock:
+        _thumb_redirect_rejected[host] = _thumb_redirect_rejected.get(host, 0) + 1
+
+
+def thumb_redirect_snapshot() -> dict:
+    with _thumb_redirect_lock:
+        return {'discovered': [dict(entry) for entry in _thumb_redirect_hosts.values()],
+                'rejected': dict(_thumb_redirect_rejected)}
+
+
+def clear_thumb_redirect_hosts() -> None:
+    with _thumb_redirect_lock:
+        _thumb_redirect_hosts.clear()
+        _thumb_redirect_rejected.clear()
+        _save_thumb_redirect_hosts_locked()
 
 # 图库孤儿判定用的"全部 DB pixiv_id 集合"缓存：避免每次图库请求全表加载
 #（illusts 表可能远大于已下载数，含搜索/预取记录）

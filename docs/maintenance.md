@@ -213,3 +213,33 @@ python scripts/check_tls.py --timeout 15   # 网络慢时放宽
 > 网络或代理变更后请重跑脚本，不要凭记忆沿用结论。
 
 **图片主机白名单（`config.IMAGE_HOST_ALLOWLIST`）**：决定"访问某主机时是否允许携带 Pixiv 凭据"。官方图床 `i.pximg.net` 在白名单内；下载引擎遇到**白名单外的公网 https** 主机（例如 Pixiv 将来换 CDN）会改用**无凭据会话**继续下载 —— 下载不中断，同时不会把 `PHPSESSID` 交给第三方。自建图片镜像时把域名加进这个集合即可带凭据访问；无论是否白名单，非 https / 内网地址 / 云元数据端点 / 带 userinfo / 非 443 端口的地址一律拒绝且不发起请求，图片地址发生重定向也一律判失败（不跟随）。
+
+**`/thumb` 缩略图代理的重定向策略（与下载引擎同一套判定）**：入口仍然只接受 `https://i.pximg.net/`；图床返回 3xx 时**不交给 requests 自动跟随**，而是按凭据分级跟随一次：
+
+| 目标 | 行为 |
+|---|---|
+| 白名单内主机（A 级） | 带凭据连接池跟随一次（官方图床内部跳转属正常） |
+| 白名单外的公网 https（B 级） | 用**无凭据**连接池跟随一次，且响应必须是 `Content-Type: image/*`，成功后才记入发现表 |
+| 非 https / 内网 / 云元数据 / 带 userinfo / 非 443 | 502，**不发起请求**，计入被拒计数 |
+| 跟随后仍是 3xx（嵌套重定向）、3xx 但缺 `Location` | 502，不再跟随 |
+
+**为何这么设计**：`fetcher.build_pixiv_session()` 挂的是**会话级** `Cookie` 头，requests 会把它发给任意主机 —— 所以"跟随到白名单外主机"等价于把 `PHPSESSID` 交给第三方。分级的原则是**白名单只决定"是否携带凭据"，不决定"能否访问"**，于是既不会因为图床换域名而整页缩略图全挂，也不会泄露凭据。
+
+**发现表（观测，不自动生效）**：
+
+```bash
+# 看当前静态白名单、自动发现的图片主机与被拒主机计数
+curl -s localhost:8000/api/thumb/redirect-hosts | python -m json.tool
+
+# 清空发现表（内存 + instance/thumb_redirect_hosts.json）
+curl -s -X DELETE localhost:8000/api/thumb/redirect-hosts -H "X-CSRF-Token: <token>"
+```
+
+发现表**不会**自动变成白名单：B 级本来就取得到图，没有放宽信任的必要。若日志出现
+
+```
+/thumb 发现新的图片主机 img-cdn.example.net（已用无凭据方式成功取图）……
+```
+
+且确认那是 Pixiv 官方 CDN，再手工把域名加进 `config.IMAGE_HOST_ALLOWLIST`（需要重启）以恢复携带凭据访问。`THUMB_REDIRECT_DISCOVERY=false` 可关闭 B 级跟随（跨域重定向一律 502，回到纯拒绝行为）；发现表落盘在 `instance/thumb_redirect_hosts.json`，删掉即从空表开始。
+

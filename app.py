@@ -26,6 +26,7 @@ from fetcher import search_by_tag, search_by_user, browse_discovery, paginated_s
 
 # 以下为 app 命名空间测试补丁契约绑定，勿删（见 docs/architecture.md「测试契约」）
 from helpers import enforce_image_cache_limit, query_cached_tag
+import runtime  # 模块级引用：启动时恢复越界重定向发现表
 from runtime import (_scan_cache, _db_pids_cache, _prefetch_state,
                      SEARCH_TASK_TTL, _rate_limit_store)
 # 中间件（认证/CSRF/限流/安全头）——app 级钩子经 middleware_bp 注册全局生效；
@@ -156,6 +157,8 @@ _warn_if_tls_unverified()
 # 保持重构前 import 时序：init_db → _reset_stuck_*（清理残留状态）→ 后台线程启动 → atexit 注册。
 _reset_stuck_downloads()
 _reset_stuck_prefetch()
+# 越界重定向发现表：重启不丢（仅观测数据；文件缺失/损坏时从空表开始）
+runtime.load_thumb_redirect_hosts()
 
 background.start_background_threads()
 

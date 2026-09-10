@@ -10,6 +10,7 @@ import platform
 import threading
 import time
 from base64 import urlsafe_b64decode
+from urllib.parse import urljoin
 
 import requests
 from flask import Blueprint, Response, abort, jsonify, render_template, request, send_file
@@ -17,12 +18,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 import fetcher
+import runtime
+from config import IMAGE_HOST_ALLOWLIST, THUMB_REDIRECT_DISCOVERY
 from fetcher import PixivAuthError, get_pooled_session, reset_pooled_session
 from helpers import (_build_orphan_dicts, _delete_illust_files, _delete_orphan_files,
                      _extract_ext, _fetch_original_urls, _fmt_num, _get_download_dir,
                      _next_collection_position, _original_to_resized,
                      _page_sort_key, _proxy_thumb, _scan_local_downloads,
-                     enforce_image_cache_limit)
+                     check_image_url, enforce_image_cache_limit)
 from middleware import _csrf_required, _get_csrf_token, _get_json_body
 from models import (BlockedTag, Collection, CollectionItem, DownloadLog,
                     Illust, get_favorite_pids, get_session, safe_commit)
@@ -39,6 +42,84 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance',
 
 # ── 图片服务 / 详情页 ──
 
+class _ThumbRedirectRejected(requests.RequestException):
+    """越界重定向未通过校验 —— 按"本次缩略图获取失败"收尾（失败冷却 + 502）。"""
+
+
+def _is_redirect_response(resp) -> bool:
+    """3xx 一律按重定向处理 —— **不用** `resp.is_redirect`。
+
+    `requests` 的 `is_redirect` 要求响应同时带 `Location`；没有 Location 的 3xx
+    会被当成普通响应，于是空响应体/HTML 提示会被写进图片缓存（7 天）并回 200。
+    这里按状态码判定：3xx 要么是合法的一次跟随，要么判失败。
+    """
+    return 300 <= resp.status_code < 400
+
+
+def _thumb_request(url: str, *, with_cookie: bool = True):
+    """单次 GET（**不跟随重定向**），复用连接；keep-alive 被对端关掉时重建池重试一次。
+
+    `with_cookie=False` 全程使用无凭据连接池 —— 重试也必须用同一档会话，
+    否则一次连接抖动就会把 PHPSESSID 发给白名单外的主机。
+    """
+    try:
+        return get_pooled_session(with_cookie=with_cookie).get(
+            url, timeout=(10, 30), allow_redirects=False)
+    except requests.RequestException as e:
+        # 复用的 keep-alive 连接可能已被对端单方面关闭：这类失败是"快失败"
+        # （连接重置，毫秒级），而 urllib3 因 connect=0 不会自动重试——
+        # 重建本线程连接池后再试一次。超时类失败不重试（那才耗时）。
+        if isinstance(e, requests.Timeout):
+            raise
+        reset_pooled_session()
+        return get_pooled_session(with_cookie=with_cookie).get(
+            url, timeout=(10, 30), allow_redirects=False)
+
+
+def _follow_thumb_redirect(target: str):
+    """按凭据分级跟随一次越界重定向（S7b），返回响应或抛 `_ThumbRedirectRejected`。
+
+    判定顺序不可颠倒：
+      1. 硬性非法目标（非 https / 内网 / 云元数据 / userinfo / 非 443）→ 直接拒绝，
+         优先级高于任何白名单，计入 `rejected` 计数，**不**记入发现表；
+      2. A 级：目标 host 在 `config.IMAGE_HOST_ALLOWLIST` 内 → 用带凭据连接池跟随；
+      3. B 级：公网 https 但不在白名单 → 用**无凭据**连接池跟随一次，且要求响应
+         真的是图片（`Content-Type: image/*`），成功后才写入发现表。
+
+    只跟随一次：调用方在跟随后再遇 3xx 即判失败（见 thumb_proxy），不做递归。
+    """
+    host, reject = check_image_url(target)
+    if reject:
+        runtime.note_thumb_redirect_rejected(host or '（无法解析）')
+        logger.warning(f'/thumb 拒绝越界重定向（{reject}）: {target}')
+        raise _ThumbRedirectRejected(f'重定向目标非法（{reject}）')
+
+    if host in IMAGE_HOST_ALLOWLIST:
+        return _thumb_request(target)
+
+    if not THUMB_REDIRECT_DISCOVERY:
+        runtime.note_thumb_redirect_rejected(host)
+        logger.warning(f'/thumb 跨域重定向发现已关闭，拒绝跟随: {target}')
+        raise _ThumbRedirectRejected('未开启跨域重定向发现')
+
+    # B 级：无凭据跟随。绝不能复用带凭据的会话 —— requests 会把会话级
+    # Cookie 头发给任意主机（见 fetcher.build_credentialless_session 注释）。
+    resp = _thumb_request(target, with_cookie=False)
+    content_type = resp.headers.get('Content-Type', '')
+    if not content_type.lower().startswith('image/'):
+        resp.close()
+        runtime.note_thumb_redirect_rejected(host)
+        logger.warning(f'/thumb 跨域重定向目标不是图片（Content-Type={content_type!r}），'
+                       f'拒绝落盘: {target}')
+        raise _ThumbRedirectRejected('重定向目标不是图片')
+
+    if runtime.note_thumb_redirect_host(host, url=target, content_type=content_type):
+        logger.warning(
+            f'/thumb 发现新的图片主机 {host}（已用无凭据方式成功取图）—— '
+            f'确认是 Pixiv 官方 CDN 后，可把该域名加入 config.IMAGE_HOST_ALLOWLIST 以携带凭据访问')
+    return resp
+
+
 @bp.route('/thumb/<path:url_b64>')
 def thumb_proxy(url_b64: str) -> Response:
     """代理 Pixiv 图片，绕过 Referer 检查。带磁盘缓存。"""
@@ -50,6 +131,7 @@ def thumb_proxy(url_b64: str) -> Response:
     except Exception:
         return abort(400)
 
+    # 入口白名单保持不变（自动发现只作用于**重定向目标**，不扩大入口面）
     if not url.startswith('https://i.pximg.net/'):
         return abort(403)
 
@@ -74,20 +156,22 @@ def thumb_proxy(url_b64: str) -> Response:
         with _thumb_sem:
             # 用线程内连接池：旧代码每张图都新建 Session 再 close()，等于每张图
             # 重做一次 TCP + TLS 握手（实测 30 张图 = 30 条连接，复用后 = 1 条）。
-            session = get_pooled_session()
-            try:
-                resp = session.get(url, timeout=(10, 30))
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                # 复用的 keep-alive 连接可能已被对端单方面关闭：这类失败是"快失败"
-                # （连接重置，毫秒级），而 urllib3 因 connect=0 不会自动重试——
-                # 重建本线程连接池后再试一次。超时类失败不重试（那才耗时）。
-                if isinstance(e, requests.Timeout):
-                    raise
-                reset_pooled_session()
-                session = get_pooled_session()
-                resp = session.get(url, timeout=(10, 30))
-                resp.raise_for_status()
+            resp = _thumb_request(url)
+            if _is_redirect_response(resp):
+                location = resp.headers.get('Location') or ''
+                resp.close()  # 先释放连接，再决定是否跟随
+                if not location:
+                    raise _ThumbRedirectRejected('重定向缺少 Location')
+                target = urljoin(url, location)
+                logger.info(f'/thumb 越界重定向，按凭据分级处置: {url} → {target}')
+                resp = _follow_thumb_redirect(target)
+                if _is_redirect_response(resp):
+                    # 只跟随一次：再跳说明目标链不可信，直接失败（不递归）
+                    status = resp.status_code
+                    resp.close()
+                    logger.warning(f'/thumb 重定向目标再次重定向（{status}），拒绝递归跟随')
+                    raise _ThumbRedirectRejected('重定向嵌套')
+            resp.raise_for_status()
     except requests.RequestException:
         with _thumb_failed_lock:
             _thumb_failed[url] = now
@@ -512,6 +596,30 @@ def illust_collections(pixiv_id: int) -> Response:
     with get_session() as db:
         items = db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).all()
         return jsonify([item.collection_id for item in items])
+
+
+@bp.route('/api/thumb/redirect-hosts')
+def thumb_redirect_hosts_get() -> Response:
+    """越界重定向观测：静态白名单 + 自动发现的主机 + 被拒主机计数。
+
+    仅观测用途：发现表**不会**自动变成白名单（白名单只决定"是否携带凭据"，
+    而无凭据跟随本身已能正常取图）。确认是 Pixiv 官方 CDN 后手工加白名单。
+    """
+    snapshot = runtime.thumb_redirect_snapshot()
+    return jsonify({
+        'static': sorted(IMAGE_HOST_ALLOWLIST),
+        'discovery_enabled': THUMB_REDIRECT_DISCOVERY,
+        'discovered': snapshot['discovered'],
+        'rejected': snapshot['rejected'],
+    })
+
+
+@bp.route('/api/thumb/redirect-hosts', methods=['DELETE'])
+@_csrf_required
+def thumb_redirect_hosts_delete() -> Response:
+    """清空发现表与拒绝计数（落盘文件同时清空）。"""
+    runtime.clear_thumb_redirect_hosts()
+    return jsonify({'ok': True})
 
 
 @bp.route('/api/open-dir', methods=['POST'])

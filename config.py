@@ -120,6 +120,12 @@ SSL_VERIFY = os.environ.get('SSL_VERIFY', 'true').lower() != 'false'
 # 白名单外的主机仍可访问（下载引擎、缩略图重定向），但**不带 Cookie**。
 IMAGE_HOST_ALLOWLIST = frozenset({'i.pximg.net'})
 
+# 缩略图越界重定向自动发现（默认开启）：
+# 白名单外的**公网 https** 目标用无凭据会话跟随一次（且要求响应确实是图片），
+# 并记入发现表供观测（`GET /api/thumb/redirect-hosts`）。设 False → 跨域重定向
+# 一律拒绝，回到"只允许白名单内重定向"的纯拒绝行为。
+THUMB_REDIRECT_DISCOVERY = os.environ.get('THUMB_REDIRECT_DISCOVERY', 'true').lower() != 'false'
+
 # 设置页访问密码（留空则不启用）
 # 可通过环境变量 SETTINGS_PASSWORD 或 settings.json 的 settings_password 设置
 SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')

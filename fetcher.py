@@ -356,11 +356,17 @@ def _cookie_file_stamp() -> float | None:
         return None
 
 
-def get_pooled_session() -> requests.Session:
-    """取本线程复用的 Pixiv session。Cookie 文件内容变化时自动重建。"""
+def get_pooled_session(with_cookie: bool = True) -> requests.Session:
+    """取本线程复用的 Pixiv session。Cookie 文件内容变化时自动重建。
+
+    `with_cookie=False` 取的是**无凭据**变体（白名单外的图片主机专用）：两条
+    连接池按线程各自缓存、互不影响。
+    """
+    slot = 'session' if with_cookie else 'anon_session'
+    stamp_slot = 'stamp' if with_cookie else 'anon_stamp'
     stamp = _cookie_file_stamp()
-    session = getattr(_thread_local, 'session', None)
-    if session is not None and getattr(_thread_local, 'stamp', None) == stamp:
+    session = getattr(_thread_local, slot, None)
+    if session is not None and getattr(_thread_local, stamp_slot, None) == stamp:
         return session
     if session is not None:
         try:
@@ -368,23 +374,28 @@ def get_pooled_session() -> requests.Session:
         except Exception:
             pass
     # build_pixiv_session() 内部的 _load_cookie() 会刷新 _cookie_mtime/_cookie_value
-    session = build_pixiv_session()
-    _thread_local.session = session
-    _thread_local.stamp = stamp
+    session = build_pixiv_session() if with_cookie else build_credentialless_session()
+    setattr(_thread_local, slot, session)
+    setattr(_thread_local, stamp_slot, stamp)
     return session
 
 
 def reset_pooled_session() -> None:
-    """丢弃本线程的连接池。复用的 keep-alive 连接被对端关闭后需要重建。"""
-    session = getattr(_thread_local, 'session', None)
-    if session is None:
-        return
-    try:
-        session.close()
-    except Exception:
-        pass
-    _thread_local.session = None
-    _thread_local.stamp = None
+    """丢弃本线程的连接池（凭据与无凭据两个都丢）。
+
+    复用的 keep-alive 连接被对端关闭后需要重建；两条池都丢是因为触发场景
+    （连接异常）无法区分坏的连接属于哪条池。
+    """
+    for slot, stamp_slot in (('session', 'stamp'), ('anon_session', 'anon_stamp')):
+        session = getattr(_thread_local, slot, None)
+        if session is None:
+            continue
+        try:
+            session.close()
+        except Exception:
+            pass
+        setattr(_thread_local, slot, None)
+        setattr(_thread_local, stamp_slot, None)
 
 
 def _split_tags(keyword: str) -> list[str]:
