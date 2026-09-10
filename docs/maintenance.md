@@ -180,3 +180,36 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8000/api/open-
 # 3) 未登录访问：API 应 401，页面应 302 到 /login
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/blocked-tags
 ```
+
+---
+
+## 9. TLS 校验与代理（`SSL_VERIFY`）
+
+**默认 `SSL_VERIFY=true`**（`config.py`）。只有"你的代理确实在做 TLS 拦截（用自签根证书解密流量）"时才允许关掉它 —— 关闭校验意味着链路上任何中间人（代理、公司网关、公共 WiFi）都能读取并篡改你与 Pixiv 之间的流量。
+
+**怎么判断当前环境该不该关**：
+
+```bash
+python scripts/check_tls.py            # 只读诊断：只做 TLS 握手读证书，不发业务请求、不写文件
+python scripts/check_tls.py --timeout 15   # 网络慢时放宽
+```
+
+判定规则与退出码：
+
+| 退出码 | 含义 | 该怎么做 |
+|---|---|---|
+| 0 | 至少一条链路 `verify=True` 成功；若直连与代理都成功，两者叶证书指纹一致 | 保持默认 `SSL_VERIFY=true` |
+| 1 | 所有 `verify=True` 都失败而 `verify=False` 能连通；或直连/代理叶证书指纹不一致 | 疑似 TLS 拦截或本机缺 CA，见下 |
+| 2 | 两种方式都连不上（网络不可达） | 先修网络再跑 |
+
+**退出码 1 时怎么办**（按优先级）：
+
+1. **首选：把代理的根证书装进系统信任库**（Windows"证书管理器 → 受信任的根证书颁发机构"，Linux 放 `/usr/local/share/ca-certificates/` 后 `update-ca-certificates`），然后保持 `SSL_VERIFY=true`。
+2. 确实无法安装（例如只想临时跑）：设 `SSL_VERIFY=false`（环境变量或 `.env`），并接受"流量可被链路上任何人读取/篡改"。**该状态会在启动日志里出现告警**：`TLS 校验已关闭（SSL_VERIFY=false）…`。
+3. 判断依据不明确时**不要**关校验 —— 关掉只是让失败消失，并没有解决问题。
+
+> 本机实测记录（2026-09-10，代理 `http://127.0.0.1:7890`）：
+> `scripts/check_tls.py` 退出码 **0**。`www.pixiv.net` 与 `i.pximg.net` 经代理 `verify=True` 握手均成功，issuer 为 `Google Trust Services`（`WE1` / `WR1`，即公共 CA 直签），叶证书 SHA-256 前 16 位分别为 `baaff5d5e06af2d2` / `eded7a031557e60`；直连两条链路均不可达（该网络环境必须走代理出网）。另有一项决定性对照：`www.cloudflare.com` 直连与经代理的叶证书指纹完全相同（`cf80aa757e806acf`）—— 代理是纯 CONNECT 透传，不做 TLS 拦截。
+> 网络或代理变更后请重跑脚本，不要凭记忆沿用结论。
+
+**图片主机白名单（`config.IMAGE_HOST_ALLOWLIST`）**：决定"访问某主机时是否允许携带 Pixiv 凭据"。官方图床 `i.pximg.net` 在白名单内；下载引擎遇到**白名单外的公网 https** 主机（例如 Pixiv 将来换 CDN）会改用**无凭据会话**继续下载 —— 下载不中断，同时不会把 `PHPSESSID` 交给第三方。自建图片镜像时把域名加进这个集合即可带凭据访问；无论是否白名单，非 https / 内网地址 / 云元数据端点 / 带 userinfo / 非 443 端口的地址一律拒绝且不发起请求，图片地址发生重定向也一律判失败（不跟随）。

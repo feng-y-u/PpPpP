@@ -17,7 +17,7 @@ from flask import (
 from config import (
     DOWNLOAD_DIR,
     MAX_BOOKMARKS_DEFAULT,
-    SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE,
+    SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE, SSL_VERIFY,
 )
 from models import init_db, get_session  # get_session：tests 补丁目标（test_prefetch.py setattr(app, 'get_session')）
 import fetcher
@@ -127,6 +127,17 @@ def _warn_if_unprotected() -> None:
         logger.warning('ACCESS_PASSWORD 未设置：全站免认证，仅限本机/可信内网使用；公网部署必须设置')
 
 
+def _warn_if_tls_unverified() -> None:
+    """TLS 校验被关闭时告警：那种状态下链路上的任何中间人都能读改流量。
+
+    默认已是开启（config.SSL_VERIFY 默认 True）；只有为"代理确实做 TLS 拦截"而
+    显式设了 `SSL_VERIFY=false` 才会走到这里 —— 让这个状态在日志里可见。
+    """
+    if not SSL_VERIFY:
+        logger.warning('TLS 校验已关闭（SSL_VERIFY=false）：流量可被链路上任何中间人读取/篡改；'
+                       '仅在代理做 TLS 拦截时使用，判定办法见 scripts/check_tls.py')
+
+
 def _dev_server_bind() -> tuple[str, int]:
     """`python app.py` 的绑定地址：默认只监听 loopback。
 
@@ -138,6 +149,7 @@ def _dev_server_bind() -> tuple[str, int]:
 
 
 _warn_if_unprotected()
+_warn_if_tls_unverified()
 
 
 # ── 后台任务组装（定义见 background.py）──

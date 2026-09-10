@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ import re
 import threading
 import time
 from base64 import urlsafe_b64encode
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -289,6 +291,49 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
 
 
 # ── URL/展示工具 ──
+
+def check_image_url(url: str) -> tuple[str, str | None]:
+    """解析并校验一个图片地址，返回 `(host, 拒绝原因)`；原因为 None 表示允许请求。
+
+    硬性条件（下载引擎与缩略图重定向共用同一份判定）：
+      - 必须 `https`（明文会让中间人直接替换图片内容）
+      - 不得含 userinfo（`https://user@host/` 会让凭据随 URL 走）
+      - 端口必须是 443 或省略
+      - 主机名不得是 `localhost` / `*.local` / `*.internal`
+      - 主机是 IP 字面量时必须是**公网地址**（封死 127/8、10/8、172.16/12、
+        192.168/16、169.254/16 云元数据端点、::1、fc00::/7、fe80::/10）
+
+    刻意**不做**域名解析：DNS 结果随时可变，靠"解析后再比对 IP"做 SSRF 防护既
+    不可靠又慢；这里只封"字面量内网地址"，域名侧交给证书校验与白名单分级
+    （白名单外的公网主机用无凭据会话访问）。
+    """
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return '', '地址无法解析'
+    if parts.scheme != 'https':
+        return '', f'非 https（{parts.scheme or "无 scheme"}）'
+    if '@' in parts.netloc:
+        return '', '地址含 userinfo'
+    host = (parts.hostname or '').lower()
+    if not host:
+        return '', '缺少主机名'
+    try:
+        port = parts.port
+    except ValueError:
+        return host, '端口非法'
+    if port not in (None, 443):
+        return host, f'非 443 端口（{port}）'
+    if host == 'localhost' or host.endswith(('.local', '.internal')):
+        return host, '本机/内网主机名'
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host, None
+    if not ip.is_global:
+        return host, f'非公网地址（{ip}）'
+    return host, None
+
 
 def _extract_ext(url: str) -> str:
     """从图片 URL 中提取文件扩展名。"""

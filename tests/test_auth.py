@@ -308,6 +308,21 @@ class TestPublicDeploymentPosture:
             app_module._warn_if_unprotected()
         assert 'ACCESS_PASSWORD 未设置' not in caplog.text
 
+    def test_warns_when_tls_verify_disabled(self, monkeypatch, caplog):
+        """关掉 TLS 校验必须留下告警（默认已开启，只有显式设 false 才走到这里）。"""
+        import app as app_module
+        monkeypatch.setattr(app_module, 'SSL_VERIFY', False)
+        with caplog.at_level(logging.WARNING, logger='app'):
+            app_module._warn_if_tls_unverified()
+        assert 'TLS 校验已关闭' in caplog.text
+
+    def test_silent_when_tls_verify_enabled(self, monkeypatch, caplog):
+        import app as app_module
+        monkeypatch.setattr(app_module, 'SSL_VERIFY', True)
+        with caplog.at_level(logging.WARNING, logger='app'):
+            app_module._warn_if_tls_unverified()
+        assert 'TLS 校验已关闭' not in caplog.text
+
 
 class TestSecurityHeaders:
     def test_headers_present(self, client):

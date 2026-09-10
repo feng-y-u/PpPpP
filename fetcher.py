@@ -320,6 +320,22 @@ def build_pixiv_session() -> requests.Session:
     return s
 
 
+def build_credentialless_session() -> requests.Session:
+    """构造**不带 Pixiv 凭据**的 session（白名单外的图片主机用）。
+
+    `build_pixiv_session()` 挂的是**会话级** `Cookie` 头（`s.headers.update`），
+    requests 会把它发给任意主机 —— 紧随其后的 `s.cookies.set(..., domain=...)`
+    才是主机作用域的。所以访问非 Pixiv 域名时必须显式摘掉这个头，否则等于把
+    PHPSESSID 交给第三方：对方拿它就能以你的账号身份调用 Pixiv API。
+    """
+    s = build_pixiv_session()
+    s.headers.pop('Cookie', None)
+    # 域级 Cookie 也清掉：RequestsCookieJar 里的 PHPSESSID 是 host-only/带域的，
+    # 留着它就不是"无凭据会话"，将来任何同域/子域跳转都可能把它带出去。
+    s.cookies.clear()
+    return s
+
+
 # ── 线程内连接池（图片代理 / 并发详情共用）──
 # 调用方曾对每张图、每个作品都 build_pixiv_session() 再 close()，于是每次请求
 # 都要重做 TCP + TLS 握手（实测 30 次请求 = 30 条连接，复用后 = 1 条；本地无

@@ -32,8 +32,15 @@ from runtime import (_download_progress, _queued_downloads,
 
 
 class _FakeResponse:
-    def __init__(self, content: bytes):
+    def __init__(self, content: bytes, status_code: int = 200, headers: dict | None = None):
         self._content = content
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    @property
+    def is_redirect(self) -> bool:
+        """与 requests.Response 同义：3xx 且带 Location。"""
+        return 300 <= self.status_code < 400 and 'Location' in self.headers
 
     def raise_for_status(self):
         return None
@@ -43,18 +50,29 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """下载引擎的替身 session：固定返回字节，或在指定 URL 上抛错。"""
+    """下载引擎的替身 session：固定返回字节，或在指定 URL 上抛错/重定向。"""
 
-    def __init__(self, fail_on: str | None = None, content: bytes = b'x' * 16):
+    def __init__(self, fail_on: str | None = None, content: bytes = b'x' * 16,
+                 redirect_on: str | None = None,
+                 redirect_to: str = 'https://evil-cdn.example/x.jpg'):
         self.fail_on = fail_on
         self.content = content
+        self.redirect_on = redirect_on
+        self.redirect_to = redirect_to
         self.calls: list[str] = []
+        self.kwargs: list[dict] = []
         self.closed = False
+        # 真 session 的会话级 Cookie 头（build_pixiv_session 会挂上 PHPSESSID）：
+        # 无凭据会话的替身里不带这个键，便于断言"没把凭据发出去"
+        self.headers: dict = {'Cookie': 'PHPSESSID=secret'}
 
-    def get(self, url, timeout=None, stream=False):
+    def get(self, url, timeout=None, stream=False, allow_redirects=True):
         self.calls.append(url)
+        self.kwargs.append({'allow_redirects': allow_redirects, 'timeout': timeout})
         if self.fail_on and url == self.fail_on:
             raise OSError('模拟下载中断')
+        if self.redirect_on and url == self.redirect_on:
+            return _FakeResponse(b'', status_code=302, headers={'Location': self.redirect_to})
         return _FakeResponse(self.content)
 
     def close(self):
@@ -644,3 +662,99 @@ def test_api_downloads_survives_concurrent_queue_mutation(dl_env, clean_db, clie
 
     assert not errors, f'并发下 /api/downloads 出错：{errors!r}'
     assert not mutator.is_alive()
+
+
+# ── 地址校验与凭据分级（审计 S7a）──
+
+@pytest.mark.parametrize('pid,url', [
+    (81001, 'http://i.pximg.net/img-original/img/x/1_p0.jpg'),   # 非 https（明文）
+    (81002, 'http://169.254.169.254/latest/meta-data/'),         # 云元数据端点
+    (81003, 'https://127.0.0.1/x.jpg'),                          # loopback
+    (81004, 'https://10.1.2.3/x.jpg'),                           # 私网
+    (81005, 'https://[::1]/x.jpg'),                              # IPv6 loopback
+    (81006, 'https://user:pw@i.pximg.net/x.jpg'),                # userinfo
+    (81007, 'https://i.pximg.net:8080/x.jpg'),                   # 非 443 端口
+    (81008, 'https://localhost/x.jpg'),                          # 本机主机名
+    (81009, 'https://db.internal/x.jpg'),                        # 内网主机名
+])
+def test_download_rejects_unsafe_url_without_request(dl_env, monkeypatch, pid, url):
+    """硬性不合法地址：一个请求都不发，直接判失败并留痕。"""
+    with get_session() as db:
+        _make_illust(db, pid, [url])
+    fake = _FakeSession()
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
+
+    background._download_illust(pid)
+
+    status, paths, actions = _read(pid)
+    assert status == 'failed'
+    assert paths is None
+    assert fake.calls == [], '非法地址绝不能发起请求'
+    with get_session() as db:
+        log = db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid,
+                                          DownloadLog.action == 'failed').first()
+        assert log is not None and '非法图片地址' in (log.message or '')
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid))), '失败后不留半成品目录'
+    _assert_no_dangling_state(pid)
+
+
+def test_download_does_not_follow_redirect(dl_env, monkeypatch):
+    """图片地址发生重定向 → 判定失败，且请求必须显式禁止跟随。"""
+    pid = 81020
+    url = 'https://i.pximg.net/img-original/img/x/redirect_p0.jpg'
+    with get_session() as db:
+        _make_illust(db, pid, [url])
+    fake = _FakeSession(redirect_on=url,
+                        redirect_to='https://169.254.169.254/x.jpg')
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
+
+    background._download_illust(pid)
+
+    status, paths, _ = _read(pid)
+    assert status == 'failed'
+    assert paths is None
+    assert fake.kwargs and fake.kwargs[0]['allow_redirects'] is False, '不能跟随重定向'
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))
+    _assert_no_dangling_state(pid)
+
+
+def test_download_uses_cookie_session_for_allowlisted_host(dl_env, monkeypatch):
+    """白名单内主机（Pixiv 官方图床）继续走带凭据会话。"""
+    pid = 81030
+    urls = _urls(pid, 1)
+    with get_session() as db:
+        _make_illust(db, pid, urls)
+    cookie_fake = _FakeSession()
+    anon_fake = _FakeSession()
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: cookie_fake)
+    monkeypatch.setattr(background, 'build_credentialless_session', lambda: anon_fake)
+
+    background._download_illust(pid)
+
+    assert _read(pid)[0] == 'done'
+    assert cookie_fake.calls == urls
+    assert anon_fake.calls == [], '白名单内不该动用无凭据会话'
+
+
+def test_download_uses_credentialless_session_outside_allowlist(dl_env, monkeypatch):
+    """白名单外的公网 https 主机：下载不中断，但绝不携带凭据（S7a+S7b 共用判定）。"""
+    pid = 81031
+    url = 'https://img-cdn.example.net/original/p0.jpg'
+    with get_session() as db:
+        _make_illust(db, pid, [url])
+    cookie_fake = _FakeSession()
+    anon_fake = _FakeSession()
+    anon_fake.headers = {}          # 无凭据会话的替身：没有会话级 Cookie 头
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: cookie_fake)
+    monkeypatch.setattr(background, 'build_credentialless_session', lambda: anon_fake)
+
+    background._download_illust(pid)
+
+    status, paths, _ = _read(pid)
+    assert status == 'done', '换图床域名不该让下载中断'
+    assert paths and os.path.isfile(paths[0])
+    assert anon_fake.calls == [url], '白名单外主机必须走无凭据会话'
+    assert cookie_fake.calls == [], '带凭据会话不得访问白名单外主机'
+    assert 'Cookie' not in anon_fake.headers
+    assert anon_fake.closed and cookie_fake.closed, '两个 session 都要在 finally 里关闭'
+    _assert_no_dangling_state(pid)

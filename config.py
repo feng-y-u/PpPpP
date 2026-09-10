@@ -109,7 +109,16 @@ AUTO_FOLLOW_DOWNLOAD = False # 是否自动下载新作品
 PROXY = ''                   # HTTP/SOCKS5 代理, 如 'http://127.0.0.1:7890', 留空禁用
 
 # SSL 证书验证
-SSL_VERIFY = False           # 生产环境建议设为 True，需安装 CA 证书
+# 默认**开启**：关闭校验意味着链路（代理、网关、公共 WiFi）上的任何中间人都能
+# 读取并篡改流量。只有当"你的代理确实在做 TLS 拦截（用自签根证书解密）"时才设
+# `SSL_VERIFY=false` —— 先跑 `python scripts/check_tls.py` 判定，规则见
+# docs/maintenance.md「8. 公网部署检查清单」。
+SSL_VERIFY = os.environ.get('SSL_VERIFY', 'true').lower() != 'false'
+
+# 图片主机白名单：决定"访问该主机时是否允许携带 Pixiv 凭据"
+# i.pximg.net 是 Pixiv 官方图床。若你自建图片镜像/反代，把它的域名加进来；
+# 白名单外的主机仍可访问（下载引擎、缩略图重定向），但**不带 Cookie**。
+IMAGE_HOST_ALLOWLIST = frozenset({'i.pximg.net'})
 
 # 设置页访问密码（留空则不启用）
 # 可通过环境变量 SETTINGS_PASSWORD 或 settings.json 的 settings_password 设置

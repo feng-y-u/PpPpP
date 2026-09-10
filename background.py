@@ -13,11 +13,12 @@ import helpers
 import runtime
 from sqlalchemy import or_, text, update
 
-from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_EVICT_UNREFRESHED_AFTER,
+from config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
+                    PREFETCH_EVICT_UNREFRESHED_AFTER,
                     PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
                     PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE)
-from fetcher import build_pixiv_session, fetch_following
-from helpers import _get_download_dir, _extract_ext
+from fetcher import build_credentialless_session, build_pixiv_session, fetch_following
+from helpers import _get_download_dir, _extract_ext, check_image_url
 from models import (get_session, Illust, CollectionItem, SearchCache,
                     DownloadLog, safe_commit)
 from runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
@@ -622,6 +623,10 @@ def _start_prefetch_thread() -> None:
 
 
 # ── 下载引擎与生命周期 ──
+class _UnsafeImageUrl(Exception):
+    """下载地址未通过硬性校验，或下载请求发生重定向（不跟随、直接判失败）。"""
+
+
 download_locks: dict[int, threading.Lock] = {}
 # 保护 download_locks 自身的读写。setdefault 单次调用虽是原子的，但"取出锁"
 # 与 finally 里的"删除锁"之间跨越了整个下载过程：若任务 A 在 release 之后、
@@ -695,7 +700,10 @@ def _download_illust(pixiv_id: int) -> None:
                 _queued_downloads.discard(pixiv_id)
             return
         _download_progress[pixiv_id] = {'current': 0, 'total': 0}
+        # 两个 session 都在 try 外先置 None：finally 必须无条件可引用（下面有多条
+        # 提前 return 的路径根本走不到会话构造）
         session_obj = None
+        anon_session_obj = None
         with get_session() as db:
             illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if not illust:
@@ -729,6 +737,9 @@ def _download_illust(pixiv_id: int) -> None:
             work_dir = _get_download_dir(pixiv_id)
             os.makedirs(work_dir, exist_ok=True)
 
+            # 逐条地址校验 + 凭据分级：白名单内主机带 Cookie；白名单外的**公网**
+            # 主机改用无凭据会话（Pixiv 将来换图床域名时下载不中断，同时不会把
+            # PHPSESSID 交给第三方）。校验不通过的地址直接判失败，一个请求都不发。
             session_obj = build_pixiv_session()
 
             local_paths = []
@@ -736,11 +747,27 @@ def _download_illust(pixiv_id: int) -> None:
                 if pixiv_id in download_cancellations:
                     break
                 try:
+                    host, reject = check_image_url(url)
+                    if reject:
+                        raise _UnsafeImageUrl(f'非法图片地址（{reject}）: {url}')
+                    if host in IMAGE_HOST_ALLOWLIST:
+                        active_session = session_obj
+                    else:
+                        if anon_session_obj is None:
+                            anon_session_obj = build_credentialless_session()
+                        active_session = anon_session_obj
                     ext = _extract_ext(url)
                     filename = f'{pixiv_id}_p{i}.{ext}'
                     filepath = os.path.join(work_dir, filename)
 
-                    resp = session_obj.get(url, timeout=(10, 60), stream=True)
+                    # allow_redirects=False：图片地址不该跳转，跟随等于把请求
+                    # （连同会话头）交给 Location 指定的任意主机
+                    resp = active_session.get(url, timeout=(10, 60), stream=True,
+                                              allow_redirects=False)
+                    if resp.is_redirect:
+                        raise _UnsafeImageUrl(
+                            f'图片地址发生重定向（{resp.status_code} → '
+                            f'{resp.headers.get("Location") or "?"}），已拒绝跟随')
                     resp.raise_for_status()
                     with open(filepath, 'wb') as f:
                         for chunk in resp.iter_content(chunk_size=8192):
@@ -762,7 +789,10 @@ def _download_illust(pixiv_id: int) -> None:
                     except OSError:
                         pass
                     illust.download_status = 'failed'
-                    db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message=f'下载失败: 第 {i} 页'))
+                    # 非法地址/重定向把原因写进日志行（用户可在下载管理页看到），
+                    # 普通下载失败保持原有文案不变
+                    detail = str(e) if isinstance(e, _UnsafeImageUrl) else f'第 {i} 页'
+                    db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message=f'下载失败: {detail}'))
                     _rescue_commit(db, pixiv_id, stage=f'下载失败（第 {i} 页）')
                     return
 
@@ -814,6 +844,8 @@ def _download_illust(pixiv_id: int) -> None:
     finally:
         if session_obj is not None:
             session_obj.close()  # 释放连接池，防止长驻进程累积 socket
+        if anon_session_obj is not None:
+            anon_session_obj.close()
         _download_progress.pop(pixiv_id, None)
         lock.release()
         _release_download_lock(pixiv_id, lock)

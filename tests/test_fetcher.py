@@ -727,6 +727,53 @@ class TestPooledSession:
         assert fetcher.get_pooled_session() is not first
 
 
+class TestCredentiallessSession:
+    """白名单外主机必须用无凭据会话（审计 S7a）。
+
+    `build_pixiv_session()` 挂的是**会话级** `Cookie` 头，requests 会把它发给任意
+    主机 —— 访问非 Pixiv 图床域名时必须显式摘掉，否则等于交出 PHPSESSID。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_cookie(self, monkeypatch, tmp_path):
+        cookie = tmp_path / 'cookies.txt'
+        cookie.write_text('PHPSESSID=test-cookie\n')
+        monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(cookie))
+        monkeypatch.setattr(fetcher, '_cookie_mtime', 0)
+        monkeypatch.setattr(fetcher, '_cookie_value', '')
+
+    def test_build_session_carries_cookie(self):
+        s = fetcher.build_pixiv_session()
+        try:
+            assert 'PHPSESSID=test-cookie' in s.headers.get('Cookie', '')
+        finally:
+            s.close()
+
+    def test_credentialless_session_has_no_cookie_at_all(self):
+        s = fetcher.build_credentialless_session()
+        try:
+            assert 'Cookie' not in s.headers, '会话级 Cookie 头必须摘掉（否则会发给任意主机）'
+            assert s.cookies.get_dict() == {}, '域级 Cookie 也要清掉，做到名副其实'
+        finally:
+            s.close()
+
+    def test_session_verify_follows_config(self, monkeypatch):
+        """SSL_VERIFY 必须在建 session 时就生效（默认 True 才有意义）。"""
+        monkeypatch.setattr(fetcher, 'SSL_VERIFY', False)
+        s = fetcher.build_pixiv_session()
+        try:
+            assert s.verify is False
+        finally:
+            s.close()
+
+        monkeypatch.setattr(fetcher, 'SSL_VERIFY', True)
+        s = fetcher.build_pixiv_session()
+        try:
+            assert s.verify is True
+        finally:
+            s.close()
+
+
 class TestFetchFollowingR18Filter:
     """关注列表 R18 过滤：safe 模式必须按标签过滤 R-18/R-18G。
 
