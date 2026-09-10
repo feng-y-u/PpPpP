@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import fetcher
 import helpers
 import runtime
-from sqlalchemy import or_, text
+from sqlalchemy import or_, text, update
 
 from config import (PAGE_DOWNLOAD_INTERVAL, PREFETCH_EVICT_UNREFRESHED_AFTER,
                     PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
@@ -695,12 +695,37 @@ def _download_illust(pixiv_id: int) -> None:
                 illust.download_status = None
                 db.add(DownloadLog(pixiv_id=pixiv_id, action='cancelled', message=f'已取消, 删除了 {len(local_paths)} 个已下载文件'))
             else:
-                illust.local_paths_list = local_paths
-                illust.download_status = 'done'
-                illust.downloaded_at = datetime.now(timezone.utc)
                 total_size = sum(os.path.getsize(p) for p in local_paths if os.path.isfile(p))
-                illust.file_size = total_size
-                db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
+                # 状态写入用条件更新（CAS）：只有仍是 downloading 的行才允许固化为
+                # done。reset 会在"最后一次取消检查"之后、本次写入之前把状态置空并
+                # 删掉文件；无条件赋值会留下 DB=done 而磁盘无文件的幻影状态 —— 图库
+                # 显示已下载、点开全 404，trigger 被 done 挡回、reset 被状态守卫挡回，
+                # 用户只剩"删稿重下"一条路。
+                claimed = db.execute(
+                    update(Illust)
+                    .where(Illust.pixiv_id == pixiv_id,
+                           Illust.download_status == 'downloading')
+                    .values(download_status='done',
+                            local_paths=json.dumps(local_paths, ensure_ascii=False),
+                            downloaded_at=datetime.now(timezone.utc),
+                            file_size=total_size)
+                ).rowcount
+                if claimed:
+                    db.add(DownloadLog(pixiv_id=pixiv_id, action='done', message=f'下载完成: {len(local_paths)} 个文件, {total_size} 字节'))
+                else:
+                    # 重置已抢先接管（状态不再是 downloading）：不固化 done，清掉
+                    # 本轮文件并留痕，避免把不存在的下载报成成功。
+                    for p in local_paths:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass  # reset 可能已删除这些文件
+                    try:
+                        os.rmdir(work_dir)
+                    except OSError:
+                        pass
+                    db.add(DownloadLog(pixiv_id=pixiv_id, action='cancelled',
+                                       message=f'重置已抢先完成, 放弃本轮 {len(local_paths)} 个文件'))
             safe_commit(db)
     finally:
         if session_obj is not None:

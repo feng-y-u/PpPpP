@@ -10,6 +10,7 @@ import zipfile
 from io import BytesIO
 
 from flask import Blueprint, Response, jsonify, render_template, request, send_file
+from sqlalchemy import update
 
 from background import _download_illust
 from helpers import _fetch_original_urls, _get_download_dir
@@ -86,10 +87,25 @@ def _cancel_download_internal(pixiv_id: int, reset: bool = False) -> Response:
         if illust.download_status != 'downloading' and not is_queued:
             return jsonify({'error': '该作品未在下载中'}), 400
 
-        _queued_downloads.discard(pixiv_id)
-        download_cancellations.add(pixiv_id)
-
         if reset:
+            # 先原子地"抢下"这次重置：只有仍是 downloading 的行才归本次处置。
+            # 守卫读取与这里之间 worker 可能刚好把状态固化为 done —— 旧实现无条件
+            # 删文件 + 置空会造成两种不一致：删掉刚下载成功的文件，或（反向）worker
+            # 随后把 done 写回已删文件的幻影状态。
+            claimed = db.execute(
+                update(Illust)
+                .where(Illust.pixiv_id == pixiv_id,
+                       Illust.download_status == 'downloading')
+                .values(download_status=None)
+            ).rowcount
+            if not claimed and not is_queued:
+                # worker 已提交终态：不删文件、不加取消标记（标记加了没人清，会静默
+                # 吞掉用户的下一次下载触发），让前端刷新看到真实状态。
+                return jsonify({'error': '下载已结束，未执行重置', 'status': 'finished'}), 409
+
+            _queued_downloads.discard(pixiv_id)
+            download_cancellations.add(pixiv_id)
+
             work_dir = _get_download_dir(pixiv_id)
             if os.path.isdir(work_dir):
                 for f in os.listdir(work_dir):
@@ -109,6 +125,9 @@ def _cancel_download_internal(pixiv_id: int, reset: bool = False) -> Response:
             # 启动，worker 启动时的取消检查也会走 finally 清理。
             return jsonify({'status': 'reset', 'message': '已重置'}), 200
 
+        # 普通取消：尽力而为（worker 在下一个检查点感知），不动文件与状态
+        _queued_downloads.discard(pixiv_id)
+        download_cancellations.add(pixiv_id)
         return jsonify({'status': 'cancelling', 'message': '正在取消...'}), 200
 
 
