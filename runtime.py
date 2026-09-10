@@ -67,6 +67,27 @@ download_cancellations: set[int] = set()
 _queued_downloads: set[int] = set()
 _download_progress: dict[int, dict] = {}
 
+# `_queued_downloads` 的并发纪律（2026-09-10 审计 S3）：请求线程（trigger /
+# batch / cancel）、后台 worker（`_download_illust` 的 discard）、容量清理与最终
+# 收藏数刷新都要碰它。裸 set 有两个问题：① `list(set)` 与并发 discard 交错会抛
+# `RuntimeError: Set changed size during iteration`（`/api/downloads` 每次刷新都
+# 遍历）；② 队列判定是"读 → 判定 → 写"序列，分开执行会各自读到未计入对方的中间
+# 状态。约定：**写点一律 `with _download_queue_lock`，读点一律走下面两个 helper**
+# （单元素判定 `is_queued_download`、遍历 `queued_download_snapshot`）。
+_download_queue_lock = threading.Lock()
+
+
+def queued_download_snapshot() -> set[int]:
+    """`_queued_downloads` 的一致快照：所有遍历/批量判定都走这里。"""
+    with _download_queue_lock:
+        return set(_queued_downloads)
+
+
+def is_queued_download(pixiv_id: int) -> bool:
+    """单元素队列判定（加锁读，与其他读写点看到同一状态）。"""
+    with _download_queue_lock:
+        return pixiv_id in _queued_downloads
+
 # ── 简单内存限流器 ──
 # 清理计数器 _rate_limit_cleanup_counter 已随 _rate_limit 迁至 middleware.py
 #（函数内 global 声明指向其定义模块，单一归属；此处仅保留原地修改的 store）。

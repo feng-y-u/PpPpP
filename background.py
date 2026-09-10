@@ -22,6 +22,8 @@ from models import (get_session, Illust, CollectionItem, SearchCache,
                     DownloadLog, safe_commit)
 from runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
                      _queued_downloads, _download_progress,
+                     _download_queue_lock, is_queued_download,
+                     queued_download_snapshot,
                      download_cancellations, download_executor)
 
 logger = logging.getLogger(__name__)
@@ -131,7 +133,8 @@ def _auto_follow_worker() -> None:
             # 先 commit 再提交下载任务：_download_illust 需要能查到已持久化的
             # Illust 行，否则会在"行不存在"时静默跳过下载（竞态）。
             for pid in download_pids:
-                _queued_downloads.add(pid)
+                with _download_queue_lock:
+                    _queued_downloads.add(pid)
                 download_executor.submit(_download_illust, pid)
             new_count = len(new_illusts)
             _auto_follow_state['last_check'] = datetime.now(timezone.utc).isoformat()
@@ -369,8 +372,13 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
                     illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
                     if not illust or illust.prefetch_refresh_at is not None:
                         continue
+                    # 排队中（worker 还没把状态写成 downloading）同样受保护：否则
+                    # "queued → 首个 commit"窗口内被删行，下载会静默消失。
+                    # 逐条取快照（而非整轮一次），与本函数"循环中新增收藏仍可能被
+                    # 删"的既有取向一致 —— 本循环每轮要发网络请求，窗口很长。
                     protected = (illust.download_status in ('done', 'downloading')
                                  or illust.local_paths_list
+                                 or is_queued_download(pid)
                                  or _is_user_owned(db, pid))
                     if detail is fetcher.DEAD_DETAIL:
                         if not protected:
@@ -470,7 +478,7 @@ def _naive_utc(value):
 def _prefetch_capacity_cleanup() -> None:
     """容量清理：超出上限时按"已刷新优先、低收藏优先"淘汰，保证上限压得住。
 
-    三层（都跳过已下载/下载中/用户拥有过的作品）：
+    三层（都跳过已下载/下载中/排队中/用户拥有过的作品）：
     1. **已最终刷新**的作品——收藏数信号可信，优先淘汰；
     2. **未刷新但推不动**的作品（刷新失败过，或入库超过
        PREFETCH_EVICT_UNREFRESHED_AFTER）——刷新队列已证明它刷不出来，别占容量；
@@ -488,6 +496,9 @@ def _prefetch_capacity_cleanup() -> None:
         need_free = count - max_illusts
 
         fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
+        # 排队中的下载也要保护：worker 尚未把状态写成 downloading，但用户已经点过
+        # 下载。"queued → 首个 commit"窗口内删行会让下载静默消失（审计 S3）。
+        queued_pids = queued_download_snapshot()
         # 用户操作过下载的作品（含失败/取消待重试）不当缓存垃圾；缓存清理自己写的
         # prefetch_deleted 不算（否则同一 pid 再次入库后会获得"永久保护"）
         dl_pids = {
@@ -503,6 +514,8 @@ def _prefetch_capacity_cleanup() -> None:
             if i.download_status in ('done', 'downloading') or i.local_paths_list:
                 continue
             if i.pixiv_id in fav_ids or i.pixiv_id in dl_pids:
+                continue
+            if i.pixiv_id in queued_pids:
                 continue
             if i.prefetch_refresh_at is not None:
                 tiers[0].append(i)
@@ -660,16 +673,24 @@ def _download_illust(pixiv_id: int) -> None:
         if pixiv_id in download_cancellations:
             # 任务被取消/重置后才轮到本线程启动（queued 场景）：不再开始下载。
             # 取消标记由 finally 清理。
-            _queued_downloads.discard(pixiv_id)
+            with _download_queue_lock:
+                _queued_downloads.discard(pixiv_id)
             return
         _download_progress[pixiv_id] = {'current': 0, 'total': 0}
         session_obj = None
         with get_session() as db:
             illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if not illust:
+                # 行已被清理（容量清理、缓存页删除、用户在别处删稿）→ 不下载，但
+                # 必须留痕：旧实现直接 return，用户点了下载却什么都没发生，日志里
+                # 也查不到任何记录（审计 S3）。
+                db.add(DownloadLog(pixiv_id=pixiv_id, action='failed',
+                                   message='作品行已被清理，下载未执行'))
+                _rescue_commit(db, pixiv_id, stage='作品行缺失')
                 return
 
-            _queued_downloads.discard(pixiv_id)
+            with _download_queue_lock:
+                _queued_downloads.discard(pixiv_id)
             illust.download_status = 'downloading'
             db.add(DownloadLog(pixiv_id=pixiv_id, action='start', message=f'开始下载: {illust.title or pixiv_id}'))
             if not _rescue_commit(db, pixiv_id, stage='开始下载'):
@@ -779,7 +800,8 @@ def _download_illust(pixiv_id: int) -> None:
         lock.release()
         _release_download_lock(pixiv_id, lock)
         download_cancellations.discard(pixiv_id)
-        _queued_downloads.discard(pixiv_id)
+        with _download_queue_lock:
+            _queued_downloads.discard(pixiv_id)
 
 
 _auto_follow_thread: threading.Thread | None = None

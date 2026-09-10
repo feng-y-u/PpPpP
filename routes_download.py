@@ -17,6 +17,8 @@ from helpers import _fetch_original_urls, _get_download_dir
 from middleware import _csrf_required, _get_csrf_token, _get_json_body
 from models import DownloadLog, Illust, get_session, safe_commit
 from runtime import (_download_progress, _queued_downloads,
+                     _download_queue_lock, is_queued_download,
+                     queued_download_snapshot,
                      download_cancellations, download_executor)
 
 bp = Blueprint('download', __name__)
@@ -34,7 +36,7 @@ def trigger_download(pixiv_id: int) -> Response:
             return jsonify({'status': 'done', 'message': '已下载'})
 
         if illust.download_status == 'downloading':
-            if pixiv_id in _download_progress or pixiv_id in _queued_downloads:
+            if pixiv_id in _download_progress or is_queued_download(pixiv_id):
                 return jsonify({'status': 'downloading', 'message': '下载中'})
             # 幽灵 downloading：worker 已不在（终态写入提交失败、进程异常退出，
             # 或上次运行遗留）。运行期没有别的自愈路径 —— 这里直接返回"下载中"
@@ -61,7 +63,8 @@ def trigger_download(pixiv_id: int) -> Response:
             illust.original_urls_list = urls
             safe_commit(db)
 
-    _queued_downloads.add(pixiv_id)
+    with _download_queue_lock:
+        _queued_downloads.add(pixiv_id)
     download_executor.submit(_download_illust, pixiv_id)
     return jsonify({'status': 'accepted', 'message': '已加入下载队列'})
 
@@ -88,7 +91,8 @@ def batch_download() -> Response:
             if illust.download_status in ('done', 'downloading'):
                 skipped += 1
                 continue
-            _queued_downloads.add(pid)
+            with _download_queue_lock:
+                _queued_downloads.add(pid)
             download_executor.submit(_download_illust, pid)
             accepted += 1
 
@@ -101,7 +105,7 @@ def _cancel_download_internal(pixiv_id: int, reset: bool = False) -> Response:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
         if not illust:
             return jsonify({'error': '作品不存在'}), 404
-        is_queued = pixiv_id in _queued_downloads
+        is_queued = is_queued_download(pixiv_id)
         if illust.download_status != 'downloading' and not is_queued:
             return jsonify({'error': '该作品未在下载中'}), 400
 
@@ -121,7 +125,8 @@ def _cancel_download_internal(pixiv_id: int, reset: bool = False) -> Response:
                 # 吞掉用户的下一次下载触发），让前端刷新看到真实状态。
                 return jsonify({'error': '下载已结束，未执行重置', 'status': 'finished'}), 409
 
-            _queued_downloads.discard(pixiv_id)
+            with _download_queue_lock:
+                _queued_downloads.discard(pixiv_id)
             download_cancellations.add(pixiv_id)
 
             work_dir = _get_download_dir(pixiv_id)
@@ -144,7 +149,8 @@ def _cancel_download_internal(pixiv_id: int, reset: bool = False) -> Response:
             return jsonify({'status': 'reset', 'message': '已重置'}), 200
 
         # 普通取消：尽力而为（worker 在下一个检查点感知），不动文件与状态
-        _queued_downloads.discard(pixiv_id)
+        with _download_queue_lock:
+            _queued_downloads.discard(pixiv_id)
         download_cancellations.add(pixiv_id)
         return jsonify({'status': 'cancelling', 'message': '正在取消...'}), 200
 
@@ -239,7 +245,7 @@ def downloads_page() -> str:
 def api_downloads() -> Response:
     with get_session() as db:
         active = db.query(Illust).filter(Illust.download_status == 'downloading').order_by(Illust.created_at.desc()).all()
-        queued_ids = list(_queued_downloads)
+        queued_ids = queued_download_snapshot()
         queued = db.query(Illust).filter(Illust.pixiv_id.in_(queued_ids)).order_by(Illust.created_at.desc()).all() if queued_ids else []
         completed = db.query(Illust).filter(Illust.download_status == 'done').order_by(Illust.downloaded_at.desc().nullslast()).limit(30).all()
         logs = (

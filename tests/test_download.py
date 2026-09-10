@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -26,6 +27,7 @@ import background
 import routes_download
 from models import DownloadLog, Illust, get_session, safe_commit
 from runtime import (_download_progress, _queued_downloads,
+                     _download_queue_lock, is_queued_download,
                      download_cancellations)
 
 
@@ -97,11 +99,18 @@ def _read(pid: int) -> tuple[str | None, list[str] | None, list[str]]:
         return row.download_status, row.local_paths_list, actions
 
 
+def _enqueue(pid: int) -> None:
+    """按生产纪律入队（写点必须在队列锁内）。"""
+    with _download_queue_lock:
+        _queued_downloads.add(pid)
+
+
 def _assert_no_dangling_state(pid: int):
     """下载结束后不得残留锁、取消标记或进度条目。"""
     assert pid not in background.download_locks
     assert pid not in download_cancellations
     assert pid not in _download_progress
+    assert not is_queued_download(pid)
 
 
 # ── 正常路径 ──
@@ -498,7 +507,7 @@ def test_ghost_detection_keeps_live_download(dl_env, clean_db, monkeypatch, clie
     if signal == 'progress':
         _download_progress[pid] = {'current': 1, 'total': 2}
     else:
-        _queued_downloads.add(pid)
+        _enqueue(pid)
     executor = _SyncExecutor()
     monkeypatch.setattr(routes_download, 'download_executor', executor)
 
@@ -513,3 +522,125 @@ def test_ghost_detection_keeps_live_download(dl_env, clean_db, monkeypatch, clie
                 db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
     assert not any('残留 downloading' in m for m in msgs)
     assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))
+
+
+# ── 队列窗口（S3）──
+
+def test_download_missing_row_logs_failed(dl_env, monkeypatch):
+    """排队期间作品行被清理 → 不下载，但必须留下失败日志（旧实现无痕消失）。"""
+    pid = 80301                       # 队列里有它，但库里没有这一行
+    fake = _FakeSession()
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
+    _enqueue(pid)
+
+    background._download_illust(pid)
+
+    assert fake.calls == [], '行不存在时不应发起任何下载请求'
+    with get_session() as db:
+        logs = db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()
+    assert [l.action for l in logs] == ['failed']
+    assert '作品行已被清理' in logs[0].message
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))
+    _assert_no_dangling_state(pid)
+
+
+class _LockAuditedSet(set):
+    """访问 `_queued_downloads` 时记录是否持有队列锁（供纪律测试断言）。
+
+    只记录不抛：一次跑完能拿到全部违规点，而不是"谁先撞上算谁"。
+    """
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.violations: list[str] = []
+
+    def _audit(self, op: str) -> None:
+        if not _download_queue_lock.locked():
+            self.violations.append(op)
+
+    def __iter__(self):
+        self._audit('iter')
+        return super().__iter__()
+
+    def add(self, item):
+        self._audit('add')
+        return super().add(item)
+
+    def discard(self, item):
+        self._audit('discard')
+        return super().discard(item)
+
+    def __contains__(self, item):
+        self._audit('contains')
+        return super().__contains__(item)
+
+
+def test_queued_download_access_always_under_lock(dl_env, clean_db, monkeypatch, client, app):
+    """纪律守卫：所有 `_queued_downloads` 读写都必须持锁，且只经 snapshot/判定 helper。
+
+    用带审计的 set 替换三个模块里的绑定（每个模块各自 from-import 了一份引用），
+    再把主要生产路径跑一遍，最后一次性列出所有未持锁的访问。
+    """
+    pid = 80302
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+
+    guarded = _LockAuditedSet()
+    import runtime
+    for module in (runtime, background, routes_download):
+        monkeypatch.setattr(module, '_queued_downloads', guarded)
+
+    _finish = _SyncExecutor()             # 同步执行，让 worker 的 discard 也走到
+    monkeypatch.setattr(routes_download, 'download_executor', _finish)
+
+    # 1) 触发下载（add）→ 2) worker 全程（3 处 discard）→ 3) 取消（读 + discard）
+    resp = _post_download(client, pid)
+    assert resp.status_code == 200 and resp.get_json()['status'] == 'accepted'
+    background._download_illust(pid)      # 覆盖 cancel-early-return / 正常路径的 discard
+    with app.app_context():
+        routes_download._cancel_download_internal(pid, reset=True)
+    assert client.get('/api/downloads').status_code == 200      # 遍历读点
+
+    assert guarded.violations == [], f'存在未持锁访问：{guarded.violations}'
+
+
+def test_api_downloads_survives_concurrent_queue_mutation(dl_env, clean_db, client):
+    """并发改队列时 /api/downloads 始终可用，且 queued 列表自洽（快照语义）。"""
+    pids = list(range(80400, 80420))
+    with get_session() as db:
+        for pid in pids:
+            _make_illust(db, pid, _urls(pid, 1))
+
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def _mutate():
+        n = 0
+        while not stop.is_set():
+            n += 1
+            pid = pids[n % len(pids)]
+            with _download_queue_lock:
+                _queued_downloads.add(pid)
+            with _download_queue_lock:
+                _queued_downloads.discard(pid)
+            # 让出 GIL：纯 Python 紧凑循环会把主线程饿死（实测 150 次请求从 1s
+            # 拖到 22s），那样测的是 GIL 而不是并发正确性。
+            time.sleep(0.0005)
+
+    mutator = threading.Thread(target=_mutate, daemon=True)
+    mutator.start()
+    try:
+        for _ in range(40):
+            resp = client.get('/api/downloads')
+            assert resp.status_code == 200
+            for item in resp.get_json()['queued']:
+                assert item['pixiv_id'] in pids
+    except BaseException as e:      # noqa: BLE001 —— 记录后统一断言，便于打印原异常
+        errors.append(e)
+    finally:
+        stop.set()
+        mutator.join(10)
+
+    assert not errors, f'并发下 /api/downloads 出错：{errors!r}'
+    assert not mutator.is_alive()

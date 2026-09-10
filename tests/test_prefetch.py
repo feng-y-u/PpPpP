@@ -141,6 +141,35 @@ class TestCapacityCleanup:
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
         assert remaining == {2}  # 只有无下载日志的低收藏作品被淘汰
 
+    def test_capacity_cleanup_keeps_queued_download(self, clean_db, monkeypatch):
+        """排队中（worker 还没把状态写成 downloading）的作品不能被容量清理删掉。
+
+        审计 S3：trigger 入队 → worker 首个 commit 之间，行状态仍是 None 且没有
+        任何 DownloadLog（`_is_user_owned` 也判不出），旧实现会把它当缓存垃圾淘汰，
+        worker 随后查不到行 → 下载静默消失。
+        """
+        import runtime
+        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        clean_db.add_all([
+            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=10,
+                   prefetch_refresh_at=refreshed),
+            # 收藏数为 0：不设保护时它才是被淘汰的那个（保证用例能否证伪）
+            Illust(pixiv_id=2, title='queued', prefetch_source=1, bookmark_count=0,
+                   prefetch_refresh_at=refreshed),
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 1)
+        with runtime._download_queue_lock:
+            runtime._queued_downloads.add(2)
+        try:
+            app._prefetch_capacity_cleanup()
+        finally:
+            with runtime._download_queue_lock:
+                runtime._queued_downloads.discard(2)
+
+        remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
+        assert remaining == {2}, '排队中的下载不能被容量清理淘汰'
+
     def test_capacity_cleanup_ignores_prefetch_deleted_log(self, clean_db, monkeypatch):
         """缓存清理自己写的 prefetch_deleted 不算"用户拥有"，否则会永久保护。"""
         from models import DownloadLog
@@ -554,6 +583,29 @@ class TestPrefetchRefreshBookmarks:
         assert illust is not None  # 已下载保护，不删
         assert illust.bookmark_count == 3
         assert illust.prefetch_refresh_at is not None
+
+    def test_refresh_pass_keeps_queued_download(self, clean_db, monkeypatch):
+        """排队中的作品即使详情已永久失效（DEAD_DETAIL）也不能被刷新清理删掉。
+
+        审计 S3：这个窗口里行状态是 None、也没有 DownloadLog，`_is_user_owned`
+        判不出来，旧实现会直接删行 → 排队中的下载静默消失。
+        """
+        import runtime
+        self._old_illust(clean_db, 5011)
+        clean_db.add(SearchCache(tag='t', illust_ids='[5011]', status='done'))
+        safe_commit(clean_db)
+        self._mock_dead_detail(monkeypatch)
+        with runtime._download_queue_lock:
+            runtime._queued_downloads.add(5011)
+        try:
+            app._prefetch_refresh_bookmarks()
+        finally:
+            with runtime._download_queue_lock:
+                runtime._queued_downloads.discard(5011)
+
+        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5011).first()
+        assert illust is not None, '排队中的下载不能被最终收藏数刷新删掉'
+        assert illust.prefetch_refresh_at is not None  # kept_dead：保留并标记完成
 
     def test_refresh_skips_fresh_illusts(self, clean_db, monkeypatch):
         from datetime import timedelta
