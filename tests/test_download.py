@@ -13,18 +13,20 @@ reset 先抢状态、抢到才删文件，抢不到就原样返回 409。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from contextlib import contextmanager
 
 import pytest
+from sqlalchemy import update as sa_update
+from sqlalchemy.exc import OperationalError
 
 import background
 import routes_download
 from models import DownloadLog, Illust, get_session, safe_commit
 from runtime import (_download_progress, _queued_downloads,
                      download_cancellations)
-from sqlalchemy import update as sa_update
 
 
 class _FakeResponse:
@@ -330,3 +332,184 @@ def test_reset_racing_worker_never_leaves_phantom_done(dl_env, clean_db, monkeyp
             assert paths is None or paths == []
             assert 'done' not in actions
         _assert_no_dangling_state(pid)
+
+
+# ── 提交失败（S2）：不得让作品卡在 downloading ──
+
+def _fail_commit_on(monkeypatch, call_no: int, *, before_raise=None) -> dict:
+    """让 background.safe_commit 在第 call_no 次调用时失败。
+
+    替身保持真实语义：**先 rollback 再抛** —— safe_commit 的契约就是失败即回滚，
+    不还原这一点会让被救路径看到"事务里已写好的 done"，测出假象。
+    """
+    real = background.safe_commit
+    calls = {'n': 0, 'raised': 0}
+
+    def _flaky(db, *args, **kwargs):
+        calls['n'] += 1
+        if calls['n'] == call_no:
+            calls['raised'] += 1
+            db.rollback()
+            if before_raise is not None:
+                before_raise()
+            raise OperationalError('UPDATE illusts', {},
+                                   Exception('database is locked'))
+        return real(db, *args, **kwargs)
+
+    monkeypatch.setattr(background, 'safe_commit', _flaky)
+    return calls
+
+
+def test_download_terminal_commit_failure_resets_to_failed(dl_env, monkeypatch, caplog):
+    """完成态写入失败 → 复位为 failed，绝不留在 downloading（审计 S2 核心）。"""
+    pid = 80201
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+    calls = _fail_commit_on(monkeypatch, 2)      # 1=开始下载，2=下载结束
+
+    with caplog.at_level(logging.ERROR, logger='background'):
+        background._download_illust(pid)
+
+    assert calls['raised'] == 1
+    status, paths, actions = _read(pid)
+    assert status == 'failed', '提交失败必须复位为 failed，不能卡在 downloading'
+    with get_session() as db:
+        msgs = [log.message for log in
+                db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
+    assert any('状态写入失败' in m for m in msgs), '复位要留痕'
+    assert 'done' not in actions
+    assert '下载状态提交失败' in caplog.text, '必须留下 logger.error 供运维排查'
+    _assert_no_dangling_state(pid)
+
+
+def test_download_failure_commit_failure_resets_to_failed(dl_env, monkeypatch):
+    """失败态写入也提交失败 → 仍要复位，不能因为一次失败而永久卡死。"""
+    pid = 80202
+    urls = _urls(pid, 2)
+    with get_session() as db:
+        _make_illust(db, pid, urls)
+    monkeypatch.setattr(background, 'build_pixiv_session',
+                        lambda: _FakeSession(fail_on=urls[1]))
+    _fail_commit_on(monkeypatch, 2)
+
+    background._download_illust(pid)
+
+    status, paths, actions = _read(pid)
+    assert status == 'failed'
+    assert paths is None
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))
+    _assert_no_dangling_state(pid)
+
+
+def test_download_start_commit_failure_aborts_without_touching_state(dl_env, monkeypatch):
+    """起始状态没落库 → 不下载（否则结尾 CAS 必然失败，白下载一轮再自删）。"""
+    pid = 80203
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    fake = _FakeSession()
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
+    _fail_commit_on(monkeypatch, 1)
+
+    background._download_illust(pid)
+
+    assert fake.calls == [], '起始提交失败后不应发起任何下载请求'
+    status, paths, actions = _read(pid)
+    assert status is None and paths is None
+    assert actions == [], '回滚后不应残留 start 日志'
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))
+    _assert_no_dangling_state(pid)
+
+
+def test_rescue_does_not_clobber_state_taken_over_by_others(dl_env, monkeypatch):
+    """终态提交失败但行已被别的路径（如 reset）置空 → 复位不得覆盖，只记日志。"""
+    pid = 80204
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+
+    def _reset_wins():
+        with get_session() as other:
+            other.execute(sa_update(Illust).where(Illust.pixiv_id == pid)
+                          .values(download_status=None))
+            safe_commit(other)
+
+    _fail_commit_on(monkeypatch, 2, before_raise=_reset_wins)
+
+    background._download_illust(pid)
+
+    status, paths, actions = _read(pid)
+    assert status is None, 'reset 的结果不能被复位逻辑覆盖成 failed'
+    with get_session() as db:
+        msgs = [log.message for log in
+                db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
+    assert not any('状态写入失败' in m for m in msgs), '没救到东西就不该写复位日志'
+    _assert_no_dangling_state(pid)
+
+
+# ── 幽灵 downloading 自愈（S2 第二半，routes_download）──
+
+class _SyncExecutor:
+    """把 submit 变成同步执行，让下载在请求内跑完，便于断言最终状态。"""
+
+    def __init__(self):
+        self.submitted: list[int] = []
+
+    def submit(self, fn, *args, **kwargs):
+        self.submitted.append(args[0] if args else None)
+        fn(*args, **kwargs)
+
+
+def _post_download(client, pid: int):
+    token = client.get('/csrf-token').get_json()['token']
+    return client.post(f'/download/{pid}', headers={'X-CSRF-Token': token})
+
+
+def test_trigger_download_recovers_ghost_downloading(dl_env, clean_db, monkeypatch, client):
+    """状态停在 downloading 但 worker 已不在 → 自动复位并真正重新下载。"""
+    pid = 80205
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1), status='downloading')
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+    executor = _SyncExecutor()
+    monkeypatch.setattr(routes_download, 'download_executor', executor)
+    assert pid not in _download_progress and pid not in _queued_downloads
+
+    resp = _post_download(client, pid)
+
+    assert resp.status_code == 200 and resp.get_json()['status'] == 'accepted'
+    assert executor.submitted == [pid], '幽灵状态应被复位后继续正常下载'
+    status, paths, actions = _read(pid)
+    assert status == 'done'
+    assert paths and all(os.path.isfile(p) for p in paths)
+    with get_session() as db:
+        msgs = [log.message for log in
+                db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
+    assert any('残留 downloading' in m for m in msgs)
+    _assert_no_dangling_state(pid)
+
+
+@pytest.mark.parametrize('signal', ['progress', 'queued'])
+def test_ghost_detection_keeps_live_download(dl_env, clean_db, monkeypatch, client, signal):
+    """实际在跑的下载（进度中/排队中）不能被误判成幽灵而复位。"""
+    pid = 80206
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1), status='downloading')
+    if signal == 'progress':
+        _download_progress[pid] = {'current': 1, 'total': 2}
+    else:
+        _queued_downloads.add(pid)
+    executor = _SyncExecutor()
+    monkeypatch.setattr(routes_download, 'download_executor', executor)
+
+    resp = _post_download(client, pid)
+
+    assert resp.status_code == 200 and resp.get_json()['status'] == 'downloading'
+    assert executor.submitted == []
+    status, _, actions = _read(pid)
+    assert status == 'downloading'
+    with get_session() as db:
+        msgs = [log.message for log in
+                db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
+    assert not any('残留 downloading' in m for m in msgs)
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))

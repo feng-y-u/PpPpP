@@ -608,6 +608,48 @@ def _release_download_lock(pixiv_id: int, lock: threading.Lock) -> None:
             download_locks.pop(pixiv_id, None)
 
 
+def _rescue_commit(db, pixiv_id: int, *, stage: str) -> bool:
+    """提交下载状态变更；失败时不让作品卡在 downloading，返回是否提交成功。
+
+    `safe_commit` 的语义是失败即 rollback + 原样抛出（不做内部重试）。若**终态**
+    写入（done / failed / 无原图）提交失败，回滚会让作品永远停在 'downloading'：
+    `_reset_stuck_downloads` 只在启动时跑，运行期没有任何自愈路径 —— 用户既不能
+    重新触发下载（trigger 直接返回"下载中"），进度条也永远不动。
+
+    失败后尽力把**仍是 downloading** 的行复位为 failed 并留痕；复位再失败只记
+    日志、不冒泡（数据库确实不可写时任何写入都救不了，等重启自愈）。复位用条件
+    更新，避免覆盖已由别的路径（如 reset 抢先置空）写好的状态。
+    """
+    try:
+        safe_commit(db)
+        return True
+    except Exception as e:
+        logger.error(f'下载状态提交失败 {pixiv_id}（{stage}）：{e}')
+    try:
+        cleared = db.execute(
+            update(Illust)
+            .where(Illust.pixiv_id == pixiv_id,
+                   Illust.download_status == 'downloading')
+            .values(download_status='failed')
+        ).rowcount
+        if not cleared:
+            # 行已不在 downloading（例如 reset 抢先置空）：没有卡死状态需要救，
+            # 不要覆盖别人的结果，也不写误导性的失败日志。
+            db.rollback()
+            return False
+        db.add(DownloadLog(pixiv_id=pixiv_id, action='failed',
+                           message=f'状态写入失败（{stage}），已复位为下载失败'))
+        safe_commit(db)
+    except Exception as e:
+        logger.error(f'下载状态复位失败 {pixiv_id}（{stage}）：{e}')
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    return False
+
+
 def _download_illust(pixiv_id: int) -> None:
     """后台任务：下载作品的所有原图。"""
     with _download_locks_guard:
@@ -630,7 +672,10 @@ def _download_illust(pixiv_id: int) -> None:
             _queued_downloads.discard(pixiv_id)
             illust.download_status = 'downloading'
             db.add(DownloadLog(pixiv_id=pixiv_id, action='start', message=f'开始下载: {illust.title or pixiv_id}'))
-            safe_commit(db)
+            if not _rescue_commit(db, pixiv_id, stage='开始下载'):
+                # 起始状态没落库：不要继续下载。结尾的 done 写入要求行仍是
+                # downloading（见下方 CAS），写不进去只会白下载一轮再把文件删掉。
+                return
 
             urls = illust.original_urls_list or []
             if not urls:
@@ -639,7 +684,7 @@ def _download_illust(pixiv_id: int) -> None:
                 illust.download_status = None
                 db.add(DownloadLog(pixiv_id=pixiv_id, action='failed',
                                    message='无原图地址，跳过下载（请刷新详情后重试）'))
-                safe_commit(db)
+                _rescue_commit(db, pixiv_id, stage='无原图地址')
                 return
             _download_progress[pixiv_id]['total'] = len(urls)
             work_dir = _get_download_dir(pixiv_id)
@@ -679,7 +724,7 @@ def _download_illust(pixiv_id: int) -> None:
                         pass
                     illust.download_status = 'failed'
                     db.add(DownloadLog(pixiv_id=pixiv_id, action='failed', message=f'下载失败: 第 {i} 页'))
-                    safe_commit(db)
+                    _rescue_commit(db, pixiv_id, stage=f'下载失败（第 {i} 页）')
                     return
 
             if pixiv_id in download_cancellations:
@@ -726,7 +771,7 @@ def _download_illust(pixiv_id: int) -> None:
                         pass
                     db.add(DownloadLog(pixiv_id=pixiv_id, action='cancelled',
                                        message=f'重置已抢先完成, 放弃本轮 {len(local_paths)} 个文件'))
-            safe_commit(db)
+            _rescue_commit(db, pixiv_id, stage='下载结束')
     finally:
         if session_obj is not None:
             session_obj.close()  # 释放连接池，防止长驻进程累积 socket

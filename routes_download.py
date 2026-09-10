@@ -34,7 +34,25 @@ def trigger_download(pixiv_id: int) -> Response:
             return jsonify({'status': 'done', 'message': '已下载'})
 
         if illust.download_status == 'downloading':
-            return jsonify({'status': 'downloading', 'message': '下载中'})
+            if pixiv_id in _download_progress or pixiv_id in _queued_downloads:
+                return jsonify({'status': 'downloading', 'message': '下载中'})
+            # 幽灵 downloading：worker 已不在（终态写入提交失败、进程异常退出，
+            # 或上次运行遗留）。运行期没有别的自愈路径 —— 这里直接返回"下载中"
+            # 会让 UI 永远挂着一张下不动的卡片。用条件更新只清仍是 downloading
+            # 的行：并发新任务抢先把状态改回 downloading 时 rowcount=0，照常按
+            # "下载中"返回，不覆盖它的状态。
+            cleared = db.execute(
+                update(Illust)
+                .where(Illust.pixiv_id == pixiv_id,
+                       Illust.download_status == 'downloading')
+                .values(download_status=None)
+            ).rowcount
+            if not cleared:
+                return jsonify({'status': 'downloading', 'message': '下载中'})
+            db.add(DownloadLog(pixiv_id=pixiv_id, action='failed',
+                               message='检测到残留 downloading 状态，已自动复位'))
+            safe_commit(db)
+            # 复位后继续走下面的正常下载流程
 
         if not illust.original_urls_list:
             urls = _fetch_original_urls(pixiv_id)
