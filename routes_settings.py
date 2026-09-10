@@ -167,6 +167,7 @@ def settings_unlock() -> Response:
     if hmac.compare_digest(str(body.get('password', '')).encode(), app.SETTINGS_PASSWORD.encode()):
         session['settings_unlocked'] = True
         return jsonify({'ok': True})
+    time.sleep(1)  # 失败延迟，减缓爆破（与 login_submit 对齐）
     return jsonify({'error': '密码错误'}), 403
 
 

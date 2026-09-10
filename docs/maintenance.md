@@ -133,3 +133,50 @@ sudo systemctl restart pixiv-viewer     # 服务名以实际 unit 为准
 
 - 更新代码后重启**必须整进程重启**（`systemctl restart`），不能只 `kill -HUP`（`--preload` 下不重载代码）。
 - 服务日志：`journalctl -u pixiv-viewer -f | grep prefetch`（预取/清理）。
+
+---
+
+## 8. 公网部署检查清单
+
+单人自用的默认姿态是"本机 loopback"，本节只针对**把服务挂到公网或公司内网**的部署。
+
+**必须做的**
+
+1. **设置 `ACCESS_PASSWORD`**（`.env` 或环境变量）。留空 = **全站免认证**：任何人可搜索、下载、改设置。启动日志会打印一行
+   `ACCESS_PASSWORD 未设置：全站免认证，仅限本机/可信内网使用；公网部署必须设置` 作提醒。
+2. **只监听 loopback，由反代对外**：
+
+   ```bash
+   gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
+   ```
+
+   **禁止 `python app.py` 直跑公网**：它默认只绑 `127.0.0.1`（要改监听地址用 `HOST`/`PORT` 环境变量），但它终究是开发服务器，没有反代的超时/并发/压缩保护。
+3. **反代必须剥离或重写 `X-Forwarded-For`**：
+
+   ```nginx
+   proxy_set_header X-Forwarded-For $remote_addr;   # 覆盖掉客户端自带的值
+   ```
+
+   应用侧 `ProxyFix(x_for=1)` 按这个头还原真实客户端 IP，**限流与 `/api/open-dir` 的本机判定都依赖它**。若反代原样透传客户端自带的 XFF，访问者就能自称 `127.0.0.1`。
+4. **`COOKIE_SECURE=true`**（默认已是 true）：HTTPS 下才回传登录态；纯 HTTP 调试必须显式设 `false`，否则登录后立刻掉线。
+5. **证书与压缩都在反代上做**：Flask 自身不 gzip（`/api/gallery?limit=50` 约 25 KB），TLS 也由反代终结。
+
+**反代部署下的行为边界**
+
+- **`/api/open-dir` 不可用**：只要请求带 `X-Forwarded-For` 就返回 403（包括"反代把 XFF 改写成 127.0.0.1"的情况）。这是刻意的 fail-closed —— 该功能能在服务器上打开本地目录，经代理转发时无法区分"本机浏览器"和"远程伪造"。
+- 需要在服务器本机上用这个功能时：在服务器自己的浏览器里打开 `http://127.0.0.1:8000`（不经反代）。
+
+**自查命令**
+
+```bash
+# 1) 免认证告警是否出现（未设 ACCESS_PASSWORD 时）
+grep 'ACCESS_PASSWORD 未设置' /var/log/pixiv-viewer.log
+
+# 2) 伪造本机身份打 open-dir：应当 403 而不是 200
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8000/api/open-dir \
+  -H 'X-Forwarded-For: 127.0.0.1' -H "X-CSRF-Token: $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"path":"/"}'
+
+# 3) 未登录访问：API 应 401，页面应 302 到 /login
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/blocked-tags
+```

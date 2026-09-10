@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 
@@ -191,6 +192,24 @@ class TestSettingsCompat:
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
 
+    def test_unlock_failure_applies_delay(self, client, monkeypatch):
+        """解锁失败要像登录失败一样延迟 1 秒，减缓爆破。"""
+        import app as app_module
+        import routes_settings
+        monkeypatch.setattr(app_module, 'SETTINGS_PASSWORD', 'settings-pw')
+        sleeps = []
+
+        class _FakeTime:
+            def sleep(self, seconds):
+                sleeps.append(seconds)
+
+        monkeypatch.setattr(routes_settings, 'time', _FakeTime())
+        token = _get_token(client)
+        resp = client.post('/api/settings/unlock', json={'password': 'wrong'},
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 403
+        assert sleeps == [1]
+
 
 class TestOpenDir:
     def test_non_localhost_forbidden(self, client):
@@ -211,6 +230,83 @@ class TestOpenDir:
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         assert called == [str(tmp_path)]
+
+    def test_rejects_spoofed_loopback_via_xff(self, client, monkeypatch, tmp_path):
+        """伪造 `X-Forwarded-For: 127.0.0.1` 让 ProxyFix 还原出本机地址 —— 仍必须拒绝。
+
+        旧实现只看 `remote_addr`：XFF 被 ProxyFix 还原成 127.0.0.1 后即放行，
+        于是任何"反代原样透传 XFF"的部署都能远程打开服务器本地目录。
+        """
+        import app as app_module
+        called = []
+        monkeypatch.setattr(app_module.os, 'startfile',
+                            lambda p: called.append(p), raising=False)
+        token = _get_token(client)
+        resp = client.post('/api/open-dir', json={'path': str(tmp_path)},
+                           headers={'X-CSRF-Token': token,
+                                    'X-Forwarded-For': '127.0.0.1'})
+        assert resp.status_code == 403
+        assert called == [], '被拒绝的请求不能产生任何本地副作用'
+
+
+class TestPublicDeploymentPosture:
+    """审计 S6：公网/反代部署下的默认姿态必须是安全的。"""
+
+    def test_dev_server_bind_defaults_to_loopback(self, monkeypatch):
+        """`python app.py` 默认只监听 loopback（旧实现硬编码 0.0.0.0）。"""
+        import app as app_module
+        monkeypatch.delenv('HOST', raising=False)
+        monkeypatch.delenv('PORT', raising=False)
+        assert app_module._dev_server_bind() == ('127.0.0.1', 5000)
+
+        monkeypatch.setenv('HOST', '0.0.0.0')     # 显式要求时才放开
+        monkeypatch.setenv('PORT', '9000')
+        assert app_module._dev_server_bind() == ('0.0.0.0', 9000)
+
+    def test_main_block_does_not_hardcode_public_bind(self):
+        """`__main__` 块必须走 `_dev_server_bind()`，不能再硬编码对外监听。
+
+        `__main__` 块没有可 patch 的 seam（执行它等于起服务器），所以这里直接看源码：
+        旧实现是 `app.run(debug=False, host='0.0.0.0', port=5000)` 一行字面量。
+        """
+        import inspect
+        import app as app_module
+
+        source = inspect.getsource(app_module)
+        main_block = source.split("if __name__ == '__main__':", 1)
+        assert len(main_block) == 2, 'app.py 必须有 __main__ 块'
+        assert '_dev_server_bind()' in main_block[1]
+        assert '0.0.0.0' not in main_block[1]
+
+    def test_startup_path_actually_calls_the_warning(self):
+        """只有函数体、没人调用 = 生产上不会出现告警，故检查模块级确实调用了它。"""
+        import ast
+        import pathlib
+        import app as app_module
+
+        tree = ast.parse(pathlib.Path(app_module.__file__).read_text(encoding='utf-8'))
+        module_level_calls = [
+            node.value.func.id
+            for node in tree.body
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+        ]
+        assert '_warn_if_unprotected' in module_level_calls
+
+    def test_warns_when_access_password_missing(self, monkeypatch, caplog):
+        """未设访问密码 = 全站免认证，启动必须留下告警痕迹。"""
+        import app as app_module
+        monkeypatch.setattr(app_module, 'ACCESS_PASSWORD', '')
+        with caplog.at_level(logging.WARNING, logger='app'):
+            app_module._warn_if_unprotected()
+        assert 'ACCESS_PASSWORD 未设置' in caplog.text
+
+    def test_silent_when_access_password_set(self, monkeypatch, caplog):
+        import app as app_module
+        monkeypatch.setattr(app_module, 'ACCESS_PASSWORD', 'secret-pw')
+        with caplog.at_level(logging.WARNING, logger='app'):
+            app_module._warn_if_unprotected()
+        assert 'ACCESS_PASSWORD 未设置' not in caplog.text
 
 
 class TestSecurityHeaders:

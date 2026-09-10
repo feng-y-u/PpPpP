@@ -116,6 +116,30 @@ enforce_image_cache_limit(CACHE_DIR, force=True)
 init_db()
 
 
+# ── 启动自检 ──
+def _warn_if_unprotected() -> None:
+    """ACCESS_PASSWORD 为空即全站免认证，启动时明确告警（默认单人本机部署如此）。
+
+    告警而不是阻断：单人本机自部署免认证是既定用法（见 AGENTS.md「认证」），
+    这里只是让"忘了设密码就挂到公网"这件事在日志里可见。
+    """
+    if not ACCESS_PASSWORD:
+        logger.warning('ACCESS_PASSWORD 未设置：全站免认证，仅限本机/可信内网使用；公网部署必须设置')
+
+
+def _dev_server_bind() -> tuple[str, int]:
+    """`python app.py` 的绑定地址：默认只监听 loopback。
+
+    以前默认 `0.0.0.0`：本应用默认无访问密码，且 `/api/open-dir` 能在服务器上
+    打开本地目录 —— 直跑等于把这些能力暴露给整个局域网。要对外开放请走
+    gunicorn + 反代（见 docs/maintenance.md「公网部署检查清单」）。
+    """
+    return os.environ.get('HOST', '127.0.0.1'), int(os.environ.get('PORT', '5000'))
+
+
+_warn_if_unprotected()
+
+
 # ── 后台任务组装（定义见 background.py）──
 # 保持重构前 import 时序：init_db → _reset_stuck_*（清理残留状态）→ 后台线程启动 → atexit 注册。
 _reset_stuck_downloads()
@@ -149,4 +173,5 @@ def cache_page() -> str:
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    _host, _port = _dev_server_bind()
+    app.run(debug=False, host=_host, port=_port)

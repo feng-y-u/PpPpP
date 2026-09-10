@@ -518,6 +518,13 @@ def illust_collections(pixiv_id: int) -> Response:
 @_csrf_required
 def api_open_dir() -> Response:
     """打开本地文件夹（仅限本机浏览器访问时有效）。"""
+    # 只信"直连本机"：带 X-Forwarded-For 说明请求经过了反代（或被人为塞了这个头），
+    # 此时 remote_addr 已由 ProxyFix 从 XFF 还原 —— 而 XFF 是客户端可控的，反代只要
+    # 原样透传（或 x_for 层数与实际不符），远程请求就能伪装成 127.0.0.1 去打开服务器
+    # 本地目录（信息泄露 + 拉起进程）。故经反代一律拒绝（fail closed）：本功能在
+    # 反代部署下不可用，这是刻意的取舍，见 docs/maintenance.md「公网部署检查清单」。
+    if request.headers.get('X-Forwarded-For'):
+        return jsonify({'error': '该功能仅本机直连可用（检测到代理转发）'}), 403
     if request.remote_addr not in ('127.0.0.1', '::1'):
         return jsonify({'error': '该功能仅本机可用'}), 403
     body = _get_json_body()
