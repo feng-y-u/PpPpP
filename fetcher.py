@@ -721,6 +721,8 @@ _fill_lock = threading.Lock()
 _filling_ids: set[int] = set()
 _fill_last_attempt: dict[int, float] = {}
 _FILL_ATTEMPT_INTERVAL = 300.0  # 同一作品两次补全尝试的最小间隔（秒），防 429 限流
+# 节流表的条目上限：超过才触发清理（审计 S14）。见 _background_fill_details 的清理段。
+_FILL_ATTEMPT_MAX_ENTRIES = 1000
 
 
 def _background_fill_details(pixiv_ids: list[int]) -> None:
@@ -742,6 +744,15 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
             return
         for pid in new_ids:
             _fill_last_attempt[pid] = now
+        # 清理（审计 S14）：节流表按"见过的作品"只增不减，长期运行 + 大库（图库/
+        # 缓存页每次翻页都会补全）会攒到几万条 int→float，永不释放。只在表变大时
+        # 清理，且只清掉**已经远超节流窗口**（2 × _FILL_ATTEMPT_INTERVAL）的条目：
+        # 这类条目即使留着，下一轮判定 `now - ts >= _FILL_ATTEMPT_INTERVAL` 也必然
+        # 通过，所以删掉不改变任何节流行为。窗口内的一律保留。
+        if len(_fill_last_attempt) > _FILL_ATTEMPT_MAX_ENTRIES:
+            for pid, ts in list(_fill_last_attempt.items()):
+                if now - ts >= _FILL_ATTEMPT_INTERVAL * 2:
+                    del _fill_last_attempt[pid]
         _filling_ids.update(new_ids)
     try:
         details, _ = _fetch_details_parallel(new_ids, limiter=_fill_limiter)

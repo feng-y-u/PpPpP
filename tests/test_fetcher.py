@@ -469,6 +469,84 @@ class TestHttpErrorClassification:
         assert session.calls == fetcher.DETAIL_MAX_RETRIES + 1
 
 
+class TestFillAttemptMapPruning:
+    """后台补全的节流表不能只增不减（审计 S14）。
+
+    表里每个"补全过一次"的作品留一条 int→float，大库 + 反复翻页会攒到几万条且
+    永不释放。清理只允许发生在**远超节流窗口**的条目上 —— 否则就会把节流放宽。
+    """
+
+    def _install_map(self, monkeypatch, entries: dict[int, float]):
+        monkeypatch.setattr(fetcher, '_fill_last_attempt', dict(entries))
+        monkeypatch.setattr(fetcher, '_filling_ids', set())
+        calls: list[list[int]] = []
+        monkeypatch.setattr(fetcher, '_fetch_details_parallel',
+                            lambda ids, **kwargs: (calls.append(list(ids)), ({}, 0))[1])
+        return calls
+
+    def test_fill_attempt_map_pruned_when_large(self, monkeypatch):
+        """表超过上限时清掉早已过期的条目；本次请求的条目照常写入。"""
+        now = time.time()
+        entries = {pid: now - 10000 for pid in range(1, 1301)}   # 全部远超窗口
+        entries[999999] = now - 10                               # 窗口内，必须保留
+        calls = self._install_map(monkeypatch, entries)
+
+        fetcher._background_fill_details([900001])
+
+        remaining = fetcher._fill_last_attempt
+        assert set(remaining) == {999999, 900001}, '过期条目必须清掉、窗口内条目必须保留'
+        assert remaining[900001] == pytest.approx(now, abs=5), '本次尝试要记进节流表'
+        assert calls == [[900001]]
+
+    def test_fill_attempt_recent_kept(self, monkeypatch):
+        """未超上限时一条都不清（清理是有代价的，不该每轮都扫全表）。"""
+        now = time.time()
+        entries = {pid: now - 10000 for pid in range(1, 501)}   # 全部过期但表不大
+        calls = self._install_map(monkeypatch, entries)
+
+        fetcher._background_fill_details([900002])
+
+        assert len(fetcher._fill_last_attempt) == 501
+        assert calls == [[900002]]
+
+    def test_fill_attempt_throttle_survives_pruning(self, monkeypatch):
+        """清理不能放宽节流：窗口内的作品依然被跳过。"""
+        now = time.time()
+        entries = {pid: now - 10000 for pid in range(1, 1301)}
+        entries[900003] = now - 10                               # 刚补过
+        calls = self._install_map(monkeypatch, entries)
+
+        fetcher._background_fill_details([900003])
+
+        assert calls == [], '窗口内的作品必须继续被节流跳过'
+        assert fetcher._fill_last_attempt[900003] == now - 10, '跳过时不该刷新时间戳'
+
+    def test_fill_attempt_pruning_is_thread_safe(self, monkeypatch):
+        """多线程同时补全时清理与判定互斥：不得抛 dictionary changed size。"""
+        now = time.time()
+        entries = {pid: now - 10000 for pid in range(1, 2501)}
+        calls = self._install_map(monkeypatch, entries)
+        errors: list[BaseException] = []
+
+        def _run(pid: int):
+            try:
+                fetcher._background_fill_details([pid])
+            except BaseException as e:      # noqa: BLE001 —— 汇总后统一断言
+                errors.append(e)
+
+        threads = [threading.Thread(target=_run, args=(910000 + i,), daemon=True)
+                   for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+
+        assert not errors, f'并发补全出错：{errors!r}'
+        assert not any(t.is_alive() for t in threads)
+        assert len(calls) == 8
+        assert len(fetcher._fill_last_attempt) == 8, '清理后不该残留陈年条目'
+
+
 class TestBookmarkStaleness:
     def _old_illust(self, clean_db, pid, bookmark_count, days_ago):
         illust = Illust(pixiv_id=pid, title='old', bookmark_count=bookmark_count)
