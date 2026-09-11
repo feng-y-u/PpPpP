@@ -664,6 +664,215 @@ def test_api_downloads_survives_concurrent_queue_mutation(dl_env, clean_db, clie
     assert not mutator.is_alive()
 
 
+# ── 重复下载保护（S9）──
+
+def test_trigger_download_queued_returns_queued_not_duplicate(dl_env, clean_db, monkeypatch, client):
+    """已在队列中的作品再次触发：返回 queued，且不提交第二个任务、不动状态行。"""
+    pid = 80501
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    executor = _SyncExecutor()
+    monkeypatch.setattr(routes_download, 'download_executor', executor)
+    _enqueue(pid)                     # 排队窗口：已入队，worker 还没轮到
+
+    resp = _post_download(client, pid)
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['status'] == 'queued'
+    assert '已在下载队列中' in body['message']
+    assert executor.submitted == [], '重复触发不得再提交任务'
+    assert _read(pid)[0] is None, '状态行不该被这次请求改动'
+    assert is_queued_download(pid)
+
+
+def test_batch_download_skips_queued(dl_env, clean_db, monkeypatch, client):
+    """批量下载：已在队列中的 pid 计入 skipped，只对其余 pid 提交任务。"""
+    queued_pid, fresh_pid = 80502, 80503
+    with get_session() as db:
+        _make_illust(db, queued_pid, _urls(queued_pid, 1))
+        _make_illust(db, fresh_pid, _urls(fresh_pid, 1))
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+    executor = _SyncExecutor()
+    monkeypatch.setattr(routes_download, 'download_executor', executor)
+    _enqueue(queued_pid)
+
+    token = client.get('/csrf-token').get_json()['token']
+    resp = client.post('/api/download/batch', json={'ids': [queued_pid, fresh_pid]},
+                       headers={'X-CSRF-Token': token})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert (body['accepted'], body['skipped']) == (1, 1)
+    assert executor.submitted == [fresh_pid], '队列中的 pid 不得重复提交'
+    assert _read(fresh_pid)[0] == 'done', '未排队的那个应当被正常下载'
+    assert is_queued_download(queued_pid), '被跳过的那个留在队列里等 worker'
+
+
+def test_download_illust_noop_when_done(dl_env, clean_db, monkeypatch, caplog):
+    """done 的作品再被排进队列：不发请求、不写 start、不删上一次成功的文件。"""
+    caplog.set_level(logging.INFO)
+    pid = 80504
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 2))
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+    _enqueue(pid)
+    background._download_illust(pid)          # 第一次：正常下完
+    status, paths, _ = _read(pid)
+    assert status == 'done' and paths and all(os.path.isfile(p) for p in paths)
+
+    # 第二次：让下载必然失败 —— 若守卫失效，失败路径会把这些文件删掉
+    failing = _FakeSession(fail_on=_urls(pid, 2)[0])
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: failing)
+    _enqueue(pid)
+    background._download_illust(pid)
+
+    assert failing.calls == [], 'done 之后不得再发起任何下载请求'
+    status_after, paths_after, actions = _read(pid)
+    assert status_after == 'done'
+    assert paths_after == paths
+    assert all(os.path.isfile(p) for p in paths_after), '重复下载不得删掉已成功的文件'
+    assert actions.count('start') == 1, '守卫必须在写 start 日志之前返回'
+    assert any('已是 done 状态' in r.getMessage() for r in caplog.records)
+    _assert_no_dangling_state(pid)
+
+
+def test_redownload_after_delete_still_works(dl_env, clean_db, monkeypatch):
+    """回归：删除图库文件把状态复位成 None 后，重下必须照常可用（守卫不许挡住）。"""
+    import helpers
+    pid = 80505
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+    _enqueue(pid)
+    background._download_illust(pid)
+    status, paths, _ = _read(pid)
+    assert status == 'done' and paths and all(os.path.isfile(p) for p in paths)
+
+    with get_session() as db:
+        row = db.query(Illust).filter(Illust.pixiv_id == pid).one()
+        assert helpers._delete_illust_files(row) == 1
+        safe_commit(db)
+    assert _read(pid)[0] is None, '删除文件后状态应复位为 None'
+    assert not any(os.path.isfile(p) for p in paths)
+
+    fresh = _FakeSession()
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fresh)
+    _enqueue(pid)
+    background._download_illust(pid)
+
+    assert fresh.calls, '删除后的重下必须真正发起请求'
+    status_after, paths_after, actions = _read(pid)
+    assert status_after == 'done'
+    assert paths_after and all(os.path.isfile(p) for p in paths_after)
+    assert actions.count('start') == 2
+    _assert_no_dangling_state(pid)
+
+
+class _CountingExecutor:
+    """只记录 submit、不执行任务：用来稳定制造"已入队但还没开始"的窗口。"""
+
+    def __init__(self):
+        self.submitted: list[int] = []
+
+    def submit(self, fn, *args, **kwargs):
+        self.submitted.append(args[0] if args else None)
+        return None
+
+
+def test_trigger_download_duplicate_submit_is_atomic(dl_env, clean_db, monkeypatch, app):
+    """并发重复触发同一作品：恰好一个任务被提交（判定与入队同锁原子完成）。"""
+    pids = [80510 + i for i in range(8)]
+    with get_session() as db:
+        for pid in pids:
+            _make_illust(db, pid, _urls(pid, 1))
+    executor = _CountingExecutor()
+    monkeypatch.setattr(routes_download, 'download_executor', executor)
+
+    results: list[tuple[int, str]] = []
+    errors: list[BaseException] = []
+    threads_per_round = 6
+    barrier = threading.Barrier(threads_per_round)
+    lock = threading.Lock()
+
+    def _hit(pid: int):
+        client = app.test_client()
+        token = client.get('/csrf-token').get_json()['token']
+        try:
+            barrier.wait(10)
+            resp = client.post(f'/download/{pid}', headers={'X-CSRF-Token': token})
+            with lock:
+                results.append((pid, resp.get_json().get('status')))
+        except BaseException as e:      # noqa: BLE001 —— 汇总后统一断言
+            with lock:
+                errors.append(e)
+
+    for pid in pids:
+        threads = [threading.Thread(target=_hit, args=(pid,), daemon=True)
+                   for _ in range(threads_per_round)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        assert not any(t.is_alive() for t in threads), '并发触发出现死等'
+
+    assert not errors, f'并发触发出错：{errors!r}'
+    # 每个 pid 恰好一个 accepted，其余全是 queued
+    for pid in pids:
+        statuses = [s for p, s in results if p == pid]
+        assert sorted(statuses) == ['accepted'] + ['queued'] * (threads_per_round - 1), statuses
+        assert executor.submitted.count(pid) == 1, f'#{pid} 被重复提交：{executor.submitted}'
+
+
+def test_trigger_download_submit_failure_does_not_leave_phantom_queue(dl_env, clean_db, monkeypatch, client):
+    """提交任务失败（线程池已关闭）：必须把 pid 撤出队列，不能留下幻影排队。"""
+    pid = 80520
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+
+    class _DeadExecutor:
+        def submit(self, fn, *args, **kwargs):
+            raise RuntimeError('cannot schedule new futures after shutdown')
+
+    monkeypatch.setattr(routes_download, 'download_executor', _DeadExecutor())
+
+    with pytest.raises(RuntimeError):
+        _post_download(client, pid)
+
+    assert not is_queued_download(pid), '提交失败后不得把 pid 留在队列里'
+    assert _read(pid)[0] is None
+
+
+def test_batch_download_submit_failure_does_not_leave_phantom_queue(dl_env, clean_db, monkeypatch, client):
+    """批量下载同一失败语义：崩在哪个 pid 上就撤哪个，前面的已提交不受影响。"""
+    ok_pid, dead_pid = 80521, 80522
+    with get_session() as db:
+        _make_illust(db, ok_pid, _urls(ok_pid, 1))
+        _make_illust(db, dead_pid, _urls(dead_pid, 1))
+
+    class _HalfDeadExecutor:
+        def __init__(self):
+            self.submitted: list[int] = []
+
+        def submit(self, fn, *args, **kwargs):
+            pid = args[0] if args else None
+            if pid == dead_pid:
+                raise RuntimeError('cannot schedule new futures after shutdown')
+            self.submitted.append(pid)
+
+    executor = _HalfDeadExecutor()
+    monkeypatch.setattr(routes_download, 'download_executor', executor)
+
+    token = client.get('/csrf-token').get_json()['token']
+    with pytest.raises(RuntimeError):
+        client.post('/api/download/batch', json={'ids': [ok_pid, dead_pid]},
+                    headers={'X-CSRF-Token': token})
+
+    assert executor.submitted == [ok_pid]
+    assert is_queued_download(ok_pid), '已提交的任务必须留在队列里'
+    assert not is_queued_download(dead_pid), '提交失败的 pid 不得留在队列里'
+
+
 # ── 地址校验与凭据分级（审计 S7a）──
 
 @pytest.mark.parametrize('pid,url', [

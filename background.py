@@ -715,6 +715,14 @@ def _download_illust(pixiv_id: int) -> None:
                 _rescue_commit(db, pixiv_id, stage='作品行缺失')
                 return
 
+            if illust.download_status == 'done':
+                # 已是 done（审计 S9）：典型来源是"同一 pid 被排了两个任务，第二个
+                # 在第一个跑完之后才轮到"；也覆盖将来新增的调用方直接从 done 触发。
+                # 继续下载只会白费带宽，且一旦失败会走失败路径删掉上一次成功下载
+                # 的文件。删除图库文件后的重下不受影响 —— 那条路径把状态复位成
+                # None（helpers._delete_illust_files / 取消复位），不命中这里。
+                logger.info(f'作品 {pixiv_id} 已是 done 状态，跳过重复下载')
+                return
             with _download_queue_lock:
                 _queued_downloads.discard(pixiv_id)
             illust.download_status = 'downloading'

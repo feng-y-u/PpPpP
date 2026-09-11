@@ -56,6 +56,11 @@ def trigger_download(pixiv_id: int) -> Response:
             safe_commit(db)
             # 复位后继续走下面的正常下载流程
 
+        # 已在队列中（worker 还没轮到，状态还没写成 downloading）→ 不再重复提交。
+        # 这里只是"快速路径"，省掉下面一次原图地址网络请求；权威判定在下面加锁那段。
+        if is_queued_download(pixiv_id):
+            return jsonify({'status': 'queued', 'message': '已在下载队列中'})
+
         if not illust.original_urls_list:
             urls = _fetch_original_urls(pixiv_id)
             if not urls:
@@ -63,9 +68,23 @@ def trigger_download(pixiv_id: int) -> Response:
             illust.original_urls_list = urls
             safe_commit(db)
 
+    # 判定与入队必须在同一把锁内：拆成"先判定、后入队"时，两个并发请求会各自
+    # 判定"不在队列"然后各自入队 —— 同一作品排两个任务，第二个会在第一个跑完后
+    # 重下整份原图，失败时还会删掉第一个已成功下载的文件（审计 S9）。
     with _download_queue_lock:
-        _queued_downloads.add(pixiv_id)
-    download_executor.submit(_download_illust, pixiv_id)
+        already_queued = pixiv_id in _queued_downloads
+        if not already_queued:
+            _queued_downloads.add(pixiv_id)
+    if already_queued:
+        return jsonify({'status': 'queued', 'message': '已在下载队列中'})
+    try:
+        download_executor.submit(_download_illust, pixiv_id)
+    except RuntimeError:
+        # 线程池已关闭（进程退出中）：必须把 pid 撤出队列。否则该作品此后一直
+        # 返回"已在下载队列中"，却永远不会被下载 —— 幻影排队，比重复下载更难查。
+        with _download_queue_lock:
+            _queued_downloads.discard(pixiv_id)
+        raise
     return jsonify({'status': 'accepted', 'message': '已加入下载队列'})
 
 
@@ -91,9 +110,19 @@ def batch_download() -> Response:
             if illust.download_status in ('done', 'downloading'):
                 skipped += 1
                 continue
+            # 已在队列中的也算 skipped：同一 pid 排两个任务会在第一个跑完后重下
+            # 一遍（失败时删掉成功文件）。判定与入队同锁原子完成，理由同 trigger_download。
             with _download_queue_lock:
+                if pid in _queued_downloads:
+                    skipped += 1
+                    continue
                 _queued_downloads.add(pid)
-            download_executor.submit(_download_illust, pid)
+            try:
+                download_executor.submit(_download_illust, pid)
+            except RuntimeError:
+                with _download_queue_lock:
+                    _queued_downloads.discard(pid)
+                raise
             accepted += 1
 
     return jsonify({'accepted': accepted, 'skipped': skipped, 'message': f'已加入 {accepted} 个下载任务'})
