@@ -54,6 +54,7 @@ $('#saveBtn').addEventListener('click', async () => {
     if (r.ok) {
       showToast('设置已保存（部分设置需重启后生效）');
       loadSettings();
+      loadAutoFollowStatus();
     } else {
       showToast(data.error || '保存失败');
     }
@@ -137,6 +138,31 @@ async function loadPrefetchStatus() {
   } catch { el.textContent = '—'; }
 }
 
+// 自动关注的运行态：线程还在不在（alive）+ 运行中的间隔 + 上次成功检查。
+// “上次检查”只在成功拉到关注列表并处理完一轮时更新，所以文案不写成“上次轮询时间”。
+async function loadAutoFollowStatus() {
+  const el = $('#autoFollowStatus');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/auto-follow/status');
+    const s = await r.json();
+    const parts = [s.alive ? '后台检查运行中' : '后台检查已停止（线程不在）'];
+    parts.push(s.interval > 0 ? `间隔 ${s.interval}s` : '已禁用（间隔 0）');
+    if (s.last_check) {
+      parts.push(`上次成功检查 ${new Date(s.last_check).toLocaleString('zh-CN')}（新作品 ${s.last_count ?? 0} 件）`);
+      el.title = '“上次成功检查”在拉到关注列表并处理完一轮后更新，没有新作品的一轮也会更新（显示 0 件）。'
+               + '间隔改动需重启服务才生效。';
+    } else {
+      parts.push('尚无成功检查记录');
+      el.title = '还没有成功拉到关注列表：未关注任何画师、Cookie 失效或网络失败都会停在这里。'
+               + '间隔改动需重启服务才生效。';
+    }
+    if (!s.alive) el.title = '自动关注的后台线程已不在（不会自动重启），需要重启服务恢复。';
+    el.classList.toggle('text-danger', !s.alive);
+    el.textContent = parts.join(' · ');
+  } catch { el.textContent = '—'; }
+}
+
 async function resetPrefetchRefresh(tag) {
   if (!confirm(`重置「${tag}」的刷新状态？\n（清空刷新完成/失败退避标记，下一轮预取重新拉取收藏数）`)) return;
   try {
@@ -205,6 +231,7 @@ $('#prefetchTagInput').addEventListener('keydown', e => {
 // 页面加载时拉取清单与刷新健康指标
 loadPrefetchTags();
 loadPrefetchStatus();
+loadAutoFollowStatus();
 
 // ── Collection Management ──
 let deleteCollectionId = null;

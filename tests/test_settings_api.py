@@ -288,3 +288,96 @@ class TestSettingsCookie:
 
         assert _ORIGINAL_COOKIE_PATHS['app'] == config.COOKIE_PATH
         assert _ORIGINAL_COOKIE_PATHS['fetcher'] == config.COOKIE_PATH
+
+
+class _AliveThread:
+    """最小替身：`get_background_health()` 只对线程对象调 `is_alive()`。"""
+
+    def is_alive(self):
+        return True
+
+
+class _DeadThread:
+    """真线程、真退出：比 `is_alive() → False` 的假对象更接近"线程死了"的现场。"""
+
+    def __init__(self):
+        import threading
+
+        self._t = threading.Thread(target=lambda: None)
+        self._t.start()
+        self._t.join()
+
+    def is_alive(self):
+        return self._t.is_alive()
+
+
+class TestAutoFollowStatus:
+    """`/api/auto-follow/status`：state 之外还要回答"后台线程还在不在"。
+
+    该字段此前**只**出现在 `/api/prefetch/status` 里，而设置页既不读那个路由的
+    这个键、也不读本路由 —— 也就是说"自动关注静默停止"在界面上完全看不到。
+    本组用例盯住两点：`alive` 反映**真实线程引用**（不是常量），以及它是派生值、
+    **不得写进 `_auto_follow_state`**（那个 dict 由自动关注线程与 config 路由共用）。
+    """
+
+    def test_reports_running_thread_and_state(self, client, monkeypatch):
+        import background
+        import runtime
+
+        monkeypatch.setattr(background, '_auto_follow_thread', _AliveThread())
+        monkeypatch.setitem(runtime._auto_follow_state, 'interval', 600)
+        monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', True)
+        monkeypatch.setitem(runtime._auto_follow_state, 'last_check', '2026-09-11T05:00:00+00:00')
+        monkeypatch.setitem(runtime._auto_follow_state, 'last_count', 3)
+
+        resp = client.get('/api/auto-follow/status')
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['alive'] is True
+        assert data['interval'] == 600
+        assert data['auto_download'] is True
+        assert data['last_check'] == '2026-09-11T05:00:00+00:00'
+        assert data['last_count'] == 3, 'state 里的既有字段必须照常回传'
+        assert {'last_check', 'last_count', 'interval', 'auto_download', 'alive'} <= set(data)
+
+    @pytest.mark.parametrize('fake_thread', [None, _DeadThread()], ids=['never_started', 'dead'])
+    def test_reports_stopped_thread(self, client, monkeypatch, fake_thread):
+        """没启动（None）与启动后已退出（dead）都必须报 False —— 这正是"静默停止"的信号。"""
+        import background
+
+        monkeypatch.setattr(background, '_auto_follow_thread', fake_thread)
+
+        data = client.get('/api/auto-follow/status').get_json()
+
+        assert data['alive'] is False
+
+    def test_derived_alive_is_not_written_into_runtime_state(self, client):
+        """`alive` 是派生值：写进 `_auto_follow_state` 会污染运行态（config 路由会回传它）。"""
+        import runtime
+
+        before = dict(runtime._auto_follow_state)
+
+        data = client.get('/api/auto-follow/status').get_json()
+
+        assert 'alive' in data, '响应里要有这个字段'
+        assert 'alive' not in runtime._auto_follow_state, '不得把派生值塞进运行态'
+        assert runtime._auto_follow_state == before, '运行态必须逐键不变'
+
+    def test_settings_page_actually_consumes_the_field(self):
+        """前端接线静态核对：光有 JSON 字段、界面上没人看，就等于没修。
+
+        仓库没有前端测试运行器（原生 JS 无构建），所以这里只能核对"容器存在、
+        脚本真的请求这个路由、且函数被调用" —— 它挡的是真实回归：改个 id、漏掉
+        fetch、定义完忘了调用，都会让这个字段重新变成"只在 JSON 里"。
+        """
+        root = os.path.dirname(os.path.abspath(app.__file__))  # app.py 就在仓库根
+        with open(os.path.join(root, 'templates', 'settings.html'), encoding='utf-8') as f:
+            tpl = f.read()
+        with open(os.path.join(root, 'static', 'page-settings.js'), encoding='utf-8') as f:
+            js = f.read()
+
+        assert 'id="autoFollowStatus"' in tpl, '自动关注卡片里要有状态容器'
+        assert "'/api/auto-follow/status'" in js, '脚本要请求本路由'
+        assert '\nloadAutoFollowStatus();' in js, '页面加载时必须真的调用（顶层调用点）'
+        assert js.count('loadAutoFollowStatus(') >= 3, '定义 + 页面加载 + 保存后刷新'

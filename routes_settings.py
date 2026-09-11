@@ -20,6 +20,7 @@ from flask import (Blueprint, Response, jsonify, redirect, render_template,
 import config as config_module
 import fetcher
 from fetcher import clear_search_cache
+from background import get_background_health
 from helpers import _atomic_write_json
 from middleware import (_csrf_required, _get_csrf_token, _get_json_body,
                         _is_authed, _rate_limit, _safe_next)
@@ -59,7 +60,24 @@ def login_submit():
 
 @bp.route('/api/auto-follow/status')
 def auto_follow_status() -> Response:
-    return jsonify(_auto_follow_state)
+    """自动关注的运行态（供设置页展示）。
+
+    `alive` 取自 `background.get_background_health()` —— 线程引用的唯一持有者在
+    `background`，这里与 `/api/prefetch/status` 的同名字段**同源**，两个路由只是视角
+    不同（这里按功能聚合，那里是后台线程总览）。
+
+    刻意返回**副本**：`alive` 是派生值，直接塞进 `_auto_follow_state` 会污染运行态
+    （该 dict 同时被自动关注线程本身和 `/api/auto-follow/config` 读写）。
+
+    字段语义提醒：`last_check` 只在**成功拉到关注列表并处理完一轮**时更新（拉不到
+    任何作品的那一轮直接 continue），所以它陈旧既可能是"关注列表里没有新作品"、
+    也可能是"每一轮都在失败"；`last_count` 是那一轮新增入库的作品数（可以是 0）。
+    界面文案必须照此措辞，不能写成"上次轮询时间"。
+    """
+    data = dict(_auto_follow_state)
+    data['alive'] = get_background_health()['auto_follow_alive']
+    return jsonify(data)
+
 
 @bp.route('/api/auto-follow/config', methods=['POST'])
 @_csrf_required
