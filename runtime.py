@@ -156,6 +156,10 @@ _prefetch_state = {
     # 最近一轮"最终收藏数刷新"的结构化统计（background._prefetch_refresh_bookmarks
     # 每轮结束/中止时整份替换；键固定，供 /api/prefetch/status 暴露）
     'refresh_stats': None,
+    # 最近一轮预取出错信息（审计 S12）：整轮干净收尾时清空，非空即代表"最近一轮
+    # 有错"。线程活着不等于在干活，线程死掉时 last_check 只会越来越旧 —— 需要
+    # 一个直接说"这轮报了什么"的字段配合 /api/prefetch/status 观察。
+    'last_error': None,
 }
 
 # ── 下载队列/进度/取消/线程池 ──

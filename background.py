@@ -582,12 +582,16 @@ def _prefetch_loop() -> None:
     """后台预取循环：遍历所有 SearchCache 标签，串行预取。"""
     import app  # 延迟导入：tests monkeypatch('app.get_session'/'app._prefetch_capacity_cleanup')
     _prefetch_state['running'] = True
+    # 本轮是否出过错（审计 S12）：整轮干净收尾才清 last_error，所以
+    # "last_error 非空"= 最近一轮就有问题，而不是"历史上某轮出过问题"。
+    round_error = False
     try:
         try:
             with app.get_session() as db:
                 tags = [t[0] for t in db.query(SearchCache.tag).all()]
         except Exception as e:
             # 标签列表查询失败不退出线程，等待下个 interval 重试
+            _prefetch_state['last_error'] = f'读取标签列表失败: {e}'
             logger.error(f'[prefetch] 读取标签列表失败: {e}')
             return
         if not tags:
@@ -602,24 +606,36 @@ def _prefetch_loop() -> None:
             except Exception as e:
                 # 单个标签出问题不再拖垮本轮（审计 S4）：容量清理是"上限压得住"的
                 # 最后一道闸，任何一段异常都不该让它被跳过。
+                round_error = True
+                _prefetch_state['last_error'] = f'标签预取异常: {e}'
                 logger.error(f'[prefetch] 标签预取异常，本轮继续执行刷新与容量清理: {e}')
             # 先刷新最终收藏数（满 1 天的作品），再按最终收藏数做容量清理
             #（已刷新的优先淘汰，不够时才会动未刷新的）
             try:
                 _prefetch_refresh_bookmarks()
             except Exception as e:
+                round_error = True
+                _prefetch_state['last_error'] = f'最终收藏数刷新异常: {e}'
                 logger.error(f'[prefetch] 最终收藏数刷新异常，本轮继续执行容量清理: {e}')
             app._prefetch_capacity_cleanup()
             _prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
+            if not round_error:
+                _prefetch_state['last_error'] = None
         except Exception as e:
             # 单轮异常不退出线程，等待下个 interval 重试
+            round_error = True
+            _prefetch_state['last_error'] = f'循环异常: {e}'
             logger.error(f'[prefetch] 循环异常: {e}')
     finally:
         _prefetch_state['running'] = False
 
 
+_prefetch_thread: threading.Thread | None = None
+
+
 def _start_prefetch_thread() -> None:
     """启动预取守护线程。首轮延迟 5 秒，之后按 interval 循环。"""
+    global _prefetch_thread
     import app  # 延迟导入：tests monkeypatch('app.time'/'app.threading'/'app._prefetch_loop')
     interval = _prefetch_state['interval']
     if interval <= 0:
@@ -637,8 +653,44 @@ def _start_prefetch_thread() -> None:
             app._prefetch_loop()
             app.time.sleep(interval)
 
-    app.threading.Thread(target=_run, daemon=True).start()
+    # 保留引用（审计 S12）：线程"活着"不等于"在干活"，线程里未捕获的异常会让它
+    # 静默退出，而 /api/prefetch/status 只看数据时只能看到"last_check 很旧"，得靠
+    # 人自己解读。get_background_health() 用这个引用回答"线程还在不在"。
+    _prefetch_thread = app.threading.Thread(target=_run, daemon=True)
+    _prefetch_thread.start()
     logger.info(f'[prefetch] 后台线程已启动，interval={interval}s')
+
+
+def get_background_health() -> dict:
+    """后台线程健康快照（审计 S12）：线程存活 + 预取是否"很久没跑完一轮"。
+
+    `stale` 阈值取 `2*interval + 600`：宽限一轮执行时间再加 10 分钟，避免恰好落在
+    一轮执行中就被误报。`interval<=0`（预取被显式关掉）时恒为 False —— 那是合法
+    配置，不该塞进同一个告警口径。`last_check` 为空且 interval>0 视为 stale
+    （线程起来了但从没跑完过一轮）。
+    """
+    interval = _prefetch_state.get('interval') or 0
+    last_check = _prefetch_state.get('last_check')
+    stale = False
+    if interval > 0:
+        stale = True
+        if last_check:
+            try:
+                last_dt = datetime.fromisoformat(last_check)
+            except (TypeError, ValueError):
+                last_dt = None
+            if last_dt is not None:
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                stale = elapsed > 2 * interval + 600
+    return {
+        'prefetch_alive': _prefetch_thread is not None and _prefetch_thread.is_alive(),
+        'auto_follow_alive': _auto_follow_thread is not None and _auto_follow_thread.is_alive(),
+        'last_check': last_check,
+        'stale': stale,
+        'last_error': _prefetch_state.get('last_error'),
+    }
 
 
 # ── 下载引擎与生命周期 ──

@@ -474,6 +474,11 @@ class TestPrefetchThreadLiveness:
             def start(self):
                 pass
 
+            def is_alive(self):
+                # 与 threading.Thread 接口一致：`_start_prefetch_thread` 会把实例存进
+                # background._prefetch_thread，后续健康检查（S12）要问它 is_alive()
+                return False
+
         monkeypatch.setattr(app.threading, 'Thread', _FakeThread)
 
         sleeps = []
@@ -1290,3 +1295,42 @@ def test_remove_pids_empty_list_does_not_touch_guard(clean_db, monkeypatch):
         background._remove_pids_from_search_caches(db, [])
 
     assert guard.entries == 0
+
+
+# ── 后台线程心跳（审计 S12）──
+
+def test_prefetch_loop_records_last_error(clean_db, monkeypatch):
+    """单轮异常不退出线程，但要留痕：last_error 记下 → 下一轮干净收尾时清空。"""
+    clean_db.add(SearchCache(tag='boom', status='done'))
+    safe_commit(clean_db)
+    monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
+    monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: None)
+    state = background._prefetch_state
+    monkeypatch.setitem(state, 'last_error', None)
+
+    def _boom(tag):
+        raise RuntimeError('网络挂了')
+
+    monkeypatch.setattr(background, '_prefetch_one_tag', _boom)
+    background._prefetch_loop()
+    assert '网络挂了' in state['last_error'], '出错必须留痕（否则只能看 last_check 变旧）'
+    assert state['last_check'], '出错的那轮也要更新时间戳（线程确实在跑）'
+
+    monkeypatch.setattr(background, '_prefetch_one_tag', lambda tag: None)
+    background._prefetch_loop()
+    assert state['last_error'] is None, '整轮干净收尾才清空：非空即代表最近一轮就有问题'
+
+
+def test_prefetch_loop_records_tag_list_failure(monkeypatch):
+    """标签列表都读不出来（DB 不可用）也要留痕，并且不能把线程打死。"""
+    state = background._prefetch_state
+    monkeypatch.setitem(state, 'last_error', None)
+
+    def _boom_session():
+        raise RuntimeError('database is locked')
+
+    monkeypatch.setattr(app, 'get_session', _boom_session)
+    background._prefetch_loop()          # 关键：不抛
+
+    assert 'database is locked' in state['last_error']
+    assert state['running'] is False, 'finally 必须复位 running'

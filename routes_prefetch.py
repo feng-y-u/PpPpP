@@ -11,7 +11,7 @@ import threading
 
 from flask import Blueprint, Response, jsonify, request
 
-from background import _collect_other_tag_pids
+from background import _collect_other_tag_pids, get_background_health
 from fetcher import get_detail_error_samples
 from middleware import _csrf_required, _get_json_body
 from models import (CollectionItem, Illust, SearchCache, get_session,
@@ -143,7 +143,10 @@ def prefetch_status_get() -> Response:
 
     pending_refresh：尚未完成最终刷新的预取作品数（这批被容量清理豁免，
     长期积压说明刷新吞吐跟不上入库）；failed_backoff：带失败退避标记的数量。
+    alive/stale/last_error（审计 S12）：线程存活、"很久没跑完一轮"与最近一轮的
+    错误 —— 预取线程静默死掉时，光看 running/last_check 得靠人自己解读。
     """
+    health = get_background_health()
     with get_session() as db:
         pending = db.query(Illust).filter(
             Illust.prefetch_source == 1,
@@ -162,6 +165,10 @@ def prefetch_status_get() -> Response:
         'failed_backoff': failed,
         # 未命中删除关键词的详情报错样本（message → 次数）：据此核对/补充关键词清单
         'detail_errors': get_detail_error_samples(),
+        'alive': health['prefetch_alive'],
+        'auto_follow_alive': health['auto_follow_alive'],
+        'stale': health['stale'],
+        'last_error': health['last_error'],
     })
 
 

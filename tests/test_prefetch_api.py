@@ -1,11 +1,12 @@
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import app
+import background
 from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
 
 
@@ -248,7 +249,8 @@ class TestPrefetchStatusAPI:
         assert resp.status_code == 200
         data = resp.get_json()
         assert set(data) == {'running', 'last_check', 'interval', 'refresh',
-                             'pending_refresh', 'failed_backoff', 'detail_errors'}
+                             'pending_refresh', 'failed_backoff', 'detail_errors',
+                             'alive', 'auto_follow_alive', 'stale', 'last_error'}
         assert data['running'] == app._prefetch_state['running']
         assert data['last_check'] == app._prefetch_state['last_check']
         assert data['interval'] == app._prefetch_state['interval']
@@ -256,6 +258,64 @@ class TestPrefetchStatusAPI:
         assert data['failed_backoff'] == 1    # 9003
         assert data['refresh'] == app._prefetch_state['refresh_stats']
         assert isinstance(data['detail_errors'], dict)
+        assert isinstance(data['alive'], bool)
+        assert isinstance(data['auto_follow_alive'], bool)
+        assert isinstance(data['stale'], bool)
+        assert data['last_error'] == app._prefetch_state['last_error']
+
+    def test_status_reports_alive_and_stale(self, client, monkeypatch):
+        """存活/陈旧/最近错误都要能直接读出来（审计 S12）。
+
+        线程活着不代表在干活：线程静默死掉时数据只是越来越旧，所以把"线程还在不在"
+        （alive）与"多久没跑完一轮"（stale）分开报。
+        """
+        class _ThreadStub:
+            def __init__(self, alive):
+                self._alive = alive
+
+            def is_alive(self):
+                return self._alive
+
+        interval = 3600
+        monkeypatch.setattr(background, '_prefetch_thread', _ThreadStub(True))
+        monkeypatch.setitem(app._prefetch_state, 'interval', interval)
+        monkeypatch.setitem(app._prefetch_state, 'last_error', '标签预取异常: boom')
+
+        # ① 超过 2*interval+600 没跑完一轮 → stale
+        old = datetime.now(timezone.utc) - timedelta(seconds=2 * interval + 601)
+        monkeypatch.setitem(app._prefetch_state, 'last_check', old.isoformat())
+        data = client.get('/api/prefetch/status').get_json()
+        assert data['alive'] is True
+        assert data['stale'] is True
+        assert data['last_error'] == '标签预取异常: boom'
+
+        # ② 阈值内（含"正好一轮刚跑完"）→ 不算 stale
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=2 * interval + 599)
+        monkeypatch.setitem(app._prefetch_state, 'last_check', fresh.isoformat())
+        assert client.get('/api/prefetch/status').get_json()['stale'] is False
+        monkeypatch.setitem(app._prefetch_state, 'last_check',
+                            datetime.now(timezone.utc).isoformat())
+        assert client.get('/api/prefetch/status').get_json()['stale'] is False
+
+        # ③ 线程死了但数据很新 → 只有 alive 能暴露它
+        monkeypatch.setattr(background, '_prefetch_thread', _ThreadStub(False))
+        data = client.get('/api/prefetch/status').get_json()
+        assert data['alive'] is False and data['stale'] is False
+
+        # ④ interval>0 但从没跑完过一轮 → stale（线程起来了但一直没成功）
+        monkeypatch.setitem(app._prefetch_state, 'last_check', None)
+        assert client.get('/api/prefetch/status').get_json()['stale'] is True
+
+    def test_status_not_stale_when_disabled(self, client, monkeypatch):
+        """interval=0（预取被显式关掉）是合法配置：从没跑过也不算 stale。"""
+        monkeypatch.setattr(background, '_prefetch_thread', None)
+        monkeypatch.setitem(app._prefetch_state, 'interval', 0)
+        monkeypatch.setitem(app._prefetch_state, 'last_check', None)
+
+        data = client.get('/api/prefetch/status').get_json()
+
+        assert data['stale'] is False
+        assert data['alive'] is False
 
 
 class TestPrefetchRefreshResetAPI:
