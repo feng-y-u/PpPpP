@@ -1,4 +1,4 @@
-﻿venv/
+venv/
 __pycache__/
 *.pyc
 cookies.txt
@@ -18,3 +18,12 @@ build/
 
 # local agent memory
 .workbuddy/
+
+# 本地会话规划笔记（planning-with-files 类技能会重新生成；曾误入版本库，只留本地）
+task_plan.md
+findings.md
+progress.md
+
+# 手工跑测试/评审留下的临时目录（其中可能有本地凭据样本，别误提交）
+.test-tmp/
+.test-tmp-review/
