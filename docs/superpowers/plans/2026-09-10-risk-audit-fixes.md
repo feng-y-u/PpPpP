@@ -455,6 +455,27 @@
 
 ---
 
+### S20（P1）把自动关注的"静默停止"接到界面上
+
+**来源**：审计报告 §16 的处置建议"状态 API 主动告警"只做了一半 —— S12（`df7cd94`）加了 `auto_follow_alive`，但它只出现在 `/api/prefetch/status`，而设置页**不读**该键，也不读 `/api/auto-follow/status`（该路由返回 `_auto_follow_state`，**没有任何前端调用者**）。于是两种静默失效在界面上完全不可见：① 后台线程死了（不会自动重启）；② 线程活着但每一轮都在失败（Cookie 失效等）。
+
+**核心方案**：把 `alive` 补进它本该待的 `/api/auto-follow/status`，并在设置页「自动关注」卡片加一行状态。
+
+**调用链（改动前）**：`get_background_health()`（`background`，线程引用的唯一持有者）→ `/api/prefetch/status`（`routes_prefetch.auto_status`）→ 前端只读 `pending_refresh` / `failed_backoff` / `refresh` / `detail_errors`。`/api/auto-follow/status` → 前端零调用。
+
+**实现**：
+- `routes_settings.auto_follow_status`：返回 `_auto_follow_state` 的**副本** + `alive`（取自 `get_background_health()['auto_follow_alive']`）。**不写回 `_auto_follow_state`** —— 该 dict 同时被自动关注线程与 `/api/auto-follow/config` 读写，派生值会污染运行态（有用例盯住）。§16 的同一字段仍留在 `/api/prefetch/status`（那是后台线程总览视角，删掉属破坏既有响应契约，且两处同源不会分叉）。
+- `templates/settings.html`：自动关注卡片底部加 `<div id="autoFollowStatus">`（对齐预取卡片的 `prefetchRefreshStats` 写法）。
+- `static/page-settings.js`：新增 `loadAutoFollowStatus()`，页面加载时调用、设置保存成功后刷新；文案按真实语义措辞。
+
+**文案为何这样写**：`last_check` / `last_count` 只在 `collected` 非空（成功拉到关注列表）的一轮末尾更新，拉不到任何作品的那轮直接 `continue`。所以显示的是"**上次成功检查**"而不是"上次轮询时间"，并在无记录时明说"未关注任何画师、Cookie 失效或网络失败都会停在这里"；显示的间隔取自**运行中的** `_auto_follow_state['interval']`（`POST /api/settings` 写的是 settings.json、需重启才生效，`/api/auto-follow/config` 才是即时生效的那条路），避免界面把"我改了但没重启"显示成已生效。
+
+**测试**（`tests/test_settings_api.py::TestAutoFollowStatus`，4 例）：线程存活时 `alive=True` 且既有 state 字段照常回传；`None`（从未启动）与**真线程已退出**两种 `alive=False`；派生值不得写进 `_auto_follow_state`（逐键比对）；前端接线静态核对（模板有容器、脚本请求该路由、页面加载处真的调用）。**证伪**：① 去掉 `alive` → 4 例失败（`KeyError: 'alive'` ×3 + 运行态用例）；② 写死 `alive=True` → 2 例失败于 `assert True is False`；③ 删掉页面加载处的调用 → 前端接线用例失败。恢复后单文件 20 passed；全量 520 例（515 passed / 1 skipped / 4 failed，17.0s，4 例为预先存在的 Windows 沙箱子进程检查）。
+
+**遗留边界**：仍**没有** supervisor / 自动重启（§33.1 第 4 条不变）；自动关注**没有** `last_error` —— `_auto_follow_worker` 的 `except Exception` 只写一行 `logger.error('自动关注出错：…')`，不落 state，所以"上一轮刚失败"与"关注列表本来没有新作品"在界面上仍不可区分（要补就得照 S12 给预取那套：干净收尾清空、出错留痕，属新增可观测面，未做）；`last_check` 陈旧无阈值告警（本步只做展示，不做"超过 X 小时未更新就标红"）。
+
+---
+
 ## 五、明确"不应该修改"（本阶段一律不动）
 
 1. **架构与进程模型**：`-w 1` 语义、SQLite WAL、进程内状态设计、Blueprint 划分、`start_background_threads()` 幂等守卫、`atexit` 注册顺序、`gunicorn` 命令与 systemd unit。

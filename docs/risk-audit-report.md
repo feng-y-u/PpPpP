@@ -588,7 +588,7 @@ P3（长期演进）
 
 ---
 
-## 33. P1 修复台账（S8–S18，2026-09-11）
+## 33. P1 修复台账（S8–S20，2026-09-11）
 
 本节是**追加**的修复状态记录，不改动 §1–§32 的审计口径与评分。P0（S1–S7b）的验证记录在 `docs/superpowers/plans/2026-09-10-risk-audit-fixes.md` §七，此处只列 P1（S8–S18）中被本报告命中的发现；各步的完整方案、测试清单与遗留边界见该计划文档对应小节与 §八。§33.3 另记两条**原审计未命中、由 S18 补测跑出来**的缺陷。
 
@@ -613,7 +613,7 @@ P3（长期演进）
 1. **§15-4 列表类请求零限流**（search / discovery / follow_latest）：S13 只修了 403 的**分类**，没有给列表端点补令牌桶。
 2. **§10-4 的"损坏 → 回退默认值 → 登录墙静默失效"**：S16 只降低"被写坏"的概率并保留 `.bak`，回退语义未改；`settings.json` 明文存口令也未处理。
 3. **§11-4 / §12-3 / §14-4**：缺索引与全表扫描、`_db_pids_cache` 30s 尖峰、备份保留策略 —— 均未动。
-4. **§16 的 supervisor / 自动重启**：S12 只让线程死亡变得可观测，没有让它不可能发生。
+4. **§16 的 supervisor / 自动重启**：S12 只让线程死亡变得可观测，没有让它不可能发生（S20 把这份可观测面接到了设置页界面上，**仍然没有** supervisor）。
 5. **§19 的测试缺口**：S18 已补齐三个零覆盖区（下载引擎与下载路由、`/thumb` 与 `/api/image`、settings 写入面）并加了 29 个修改型端点的 CSRF 矩阵；**仍未覆盖**：各端点的业务授权逻辑（矩阵只证明"缺头 403"）、下载引擎多 worker 抢同一 pid、前端 JS、`/api/image` 的 Range/ETag、令牌桶时序、真实旧库上的迁移升级。
 6. **§20-3 `AGENTS.md` 用例数过期**（原文记 270）：已订正（同时补上此前遗漏的 `scripts/check_tls.py`、`instance/thumb_redirect_hosts.json`、`_thumb_redirect_lock` 与新增的 `tests/test_settings_api.py`）。
 
@@ -632,3 +632,10 @@ P3（长期演进）
 
 1. **设置页保存预取配置从未生效**（`routes_settings.api_settings_post`）。保存 `prefetch_*` 时把 settings.json 的**长键**（`prefetch_interval` / `prefetch_pages` / `prefetch_max_illusts`）直接写进 `_prefetch_state`，而 `background` 的预取循环读的是**短键**（`interval` / `pages` / `max_illusts`）—— 等于写进三个没人读的键。`AGENTS.md` 里"prefetch_interval 经设置页保存后立即生效"的说明自 Blueprint 拆分重构起就不成立；受影响的是"改了预取间隔却要等到重启"这一交互，**不会**丢数据。修法：改用 `routes_prefetch._PREFETCH_SETTINGS_KEYS` 映射（单一来源）。**证伪**：改回旧逻辑后 `tests/test_settings_api.py::TestSettingsPost::test_prefetch_keys_apply_immediately` 失败于 `assert 0 == 321`。
 2. **排队中取消会让该作品永久无法下载**（`background._download_illust`）。`session_obj = None` 位于"取消标记检查"**之后**，而该检查处有一条提前 `return`；于是 `finally` 首行抛 `UnboundLocalError`，其后所有清理（`_download_progress.pop`、`lock.release()`、`_release_download_lock`、`download_cancellations.discard`、`_queued_downloads.discard`）**全部跳过**：下载锁永远不放、取消标记永远留着，之后每次触发都在 `lock.acquire(blocking=False)` 处**静默**跳过（前端仍显示"已加入下载队列"），进度条目也永久挂在下载管理页。触发姿势很常见 —— 下载队列排队时点"取消"。修法：把两个 session 的初始化提到取消检查之前。**证伪**：把初始化放回原位后 `tests/test_download.py::test_download_cancelled_before_start_does_nothing` 失败于 `UnboundLocalError: cannot access local variable 'session_obj'`；修复后该用例另加"取消过的作品必须能重新下载"的症状级守卫。
+
+### 33.4 S18 之后的两个跟进项（S19 / S20）
+
+这两条是**收口阶段之后**才处理完的：S19 来自本文档之外的分析文档发现（`docs/technical-documentation.md` §20.2），S20 是 §16 那条"状态 API 主动告警"建议的落地补完。两者都不改既有语义分支，改动范围分别在"一个路径来源"与"一个响应字段 + 一行界面文案"。
+
+1. **S19 设置页 Cookie 落点与读取路径不一致**（`routes_settings.api_settings_post`）。写侧按 `__file__` 推项目根，读侧用 `config.COOKIE_PATH`（Linux 上存在 `/etc/pixiv-viewer/cookies.txt` 时优先它）。那种部署里设置页写的是**没人读的文件**：进程内靠直接赋值 `fetcher._cookie_value` 看着生效、重启后旧 Cookie 复辟；且 `get_pooled_session()` 的失效戳盯的也是 `COOKIE_PATH`，那个 mtime 从未变过，新 Cookie **连当期都不对已缓存的连接池生效**（后一点原审计未写出来）。修法：落点改用 `app.COOKIE_PATH`（`config.COOKIE_PATH` 的再导出），写失败时 500 并把实际路径写进错误信息（此前会静默写进一个无害文件然后假装成功）。**证伪**：改回旧的 `__file__` 推导后 `tests/test_settings_api.py` 4 例失败（新用例在 `COOKIE_PATH` 处 `FileNotFoundError`、写失败用例变成 `assert 200 == 500`、夹具的"仓库根真实 cookies.txt 未被改写"断言触发）。**副产物**：`test_fetcher.py` 有 3 例走真实 `_fetch_details_parallel → build_pixiv_session() → _load_cookie()`，此前默默依赖开发者本机存在真实 `cookies.txt`（干净 checkout 上会 `FileNotFoundError`），已改用临时文件夹具；`_isolate_cookies_txt` 的收尾也从"只断言"改为"先无条件还原再断言"（旧版在一次证伪跑动中真的把仓库根的真实 Cookie 覆盖成了测试 token —— 该文件在 `.gitignore` 里，没有任何副本可恢复）。**遗留**：Cookie 写入仍非原子（`open(...,'w')`，理论上可读到半截内容后按 mtime 缓存住这个坏值）。
+2. **S20 自动关注"静默停止"在界面上看不见**（§16 的"状态 API 主动告警"只做了一半）。S12 给 `background.get_background_health()` 加了 `auto_follow_alive`，但它只出现在 `/api/prefetch/status`，而设置页既不读那个键、也不读 `/api/auto-follow/status`（该路由返回 `_auto_follow_state`，**同样没有任何前端调用者**）—— 于是"自动关注线程死了"或"每轮都在失败"这两种静默失效，只能在日志里发现。修法：`/api/auto-follow/status` 增补 `alive`（取自 `get_background_health()`，与预取状态页里的同名字段**同源**，只是视角不同），设置页「自动关注」卡片新增一行状态（运行中/已停止 + **运行中的**间隔 + 上次成功检查 + 该轮新作品数）。刻意返回**副本**而非把 `alive` 塞进 `_auto_follow_state`（该 dict 由自动关注线程与 `/api/auto-follow/config` 共用，派生值会污染运行态）。界面文案按真实语义措辞：`last_check` 只在**成功拉到关注列表并处理完一轮**时更新（拉不到任何作品的那轮直接 `continue`），所以"陈旧"既可能是没有新作品、也可能是每轮都在失败 —— 不能写成"上次轮询时间"。**证伪**：① 去掉 `alive` → 4 例失败（`KeyError: 'alive'` ×3 + 运行态污染用例）；② 把 `alive` 写死成 `True` → 两个"线程已停止"用例失败于 `assert True is False`（证明它读的是真实线程引用而非常量）；③ 删掉页面加载时的调用 → 前端接线用例失败。**遗留**：仍无 supervisor / 自动重启（§33.1 第 4 条不变）；自动关注**没有** `last_error`（出错只写日志、不写 state），所以"刚失败过"与"关注列表本来没新作品"在界面上仍不可区分。
