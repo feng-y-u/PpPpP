@@ -198,22 +198,28 @@ def api_settings_post() -> Response:
     body = _get_json_body()
     current = _load_settings()
 
-    # Cookie 字段特殊处理：写入项目根目录 cookies.txt，立即更新内存状态
+    # Cookie 字段特殊处理：写入 fetcher 实际读取的那个文件，并立即更新内存状态
     cookie_val = body.pop('cookie', '').strip()
     if cookie_val:
         # 剔除换行/控制字符，防止向 cookies.txt 注入多行破坏鉴权
         clean_val = re.sub(r'[\r\n\t\x00-\x1f\x7f]', '', cookie_val).strip()
         if not clean_val:
             return jsonify({'error': 'Cookie 内容无效'}), 400
-        cookie_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
+        # 落点必须是 fetcher 读的那个文件（config.COOKIE_PATH；Linux 上存在
+        # /etc/pixiv-viewer/cookies.txt 时就是它）。此前硬编码项目根目录，在那种部署里
+        # 等于"写一个没人读的文件"：进程内靠直接赋值 _cookie_value 显得生效，重启后旧
+        # Cookie 复辟；而且 get_pooled_session 的失效戳盯的是 COOKIE_PATH，新 Cookie
+        # 连当期都不会对已缓存的连接池生效。路径不可写时明确失败（错误信息带路径），
+        # 不再静默写到一个无害文件然后假装成功。
+        cookie_path = app.COOKIE_PATH
         try:
             with open(cookie_path, 'w') as f:
                 f.write(f'PHPSESSID={clean_val}\n')
         except OSError as e:
-            return jsonify({'error': f'cookies.txt 写入失败: {e}'}), 500
+            return jsonify({'error': f'cookies.txt 写入失败（{cookie_path}）: {e}'}), 500
         fetcher._cookie_value = clean_val
         fetcher._cookie_mtime = os.path.getmtime(cookie_path)
-        logger.info('cookies.txt 已通过设置页更新')
+        logger.info('cookies.txt 已通过设置页更新: %s', cookie_path)
 
     # 仅合并已知的配置键
     for key in _SETTINGS_DEFAULTS:

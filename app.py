@@ -17,6 +17,7 @@ from config import (
     DOWNLOAD_DIR,
     MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE, SSL_VERIFY,
+    COOKIE_PATH,  # Cookie 文件单一来源：fetcher 读它，设置页也必须写它（见下）
     _instance_dir,  # 实例目录单一来源：密钥文件路径由它派生（PIXIV_INSTANCE_DIR 可整体重定向）
     _load_or_create_secret,  # 密钥文件统一入口：长度校验 + 权限收紧（与 .cursor_secret 同一助手）
 )

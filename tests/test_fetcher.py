@@ -45,6 +45,21 @@ def _item(pid: int, bookmark_count=None, tags=('a', 'b')):
     return item
 
 
+@pytest.fixture
+def _cookie_file(tmp_path, monkeypatch):
+    """给走**真实** `_fetch_details_parallel` 的用例一个临时 Cookie 文件。
+
+    那条路径会经 `get_pooled_session()` → `build_pixiv_session()` → `_load_cookie()` 读
+    `COOKIE_PATH`，而仓库根不一定有 `cookies.txt`（干净 checkout / 别人机器上就没有），
+    缺文件会抛 `FileNotFoundError` 把拉取打断 —— 于是这些用例此前**默默依赖开发者本机
+    存在真实 Cookie**。用一个临时文件解耦，顺带保证跑测试不会读/写真实凭据。
+    """
+    cookie = tmp_path / 'cookies.txt'
+    cookie.write_text('PHPSESSID=test-token\n', encoding='utf-8')
+    monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(cookie))
+    return cookie
+
+
 class TestProcessItemsBookmarkFill:
     @patch('fetcher._kick_background_fill')
     @patch('fetcher._fetch_details_parallel')
@@ -202,7 +217,7 @@ class TestProcessItemsBookmarkFill:
         assert results == {}
         assert attempted >= 1  # 已启动的请求（全部失败）均被处理，未启动的已取消
 
-    def test_fetch_stats_accurate_failure_count(self, clean_db):
+    def test_fetch_stats_accurate_failure_count(self, clean_db, _cookie_file):
         """统计准确性：早停取消的请求不计入失败；仅实际发起的请求统计失败数。"""
         def _fake_detail(session, pid, limiter=None):
             if pid in (6002, 6003):  # 两个失败
@@ -233,7 +248,7 @@ class TestProcessItemsBookmarkFill:
         assert stats['detail_failed'] == 2
         assert len(results) == 3
 
-    def test_early_stop_fires_after_enough_passed(self, clean_db):
+    def test_early_stop_fires_after_enough_passed(self, clean_db, _cookie_file):
         """流式过滤端到端：真实 _fetch_details_parallel 下，凑够 max_results 条
         通过过滤的结果后取消未启动的拉取，但已启动的照常返回（不丢弃）。"""
         def _fake_detail(session, pid, limiter=None):
@@ -1308,7 +1323,7 @@ class TestSearchCancellation:
         assert attempted == 0
         mock_detail.assert_not_called()
 
-    def test_cancel_keeps_in_flight_results(self):
+    def test_cancel_keeps_in_flight_results(self, _cookie_file):
         """在途请求照常处理完并保留（与 early_stop 同款语义：已付出的请求
         结果入库，下次同条件搜索命中 existing_map 免重拉）。用 Barrier 保证
         第一批 worker 全部处于在途状态时才触发取消，之后的任务全部跳过。
