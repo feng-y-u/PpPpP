@@ -476,6 +476,28 @@
 
 ---
 
+### S21（P1）设置页写 Cookie 改成原子写
+
+**来源**：S19 自己写下的遗留项（见上一节的"遗留"）——落点已经统一到 `config.COOKIE_PATH`，但写盘仍是 `open(path, 'w')`，**先截断再写**。
+
+**为什么这是真缺陷而不是洁癖**：读侧 `fetcher._load_cookie()` 在**其它线程**读同一路径（生产 `gunicorn -w 1 --threads 8`）。它按 mtime 决定是否回读，读到空串时会把 `_cookie_value` 置空**并连同 mtime 一起记下**（`fetcher.py`：`if mtime != _cookie_mtime:` 之后没有任何二次校验）。于是正好落在截断窗口里的那条线程/那个连接池会**一直**用空 Cookie，除非文件 mtime 再变（设置页再保存一次或重启）。症状："设置页提示保存成功、搜索仍 401/空结果，重启才恢复"。本步开工前先写用例，**实测复现**：120 轮写入期间读线程 12940 次读里 5 次读到空串。
+
+**调用链**：写侧 `routes_settings.api_settings_post`（cookie 分支）→ 落盘；读侧 `fetcher._load_cookie()` ← `build_pixiv_session()` / `get_pooled_session()`（mtime 失效戳 `_cookie_file_stamp()`）← 请求线程与后台线程。
+
+**实现**：
+- `helpers._atomic_write_text(path, text)`：同目录 `*.tmp` → `write` + `flush` + `fsync` → `os.replace`；`finally` 清 tmp；异常原样抛出（由调用方决定错误码）。**不改** `_atomic_write_json`（settings.json，S16）：它服务另一条已稳定、已有用例的路径，两处共用会把 S21 的权限语义悄悄加到 settings.json 上。重复的十来行是刻意的，理由写进了 docstring。
+- 三条配套语义（都是为了**保持**既有行为，不是顺手加功能）：① 目标已存在时把它的权限位搬到 tmp 上（`open(...,'w')` 对已存在文件保留原模式，直接 replace 会把加固过的 0600 放宽成 0644）；② **不** `makedirs` 父目录（`/etc/pixiv-viewer/` 不存在属于部署错误，要明确失败）；③ `os.replace` 对 `PermissionError` 有界重试 5 次（退避 20→100ms）——Windows 上读侧持着目标文件时 replace 会抛 `WinError 5`（本步实测到的，不是推测），不重试会把"保存 Cookie"变成偶发 500。
+- `routes_settings`：cookie 分支改调 `_atomic_write_text`，其余（净化控制字符、写后同步内存 `_cookie_value` / `_cookie_mtime`、失败 500 带路径）一字未动。`.gitignore` 追加 `cookies.txt.tmp`。
+
+**测试**（新增 4 例在 `tests/test_settings_api.py::TestSettingsCookie`，6 例在 `tests/test_helpers.py::TestAtomicWriteText`）：
+- 路由层：替换瞬间取证（目标仍是完整旧值、tmp 是完整新值、无残留 tmp）；替换失败 → 500 + 路径 + **旧 Cookie 原样可用** + 无 tmp；并发读（读线程强制 `_cookie_mtime = 0` 回读磁盘）**绝不允许读到空/半截值** + 收尾一致；POSIX 下已有 0600 文件不被放宽（Windows skip）。
+- helper 层：正常写、首次创建、**父目录不存在要 `FileNotFoundError` 且不创建**、替换失败保留旧字节并清 tmp、`PermissionError` 重试后成功（3 次尝试）、重试耗尽原样抛并清 tmp（正好 5 次）。
+- **证伪**：把 cookie 分支临时改回 `open(...,'w')` → 三条路由层用例失败，症状与预判一致（观测不到 replace / `assert 200 == 500` / **并发用例读到空串**）。修完全量 530 例 = 524 passed / 2 skipped / 4 failed（4 例是预先存在的 Windows 沙箱子进程检查）。连跑 3 次单文件确认并发用例不抖。
+
+**遗留边界**：**部署要求变了** —— tmp+rename 需要**目录可写**，只给 `/etc/pixiv-viewer/cookies.txt` 文件写权限会 500（已写进 `AGENTS.md` 与 `docs/maintenance.md`，运维需要检查一次）；POSIX 专属断言（权限位、rename 对读者零影响）在本机（Windows）只能 skip，属**未在本机验证**的部分；读侧没有对 0 字节文件的二次校验（mtime 变了但内容为空时仍会缓存空值），本次只修写侧；`_atomic_write_text` 不 fsync 目录，掉电时可能丢"改名已生效"这一步（与 `_atomic_write_json` 一致，未加）。
+
+---
+
 ## 五、明确"不应该修改"（本阶段一律不动）
 
 1. **架构与进程模型**：`-w 1` 语义、SQLite WAL、进程内状态设计、Blueprint 划分、`start_background_threads()` 幂等守卫、`atexit` 注册顺序、`gunicorn` 命令与 systemd unit。

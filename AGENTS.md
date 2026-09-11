@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 520 用例约 17s，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 530 用例约 20s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -130,7 +130,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ### 认证
 
-- **Cookie 认证**：手动创建 `cookies.txt`，存放 `PHPSESSID=xxxxx` 或纯 token。Linux 上优先读 `/etc/pixiv-viewer/cookies.txt`。过期会静默返回空结果。**设置页写的就是 `config.COOKIE_PATH`（经 `app.COOKIE_PATH` 再导出，与 fetcher 读的同一个值）**：两处必须同源 —— 曾经路由自己按 `__file__` 推项目根，于是存在 `/etc` 文件的部署里"写了一个没人读的文件"，重启后旧 Cookie 复辟、连接池的 mtime 失效戳也盯错了文件。该路径不可写时设置页返回 500 并给出实际路径（不再假装成功）；部署时若把 Cookie 放在 `/etc/pixiv-viewer/`，要保证服务进程对该文件可写。
+- **Cookie 认证**：手动创建 `cookies.txt`，存放 `PHPSESSID=xxxxx` 或纯 token。Linux 上优先读 `/etc/pixiv-viewer/cookies.txt`。过期会静默返回空结果。**设置页写的就是 `config.COOKIE_PATH`（经 `app.COOKIE_PATH` 再导出，与 fetcher 读的同一个值）**：两处必须同源 —— 曾经路由自己按 `__file__` 推项目根，于是存在 `/etc` 文件的部署里"写了一个没人读的文件"，重启后旧 Cookie 复辟、连接池的 mtime 失效戳也盯错了文件。该路径不可写时设置页返回 500 并给出实际路径（不再假装成功）；部署时若把 Cookie 放在 `/etc/pixiv-viewer/`，要注意写入是**同目录 tmp + 原子替换**（`helpers._atomic_write_text`）：服务进程需要**目录可写**（创建 `cookies.txt.tmp` 并 rename），只给文件写权限会 500。为什么必须原子：读侧 `fetcher._load_cookie()` 在其它线程读同一路径，`open(...,'w')` 先截断再写，读到空串时会把**空值连同 mtime 一起缓存住**，那条线程/连接池就一直用空 Cookie（症状："设置页保存成功但搜索仍 401，重启才恢复"，旧实现已被并发用例复现）。
 - **全局访问密码**：`ACCESS_PASSWORD` 非空时启用全站登录墙 —— `before_app_request` 拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 免认证**。`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒。登录态存 session（`authed`），7 天有效。
 - **`COOKIE_SECURE` 默认 true**：本地 HTTP 调试必须设 `COOKIE_SECURE=false`（环境变量或 `.env`），否则登录态不回传。
 - **旧 `SETTINGS_PASSWORD` 流程仍保留**：已全局登录则直通设置页，否则走设置解锁页。
@@ -189,7 +189,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点与读侧同源**/**自动关注状态字段与前端接线**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。

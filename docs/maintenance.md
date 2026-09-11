@@ -57,7 +57,8 @@ flask run --debug
 ```
 
 > 需要访问 Pixiv：`cookies.txt`（根目录或 `/etc/pixiv-viewer/cookies.txt`）放 `PHPSESSID=xxx`。
-> **设置页更新 Cookie 就是写这个文件的同一路径**（`config.COOKIE_PATH`：存在 `/etc/pixiv-viewer/cookies.txt` 时优先它）。若把它放在 `/etc/`，请保证 **systemd 服务用户对该文件可写**，否则设置页会返回 500 并在错误信息里给出实际路径（这是刻意的失败：以前会静默写到项目根目录，重启后旧 Cookie 复归）。
+> **设置页更新 Cookie 就是写这个文件的同一路径**（`config.COOKIE_PATH`：存在 `/etc/pixiv-viewer/cookies.txt` 时优先它）。若把它放在 `/etc/`，请保证 **systemd 服务用户对该文件所在目录可写**（不只是文件本身可写）：写入走"同目录 tmp + 原子替换"（2026-09-11 起），需要在目录里创建 `cookies.txt.tmp` 并 rename 覆盖——只给文件写权限（例如 `chown root:组` + `0660`、目录仍属 root）会失败并返回 500，错误信息里带实际路径。这是刻意的失败：以前会静默写到项目根目录，重启后旧 Cookie 复归。
+> 为什么要原子替换：读侧（`fetcher._load_cookie`）在其它线程读同一文件，`open(...,'w')` 先截断再写，读到空串时会**把空值连同 mtime 一起缓存住**，于是那条线程/连接池会一直用空 Cookie，直到文件 mtime 再变——表现为"设置页保存成功但搜索仍 401，重启才恢复"。
 > 本机 HTTP 调试：如启用 `COOKIE_SECURE`（默认 true），设置 `COOKIE_SECURE=false`（环境变量或 `.env`）。
 
 ---

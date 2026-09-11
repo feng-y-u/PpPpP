@@ -696,8 +696,8 @@ graph LR
 
 #### POST /api/settings
 
-- 功能：保存设置。`cookie` 键特殊处理：剔除控制字符后写入项目根 `cookies.txt`（`PHPSESSID=<val>`）并立即更新内存 Cookie 状态；其余仅合并 `_SETTINGS_DEFAULTS` 白名单键（int 键非法值跳过）；`prefetch_*` 三键保存后同步内存立即生效。
-- 错误：400 Cookie 内容无效；500 写盘失败。源码：`routes_settings.py::api_settings_post`（185-243）。
+- 功能：保存设置。`cookie` 键特殊处理：剔除控制字符后**原子写入 `config.COOKIE_PATH`**（`PHPSESSID=<val>`，同目录 tmp + `os.replace`，见 `helpers._atomic_write_text`）并立即更新内存 Cookie 状态；其余仅合并 `_SETTINGS_DEFAULTS` 白名单键（int 键非法值跳过）；`prefetch_*` 三键保存后同步内存立即生效。
+- 错误：400 Cookie 内容无效；500 写盘失败（错误信息带实际路径）。源码：`routes_settings.py::api_settings_post`（185-243）。
 
 #### /api/blocked-tags — GET 列表 / POST 新增（409 重名，新增后 `clear_search_cache()`）/ DELETE `<path:tag>`（404）。源码：`routes_settings.py:79-111`。
 
@@ -1045,7 +1045,7 @@ graph TD
 | 级别 | 问题 | 文件 | 行为/风险 | 影响 | 建议 |
 | --- | --- | --- | --- | --- | --- |
 | High | SSL 校验默认关闭 | `config.py:112`（`SSL_VERIFY = False`） | 所有 Pixiv 请求不校验 TLS 证书 | 公网部署时中间人可窃取 PHPSESSID/图片内容；内网/本机部署风险低 | 生产装 CA 后设 `SSL_VERIFY=True`（环境变量或 settings.json 无此键，需改 config 或 .env） |
-| Medium | 设置页 Cookie 写入路径与 COOKIE_PATH 不一致 | `routes_settings.py:205`（写项目根 cookies.txt）vs `config.py:37-40`（Linux 优先 `/etc/pixiv-viewer/cookies.txt`） | Linux 生产上设置页更新的 Cookie 重启后失效（当前进程内因直接赋值 `fetcher._cookie_value` 而立即生效） | 功能不一致，重启后需重设 | **已修（2026-09-11）**：写盘改用 `app.COOKIE_PATH`（即 `config.COOKIE_PATH` 的再导出，与 fetcher 读的同一值）；路径不可写时 500 并在信息里给出实际路径（此前会静默写一个没人读的文件）。附带效果：`get_pooled_session` 的失效戳盯的就是 `COOKIE_PATH`，因此新 Cookie 现在当轮即可对连接池生效。回归用例：`tests/test_settings_api.py::TestSettingsCookie::test_cookie_lands_where_the_fetcher_reads_it` |
+| Medium | 设置页 Cookie 写入路径与 COOKIE_PATH 不一致 | `routes_settings.py:205`（写项目根 cookies.txt）vs `config.py:37-40`（Linux 优先 `/etc/pixiv-viewer/cookies.txt`） | Linux 生产上设置页更新的 Cookie 重启后失效（当前进程内因直接赋值 `fetcher._cookie_value` 而立即生效） | 功能不一致，重启后需重设 | **已修（2026-09-11）**：写盘改用 `app.COOKIE_PATH`（即 `config.COOKIE_PATH` 的再导出，与 fetcher 读的同一值）；路径不可写时 500 并在信息里给出实际路径（此前会静默写一个没人读的文件）。附带效果：`get_pooled_session` 的失效戳盯的就是 `COOKIE_PATH`，因此新 Cookie 现在当轮即可对连接池生效。回归用例：`tests/test_settings_api.py::TestSettingsCookie::test_cookie_lands_where_the_fetcher_reads_it`。**同日 S21 续修**：写盘仍非原子（`open(...,'w')` 先截断），并发读侧 `fetcher._load_cookie()` 读到空串会把空值连 mtime 一起缓存住（症状："保存成功但搜索仍 401，重启才恢复"）→ 改用 `helpers._atomic_write_text`（同目录 tmp + `os.replace`）；代价是**该文件所在目录必须可写**。回归用例：`TestSettingsCookie::test_cookie_write_is_an_atomic_swap`、`test_concurrent_reader_never_sees_a_truncated_cookie`、`test_failed_cookie_write_keeps_the_previous_cookie`（+ `tests/test_helpers.py::TestAtomicWriteText`） |
 | Medium | 登录限流按 IP + 进程内存，且 `remote_addr or 'unknown'` 共享桶 | `middleware.py:60-70` | 多 worker 不支持（已强制 -w 1）；「unknown」IP 共享一个桶可被放大占用 | 低实际风险（单用户） | 接受或改为 token 桶 |
 | Medium（运维） | 无日常自动备份 | `migrations/runner.py:46-47`（仅迁移前备份） | 误删/损坏数据无自动恢复点 | 数据丢失风险 | 按 maintenance.md 建议加 cron 备份；可将备份纳入 pixiv-cleanup 流程 |
 | Low | CSRF token 同会话恒定 | `middleware.py:73-76` | 会话内 token 不轮换（非缺陷，业界常见；SameSite=Lax 兜底） | 低 | 可选：登录后轮换 |
@@ -1245,7 +1245,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | 症状 | 排查路径（源码依据） |
 | --- | --- |
 | 登录后仍被踢回登录页 | `COOKIE_SECURE` 默认 true：本地 HTTP 需设 `COOKIE_SECURE=false`，否则 Secure Cookie 不回传（config.py:122） |
-| 搜索返回空 / 401「Cookie 已过期」 | `cookies.txt` 过期或格式错误（需 `PHPSESSID=` 前缀或纯 token）；Linux 优先读 `/etc/pixiv-viewer/cookies.txt`；设置页写入的就是这个同一路径（§20.2 已于 2026-09-11 修好，此前在 Linux 上会写错文件导致重启后失效）；**若该文件所在目录不可写，设置页会 500 并给出路径** |
+| 搜索返回空 / 401「Cookie 已过期」 | `cookies.txt` 过期或格式错误（需 `PHPSESSID=` 前缀或纯 token）；Linux 优先读 `/etc/pixiv-viewer/cookies.txt`；设置页写入的就是这个同一路径（§20.2 已于 2026-09-11 修好，此前在 Linux 上会写错文件导致重启后失效）；**若该文件所在目录不可写，设置页会 500 并给出路径**（2026-09-11 S21 起写入走"同目录 tmp + 原子替换"，需要目录可写，只给文件写权限不够） |
 | 搜索慢 / 详情大量失败 | 检查 `/api/search/status` 的 `fetch_stats`；令牌桶 45/60 为 403 红线；连接池复用是否被破坏（勿在循环里 build session） |
 | Pixiv 403 | 并发过高（3 并发即实测 403）：`fetcher_detail_workers` 调低；等待令牌桶退避 |
 | `popular_d` 排序为空 | Pixiv Premium 才支持（非 Premium 静默空结果） |
@@ -1296,7 +1296,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | # | 级别 | 问题 | 位置 | 原因 | 影响 | 建议 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | High | SSL 校验默认关闭 | config.py:112 | 自部署便利优先 | 公网可被中间人截取会话/图片 | 生产 `.env`/环境变量设 `SSL_VERIFY=true`（或 config 改为环境变量驱动） |
-| 2 | Medium | 设置页 Cookie 写盘路径与生产读取路径不一致 | routes_settings.py:205 vs config.py:37-40 | 两处未共用 COOKIE_PATH | Linux 生产重启后设置页 Cookie 失效 | **已修（2026-09-11）**：写盘用 `app.COOKIE_PATH`（config.COOKIE_PATH 的再导出） |
+| 2 | Medium | 设置页 Cookie 写盘路径与生产读取路径不一致 | routes_settings.py:205 vs config.py:37-40 | 两处未共用 COOKIE_PATH | Linux 生产重启后设置页 Cookie 失效 | **已修（2026-09-11）**：写盘用 `app.COOKIE_PATH`（config.COOKIE_PATH 的再导出）；同日 S21 把写盘改为原子写（`helpers._atomic_write_text`），消除"并发读侧读到空串并缓存住空 Cookie"的窗口 |
 | 3 | Medium | 多页下载 ZIP 全量内存 | routes_download.py:180-191 | 简易实现 | 大合集内存峰值数百 MB | 临时文件流式打包 |
 | 4 | Medium | 下载链路/图片服务/设置写盘等核心路径零测试 | tests/（§19.4） | 演进节奏 | 回归风险集中在未测区 | 按覆盖矩阵补齐 |
 | 5 | Medium | 无日常自动备份、备份文件只增不减 | migrations/runner.py:46-47 | 自部署范围 | 数据丢失恢复点缺失 | cron 备份 + 备份轮转 |
@@ -1340,6 +1340,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | 项 | 原因 | 建议 | 预期收益 | 难度 |
 | --- | --- | --- | --- | --- |
 | 统一 Cookie 写盘路径 | 功能不一致（§20.2） | **已完成（2026-09-11）**：`routes_settings` 写 `app.COOKIE_PATH`（= `config.COOKIE_PATH`） | Linux 重启后设置页 Cookie 生效 | 低 |
+| Cookie 写盘原子化（S21） | 并发读侧可能读到空串并把空值缓存住 | **已完成（2026-09-11）**：`helpers._atomic_write_text`（tmp + `os.replace`，权限位保留，`PermissionError` 有界重试） | 保存 Cookie 后不再需要重启才能恢复 | 低（但要求文件所在目录可写） |
 | 补齐下载/图片/设置写盘测试 | 回归风险最高的盲区（§19.4） | **已完成（2026-09-11，S18）**：新增 55 例（含 29 个修改型端点的 CSRF 矩阵） | 核心路径可回归 | 中 |
 | 流式 ZIP 导出 | 内存峰值（§21.3） | `zipfile` 写临时文件后用 `send_file` 或流式响应 | 大合集不占内存 | 低 |
 | 补回写 3 份 spec「已实现」 | 文档纪律（§28.10） | git 提交 docs 标记 + 验证结果 | 状态一致 | 低 |
