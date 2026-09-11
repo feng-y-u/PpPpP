@@ -20,6 +20,7 @@ from flask import (Blueprint, Response, jsonify, redirect, render_template,
 import config as config_module
 import fetcher
 from fetcher import clear_search_cache
+from helpers import _atomic_write_json
 from middleware import (_csrf_required, _get_csrf_token, _get_json_body,
                         _is_authed, _rate_limit, _safe_next)
 from models import BlockedTag, get_session, safe_commit
@@ -230,9 +231,9 @@ def api_settings_post() -> Response:
                     continue
             current[key] = val
     try:
-        os.makedirs(os.path.dirname(app._SETTINGS_PATH), exist_ok=True)
-        with open(app._SETTINGS_PATH, 'w', encoding='utf-8') as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
+        # 原子写（审计 S16）：直接 open('w') 在写盘失败/进程被杀时会留下截断的
+        # settings.json，而读取侧遇到损坏只能整体回退默认 —— 用户那份配置全丢。
+        _atomic_write_json(app._SETTINGS_PATH, current)
         # prefetch_* 键与 /api/prefetch/config 保持同构：保存成功后同步内存态
         #（interval 即时生效，不再需要重启）
         _prefetch_state.update({

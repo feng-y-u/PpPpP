@@ -3,6 +3,7 @@ import logging
 import os
 import platform
 import secrets
+import shutil
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -177,6 +178,24 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'prefetch_max_illusts': ('PREFETCH_MAX_ILLUSTS', 10000),
 }
 
+def _backup_corrupt_settings(path: str) -> None:
+    """把读不出来的 settings.json 留一份副本（审计 S16），回退默认值的行为不变。
+
+    为什么值得留：损坏时 `config.py` 只回退默认值、`_load_settings()` 也只回退默认值，
+    而设置页下次保存会用默认值**整体覆盖**这个文件 —— 用户那份（可能只是手抖少了个
+    括号、或磁盘写坏了一行）的配置就永久没了，事后无从查证。副本只在不存在时写一次，
+    避免每次启动都覆盖掉第一份现场（首次损坏才有诊断价值）。
+
+    任何失败都只记日志：备份是附加证据，不能让它影响启动。
+    """
+    backup = f'{path}.corrupt.bak'
+    try:
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
+    except OSError as e:
+        logging.getLogger(__name__).warning(f'[config] 备份损坏的 settings.json 失败: {e!r}')
+
+
 _settings_path = os.path.join(_instance_dir, 'settings.json')
 if os.path.exists(_settings_path):
     try:
@@ -193,3 +212,4 @@ if os.path.exists(_settings_path):
     except Exception as _e:
         logging.getLogger(__name__).warning(
             f'[config] settings.json 读取失败，已回退默认配置: {_e!r}')
+        _backup_corrupt_settings(_settings_path)

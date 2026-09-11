@@ -7,6 +7,7 @@ import pytest
 
 import app
 import background
+import helpers
 from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
 
 
@@ -62,6 +63,43 @@ class TestPrefetchConfigAPI:
         assert saved['prefetch_interval'] == 123
         assert saved['prefetch_pages'] == 5
         assert saved['prefetch_max_illusts'] == 42
+
+    def test_post_atomic_write_leaves_no_tmp(self, client, _isolate_settings):
+        """写盘必须原子：不得在实例目录留下 .tmp 半份文件（审计 S16）。"""
+        token = _get_token(client)
+
+        resp = client.post('/api/prefetch/config',
+                           data=json.dumps({'interval': 55}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+
+        assert resp.status_code == 200
+        assert json.loads(_isolate_settings.read_text(encoding='utf-8'))['prefetch_interval'] == 55
+        assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
+
+    def test_post_write_failure_keeps_old_file_and_state(self, client, _isolate_settings,
+                                                         monkeypatch):
+        """替换失败 → 500，旧文件不变、不留 tmp，且**内存态不得漂移**。
+
+        「先写盘成功再更新内存」是这个接口的既有约定：写盘失败却更新了内存，会导致
+        运行参数与盘上配置不一致，重启后行为突变。
+        """
+        original = json.dumps({'prefetch_interval': 111}, ensure_ascii=False)
+        _isolate_settings.write_text(original, encoding='utf-8')
+        before = dict(app._prefetch_state)
+        monkeypatch.setattr(helpers.os, 'replace',
+                            lambda *a, **kw: (_ for _ in ()).throw(OSError('模拟写盘失败')))
+        token = _get_token(client)
+
+        resp = client.post('/api/prefetch/config',
+                           data=json.dumps({'interval': 999}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+
+        assert resp.status_code == 500
+        assert _isolate_settings.read_text(encoding='utf-8') == original
+        assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
+        assert dict(app._prefetch_state) == before, '写盘失败不得更新内存态'
 
     def test_post_clamps_negative_to_zero(self, client):
         token = _get_token(client)

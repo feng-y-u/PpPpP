@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 
 from flask import Blueprint, Response, jsonify, request
 
 from background import _collect_other_tag_pids, get_background_health
 from fetcher import get_detail_error_samples
+from helpers import _atomic_write_json
 from middleware import _csrf_required, _get_json_body
 from models import (CollectionItem, Illust, SearchCache, get_session,
                     safe_commit)
@@ -59,9 +59,9 @@ def prefetch_config_post() -> Response:
         for key, val in updates.items():
             current[_PREFETCH_SETTINGS_KEYS[key]] = val
         try:
-            os.makedirs(os.path.dirname(app._SETTINGS_PATH), exist_ok=True)
-            with open(app._SETTINGS_PATH, 'w', encoding='utf-8') as f:
-                json.dump(current, f, ensure_ascii=False, indent=2)
+            # 原子写（审计 S16）：直接 open('w') 会在写盘失败/进程被杀时留下截断的
+            # settings.json，读取侧遇到损坏只能整体回退默认，用户那份配置全丢。
+            _atomic_write_json(app._SETTINGS_PATH, current)
         except Exception as e:
             return jsonify({'error': f'保存失败: {e}'}), 500
         _prefetch_state.update(updates)

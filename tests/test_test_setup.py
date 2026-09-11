@@ -282,3 +282,54 @@ def test_instance_dir_override_pointing_at_file_fails_loudly(tmp_path, monkeypat
 
     with pytest.raises(OSError):
         _load_config_probe(tmp_path, monkeypatch, instance_dir=blocker)
+
+
+class TestCorruptSettingsOnLoad:
+    """settings.json 损坏时的启动行为（审计 S16）。
+
+    回退默认值的行为不变，但必须留下副本：否则设置页下次保存会用默认值**整体覆盖**
+    那个文件，用户那份（可能只是少个括号）的配置就永久没了。
+    """
+
+    @staticmethod
+    def _write_corrupt(instance_dir):
+        instance_dir.mkdir(parents=True, exist_ok=True)
+        path = instance_dir / 'settings.json'
+        path.write_text('{"per_page": 24, ', encoding='utf-8')   # 截断的 JSON
+        return path
+
+    def test_corrupt_settings_backed_up_on_load(self, tmp_path, monkeypatch):
+        instance = tmp_path / 'inst'
+        corrupted = self._write_corrupt(instance)
+
+        module = _load_config_probe(tmp_path, monkeypatch, instance_dir=instance)
+
+        backup = instance / 'settings.json.corrupt.bak'
+        assert backup.is_file(), '损坏文件必须留一份副本'
+        assert backup.read_bytes() == corrupted.read_bytes(), '副本要与现场逐字节一致'
+        # 回退行为不变：拿不到覆盖值就用默认值
+        assert module.SETTINGS_KEYS['per_page'][1] == 60
+        assert module.PER_PAGE == 60
+
+    def test_valid_settings_creates_no_backup(self, tmp_path, monkeypatch):
+        """没坏就不该产生 .corrupt.bak —— 否则这个文件会变成噪声。"""
+        instance = tmp_path / 'inst'
+        instance.mkdir(parents=True, exist_ok=True)
+        (instance / 'settings.json').write_text('{"per_page": 33}', encoding='utf-8')
+
+        module = _load_config_probe(tmp_path, monkeypatch, instance_dir=instance)
+
+        assert module.PER_PAGE == 33
+        assert not (instance / 'settings.json.corrupt.bak').exists()
+
+    def test_existing_backup_is_not_overwritten(self, tmp_path, monkeypatch):
+        """第二次仍损坏时不得覆盖第一份副本：首次现场才有诊断价值。"""
+        instance = tmp_path / 'inst'
+        corrupted = self._write_corrupt(instance)
+        backup = instance / 'settings.json.corrupt.bak'
+        backup.write_text('first crime scene', encoding='utf-8')
+
+        _load_config_probe(tmp_path, monkeypatch, instance_dir=instance)
+
+        assert backup.read_text(encoding='utf-8') == 'first crime scene'
+        assert corrupted.read_text(encoding='utf-8') == '{"per_page": 24, ', '原始损坏文件也不该被改动'

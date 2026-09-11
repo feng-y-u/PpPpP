@@ -7,9 +7,12 @@ import time
 import zipfile
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import text
 
+import app
 import fetcher
+import helpers
 import models
 import routes_download
 from config import ITEMS_PER_PAGE
@@ -1045,6 +1048,63 @@ class TestDownloadFileZip:
         assert resp.data == b'x' * 64
         assert resp.mimetype == 'image/jpeg'
         assert resp.headers['Content-Disposition'].endswith('zip-me.jpg')
+
+
+class TestSettingsAtomicWrite:
+    """设置页写 settings.json 必须原子（审计 S16）。
+
+    直接 open('w') + json.dump 时，写盘失败/进程被杀会留下截断文件；读取侧遇损坏只能
+    整体回退默认，用户那份配置全丢。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_settings(self, monkeypatch, tmp_path):
+        path = tmp_path / 'settings.json'
+        monkeypatch.setattr(app, '_SETTINGS_PATH', str(path))
+        return path
+
+    def test_settings_post_atomic_no_tmp_left(self, client, _isolate_settings):
+        token = self._token(client)
+
+        resp = client.post('/api/settings',
+                           data=json.dumps({'per_page': 30, 'prefetch_pages': 4}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+
+        assert resp.status_code == 200
+        saved = json.loads(_isolate_settings.read_text(encoding='utf-8'))
+        assert saved['per_page'] == 30
+        assert saved['prefetch_pages'] == 4
+        assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json'], \
+            '同目录不得残留 .tmp'
+
+    def test_settings_post_write_failure_keeps_old_bytes(self, client, _isolate_settings,
+                                                         monkeypatch):
+        """替换失败 → 500，且旧文件逐字节不变、不留半份文件、内存态不漂移。"""
+        original = json.dumps({'per_page': 17}, ensure_ascii=False)
+        _isolate_settings.write_text(original, encoding='utf-8')
+        before_state = dict(app._prefetch_state)
+
+        def _boom(src, dst, *a, **kw):
+            raise OSError('模拟磁盘写入失败')
+
+        monkeypatch.setattr(helpers.os, 'replace', _boom)
+        token = self._token(client)
+
+        resp = client.post('/api/settings',
+                           data=json.dumps({'per_page': 99, 'prefetch_interval': 77}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+
+        assert resp.status_code == 500
+        assert '保存失败' in resp.get_json()['error']
+        assert _isolate_settings.read_text(encoding='utf-8') == original, '旧内容必须完整保留'
+        assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
+        assert dict(app._prefetch_state) == before_state, '写盘失败不得更新内存态'
+
+    @staticmethod
+    def _token(client):
+        return client.get('/csrf-token').get_json()['token']
 
 
 class TestDetailApiMediumUrls:

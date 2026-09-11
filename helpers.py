@@ -29,6 +29,40 @@ _image_cache_lock = threading.Lock()
 _image_cache_last_scan = 0.0
 
 
+def _atomic_write_json(path: str, data) -> None:
+    """原子写 JSON 配置文件：同目录写 tmp → fsync → `os.replace` 覆盖（审计 S16）。
+
+    为什么不能直接 `open(path, 'w')` + `json.dump`：那样写盘不是原子的，进程被 kill /
+    磁盘写满 / 断电时会留下**截断的 settings.json**。而读者（`config.py` import 时覆盖
+    常量、`_load_settings()`）碰到解析失败只能整体回退默认值 —— 用户刚改的一整份配置
+    （预取标签参数、下载线程数、代理……）就全丢了，且文件内容是不可解析的半份。
+    `os.replace` 在同一目录内是原子替换：读到的要么是旧内容、要么是新内容。
+
+    `flush` + `fsync` 在替换之前：否则断电后可能出现「文件名已更新、内容还是空的」。
+    异常一律原样抛出（不吞），由调用方决定回什么错误码。
+
+    tmp 走同目录（`<path>.tmp`）而不是系统临时目录：跨设备时 `os.replace` 会退化成
+    复制+删除，就不再是原子的。
+    """
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = f'{path}.tmp'
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        # 失败路径（open/dump/fsync/replace 任一抛）都要清掉残留 tmp：留着它会让下次
+        # 写入踩到半份内容，用户目录里也会多一个含义不明的文件。
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def enforce_image_cache_limit(cache_dir: str, force: bool = False) -> int:
     """把缩略图磁盘缓存压回容量上限，返回删除的字节数。
 

@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -99,3 +100,60 @@ class TestImageCacheEviction:
     def test_missing_dir_is_noop(self):
         assert helpers.enforce_image_cache_limit(
             os.path.join(str(self.dir), 'nope'), force=True) == 0
+
+
+class TestAtomicWriteJson:
+    """settings.json 的原子写（审计 S16）。
+
+    直接 open('w') + json.dump 时，进程被杀 / 磁盘写满 / 断电会留下**截断的**
+    settings.json；读取侧遇损坏只能整体回退默认值，用户刚改的一整份配置全丢。
+    """
+
+    def test_write_replaces_content_and_leaves_no_tmp(self, tmp_path):
+        target = tmp_path / 'settings.json'
+        target.write_text('{"old": 1}', encoding='utf-8')
+
+        helpers._atomic_write_json(str(target), {'new': 2, '中文': '中文值'})
+
+        assert json.loads(target.read_text(encoding='utf-8')) == {'new': 2, '中文': '中文值'}
+        assert list(tmp_path.iterdir()) == [target], '同目录不得残留 .tmp'
+
+    def test_write_creates_missing_directory(self, tmp_path):
+        target = tmp_path / 'nested' / 'deep' / 'settings.json'
+
+        helpers._atomic_write_json(str(target), {'a': 1})
+
+        assert json.loads(target.read_text(encoding='utf-8')) == {'a': 1}
+        assert not os.path.exists(f'{target}.tmp')
+
+    def test_replace_failure_keeps_old_bytes_and_cleans_tmp(self, tmp_path, monkeypatch):
+        """替换失败（磁盘满/权限）时旧文件必须原样，且不留半份 tmp。"""
+        target = tmp_path / 'settings.json'
+        original = '{"keep": "me"}'
+        target.write_text(original, encoding='utf-8')
+
+        def _boom(src, dst, *a, **kw):
+            raise OSError('模拟 os.replace 失败')
+
+        monkeypatch.setattr(helpers.os, 'replace', _boom)
+
+        with pytest.raises(OSError):
+            helpers._atomic_write_json(str(target), {'should': 'not land'})
+
+        assert target.read_text(encoding='utf-8') == original, '旧内容必须完整保留'
+        assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
+
+    def test_dump_failure_preserves_old_file(self, tmp_path, monkeypatch):
+        """序列化阶段就失败（不可序列化对象）：旧文件不动，也不留 tmp。"""
+        target = tmp_path / 'settings.json'
+        original = '{"keep": "me"}'
+        target.write_text(original, encoding='utf-8')
+
+        class _Unserializable:
+            pass
+
+        with pytest.raises(TypeError):
+            helpers._atomic_write_json(str(target), {'bad': _Unserializable()})
+
+        assert target.read_text(encoding='utf-8') == original
+        assert list(tmp_path.iterdir()) == [target]
