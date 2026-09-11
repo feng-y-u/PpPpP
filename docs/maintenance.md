@@ -57,6 +57,7 @@ flask run --debug
 ```
 
 > 需要访问 Pixiv：`cookies.txt`（根目录或 `/etc/pixiv-viewer/cookies.txt`）放 `PHPSESSID=xxx`。
+> **设置页更新 Cookie 就是写这个文件的同一路径**（`config.COOKIE_PATH`：存在 `/etc/pixiv-viewer/cookies.txt` 时优先它）。若把它放在 `/etc/`，请保证 **systemd 服务用户对该文件可写**，否则设置页会返回 500 并在错误信息里给出实际路径（这是刻意的失败：以前会静默写到项目根目录，重启后旧 Cookie 复归）。
 > 本机 HTTP 调试：如启用 `COOKIE_SECURE`（默认 true），设置 `COOKIE_SECURE=false`（环境变量或 `.env`）。
 
 ---

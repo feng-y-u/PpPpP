@@ -435,7 +435,23 @@
 
 **测试结果**：全量 **513 例（508 passed / 1 skipped / 4 failed，17.10s）**；4 例失败为预先存在的 Windows 沙箱子进程检查，1 例 skip 为 S17 的 POSIX 权限断言。§六 的"≥ 420 例、离线全绿、单轮 < 30s"中，用例数与耗时达标；"全绿"受那 4 个**既存、与本阶段无关**的沙箱用例影响，未变绿 —— **不宣称全绿**。
 
-**遗留边界**：CSRF 矩阵只证明"缺头时 403"，**不证明各端点的业务授权逻辑**（如收藏夹归属校验）；下载引擎的多 worker 抢同一 pid、前端 JS、`/api/image` 的 Range/ETag、令牌桶时序、真实旧库上的迁移升级仍未覆盖；`test_settings_api.py` 里 `cookies.txt` 的隔离依赖改写模块 `__file__`（路由若改用 `config.COOKIE_PATH` 更干净，但那会改变 Windows/Linux 的写入目标，属行为变更，未做）。
+**遗留边界**：CSRF 矩阵只证明"缺头时 403"，**不证明各端点的业务授权逻辑**（如收藏夹归属校验）；下载引擎的多 worker 抢同一 pid、前端 JS、`/api/image` 的 Range/ETag、令牌桶时序、真实旧库上的迁移升级仍未覆盖。
+
+---
+
+### S19（P1）设置页 Cookie 落点与读取路径统一
+
+**来源**：`docs/technical-documentation.md` §20.2 的 Medium 发现（"设置页 Cookie 写入路径与 COOKIE_PATH 不一致"，同文优先级表第 2 项），建议就是"写盘用 `config.COOKIE_PATH`"。原审计报告未命中，属 S18 收口后的第一条待办。
+
+**核心方案**：`routes_settings.api_settings_post` 的 Cookie 写盘落点由"按 `__file__` 推项目根"改为 `app.COOKIE_PATH`（`config.COOKIE_PATH` 经 app 命名空间再导出，即 fetcher 实际读取的同一个值，符合本仓库的测试 seam 约定）；路径不可写时 500 且错误信息带上实际路径。
+
+**根因（完整调用链）**：写侧 `routes_settings.py` 算的是 `<项目根>/cookies.txt`，读侧 `fetcher._load_cookie()` / `_cookie_file_stamp()` 用的是 `config.COOKIE_PATH`（Linux 上存在 `/etc/pixiv-viewer/cookies.txt` 时优先它）。两者一旦不同：① 设置页写的是没人读的文件，进程内靠直接赋值 `fetcher._cookie_value` 显得生效，**重启后读回旧 Cookie**；② `get_pooled_session()` 的失效戳盯的是 `COOKIE_PATH`，因此**新 Cookie 连当期都不会对已缓存的连接池生效**（那个 mtime 从没变过）。
+
+**测试**：`tests/test_settings_api.py` 的 `_isolate_cookies_txt` 夹具改为 patch `app.COOKIE_PATH`（不再改写模块 `__file__`），并新增 `test_cookie_lands_where_the_fetcher_reads_it`（写入后抹掉内存态、用 `fetcher._load_cookie()` 从磁盘回读，验证读写同源）与 `test_cookie_path_is_the_config_value`（落点就是 config 的值）。
+
+**已实现 + 验证结果（2026-09-11）**：改 `app.py`（`from config import` 再导出 `COOKIE_PATH`）、`routes_settings.py`（落点 + 错误信息带路径）。**证伪**：把落点改回旧的 `__file__` 推导后，`tests/test_settings_api.py` 4 例失败 —— 新用例在 `COOKIE_PATH` 处 `FileNotFoundError`（Cookie 真的写到别处去了）、写失败用例变成 `assert 200 == 500`（旧代码在可写路径上"成功"了），另外夹具收尾的"仓库根真实 cookies.txt 未被改写"断言同时触发。恢复后 15 passed。**顺带修掉的测试隔离缺陷**：`test_fetcher.py` 有 3 例走真实 `_fetch_details_parallel` → `build_pixiv_session()` → `_load_cookie()`，此前**默默依赖开发者本机存在真实 `cookies.txt`**（干净 checkout 上会 `FileNotFoundError`），现改用新增的 `_cookie_file` 夹具指向临时文件。`_isolate_cookies_txt` 的收尾也从"只断言"改为"**先无条件还原再断言**"——旧版在一次证伪跑动中真的把仓库根的真实 Cookie 覆盖成了测试 token（该文件在 `.gitignore` 里，没有副本可恢复，只能由用户重新粘贴）。
+
+**遗留边界**：Cookie 写入仍是 `open(...,'w')` 直接覆盖，**不是原子写** —— 理论上存在"读到半截内容"的窗口（读侧按 mtime 缓存，读到残缺值后会一直用错直到 mtime 再变），本条未处理（属另一个问题，未列入本次改动）；`mtime` 分辨率很粗的文件系统上，同一秒内的重写可能不改变失效戳，导致**其它线程**已缓存的连接池仍用旧 Cookie（手工低频操作，实际影响很小，且既有用例显式模拟了 mtime 变化）。
 
 ---
 
