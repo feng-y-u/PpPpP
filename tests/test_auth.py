@@ -339,3 +339,151 @@ class TestSecurityHeaders:
         resp = client.get('/')
         csp = resp.headers['Content-Security-Policy']
         assert "img-src 'self' data:" in csp
+
+
+class TestSecretFiles:
+    """密钥文件的强度与权限（审计 S17）。
+
+    两种失败模式：① 截断/空文件被直接当密钥用 —— 空 key 的 HMAC 等于没有签名，
+    游标可伪造、会话可伪造；② 文件是 0644 —— 同机其他用户能读走密钥。旧实现里
+    `.cursor_secret` 连长度都不检查，`.secret_key` 只检查"是否为空"。
+    """
+
+    def test_short_secret_regenerated(self, tmp_path):
+        import config
+        path = tmp_path / '.cursor_secret'
+        path.write_text('abc', encoding='utf-8')     # 截断的残留
+
+        secret = config._load_or_create_secret(str(path))
+
+        assert secret != 'abc'
+        assert len(secret) >= 32
+        assert path.read_text(encoding='utf-8') == secret, '新密钥必须写回文件'
+
+    def test_empty_secret_regenerated(self, tmp_path):
+        """回归：空密钥文件必须重新生成（原 app.py 的行为，现在两条密钥共用）。"""
+        import config
+        path = tmp_path / '.secret_key'
+        path.write_text('   \n', encoding='utf-8')
+
+        secret = config._load_or_create_secret(str(path))
+
+        assert len(secret) >= 32
+        assert path.read_text(encoding='utf-8') == secret
+
+    def test_missing_file_created_without_warning(self, tmp_path, caplog):
+        """首次生成是正常路径，不该产生"内容过短"这类告警噪声。"""
+        import config
+        path = tmp_path / '.cursor_secret'
+
+        with caplog.at_level(logging.WARNING, logger='config'):
+            secret = config._load_or_create_secret(str(path))
+
+        assert len(secret) >= 32 and path.is_file()
+        assert '内容过短' not in caplog.text
+
+    def test_short_secret_logs_warning(self, tmp_path, caplog):
+        """真出现了截断文件要能看见（否则只会在密钥被换掉后百思不得其解）。"""
+        import config
+        path = tmp_path / '.cursor_secret'
+        path.write_text('abc', encoding='utf-8')
+
+        with caplog.at_level(logging.WARNING, logger='config'):
+            config._load_or_create_secret(str(path))
+
+        assert '内容过短' in caplog.text
+
+    def test_valid_secret_preserved(self, tmp_path):
+        """长度够就必须原样使用：每次启动换密钥会让所有会话/游标失效。"""
+        import config
+        path = tmp_path / '.cursor_secret'
+        good = 'a' * 64
+        path.write_text(good, encoding='utf-8')
+
+        assert config._load_or_create_secret(str(path)) == good
+        assert path.read_text(encoding='utf-8') == good
+
+    def test_secret_file_mode_0600(self, tmp_path):
+        """写入后权限必须是 0600（Windows 上 POSIX 权限语义不适用，跳过）。"""
+        import os
+        import stat
+        import sys
+        import config
+
+        if sys.platform == 'win32':
+            pytest.skip('Windows 的 chmod 只映射只读位，没有 POSIX 权限语义')
+
+        path = tmp_path / '.cursor_secret'
+
+        config._load_or_create_secret(str(path))
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+        os.chmod(path, 0o644)                       # 已有文件被放宽过 → 下次启动收紧
+        config._load_or_create_secret(str(path))
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    def test_chmod_is_requested_with_0600(self, tmp_path, monkeypatch):
+        """平台无关的证据：无论读写哪条分支，都要对密钥文件请求 0600。
+
+        上一条用例在 Windows 上会 skip，这条用替身盯住实际调用的权限位，保证
+        "收紧权限"这件事在任何平台上都被执行（不是"只在 Linux 上想过")。
+        """
+        import config
+        calls = []
+        monkeypatch.setattr(config.os, 'chmod', lambda p, mode: calls.append((str(p), mode)))
+        path = tmp_path / '.cursor_secret'
+
+        config._load_or_create_secret(str(path))            # 新建分支
+        path.write_text('short', encoding='utf-8')
+        config._load_or_create_secret(str(path))            # 重生成分支
+        path.write_text('b' * 64, encoding='utf-8')
+        config._load_or_create_secret(str(path))            # 复用已有分支
+
+        assert len(calls) == 3
+        assert {mode for _, mode in calls} == {0o600}
+
+    def test_chmod_failure_does_not_break_startup(self, tmp_path, monkeypatch):
+        """权限收紧失败（Windows / 文件属主不是本用户）不能让启动炸掉。"""
+        import config
+
+        def _boom(path, mode):
+            raise OSError('模拟 chmod 不被支持')
+
+        monkeypatch.setattr(config.os, 'chmod', _boom)
+        path = tmp_path / '.cursor_secret'
+
+        secret = config._load_or_create_secret(str(path))
+
+        assert len(secret) >= 32 and path.is_file()
+
+    def test_app_and_config_use_the_same_helper(self, tmp_path):
+        """两条密钥路径都必须经过同一助手（源码级：模块级调用确实存在）。
+
+        `.secret_key` 没有可在测试里重跑的 seam（重跑 app.py 等于建第二个 Flask 应用并
+        起后台线程），所以这里用 AST 确认模块级真的调用了助手 —— 与
+        `TestPublicDeploymentPosture.test_startup_path_actually_calls_the_warning` 同款做法。
+        """
+        import ast
+        import pathlib
+
+        import app as app_module
+        import config
+
+        tree = ast.parse(pathlib.Path(app_module.__file__).read_text(encoding='utf-8'))
+        # 只看模块级语句里的调用：app.py 这里是赋值语句（app.config['SECRET_KEY'] = ...），
+        # 不是裸表达式；同时不能把函数体里的同名调用算进来（那样等于没验证启动路径）。
+        called = [
+            sub.func.id
+            for node in tree.body
+            if isinstance(node, (ast.Expr, ast.Assign, ast.AnnAssign))
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+        ]
+        assert '_load_or_create_secret' in called, 'app.py 模块级必须用它设置 SECRET_KEY'
+
+        # 真实运行态：当前进程的 SECRET_KEY 必须来自那个文件，且足够长
+        secret_path = pathlib.Path(app_module._secret_path)
+        assert secret_path.is_file()
+        assert app_module.app.config['SECRET_KEY'] == secret_path.read_text(encoding='utf-8')
+        assert len(app_module.app.config['SECRET_KEY']) >= 32
+        assert len(config.CURSOR_SECRET) >= 32

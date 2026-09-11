@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import platform
-import secrets
 import threading
 import time
 import atexit
@@ -19,6 +18,7 @@ from config import (
     MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE, SSL_VERIFY,
     _instance_dir,  # 实例目录单一来源：密钥文件路径由它派生（PIXIV_INSTANCE_DIR 可整体重定向）
+    _load_or_create_secret,  # 密钥文件统一入口：长度校验 + 权限收紧（与 .cursor_secret 同一助手）
 )
 from models import init_db, get_session  # get_session：tests 补丁目标（test_prefetch.py setattr(app, 'get_session')）
 import fetcher
@@ -74,22 +74,9 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 _secret_path = os.path.join(_instance_dir, '.secret_key')
-if os.path.exists(_secret_path):
-    with open(_secret_path) as f:
-        _secret = f.read().strip()
-    if not _secret:
-        # 空密钥文件（写入中断等残留）：重新生成，避免空 SECRET_KEY
-        # 导致会话签名可预测。
-        _secret = secrets.token_hex(32)
-        with open(_secret_path, 'w') as f:
-            f.write(_secret)
-        logger.warning('.secret_key 内容为空，已重新生成')
-    app.config['SECRET_KEY'] = _secret
-else:
-    app.config['SECRET_KEY'] = secrets.token_hex(32)
-    os.makedirs(os.path.dirname(_secret_path), exist_ok=True)
-    with open(_secret_path, 'w') as f:
-        f.write(app.config['SECRET_KEY'])
+# 与 .cursor_secret 走同一助手（审计 S17）：长度不足（不止"为空"）一律重新生成并收紧到
+# 0600。旧实现只在内容为空时重生成，截断的密钥会被直接用于会话签名。
+app.config['SECRET_KEY'] = _load_or_create_secret(_secret_path)
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 最大上传 1MB
 
 # ── Session 安全加固（公网部署基线）──

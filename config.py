@@ -32,15 +32,49 @@ _instance_dir = os.path.abspath(os.path.expanduser(
     os.environ.get('PIXIV_INSTANCE_DIR') or os.path.join(BASE_DIR, 'instance')))
 
 # 游标签名密钥
+def _restrict_secret_file(path: str) -> None:
+    """把密钥文件收紧到仅属主可读写（0600）。失败静默（审计 S17）。
+
+    静默的理由：Windows 的 `os.chmod` 只映射只读位，POSIX 权限语义不适用；POSIX 上
+    也可能遇到文件属主不是本进程用户（例如运维用 root 建过一次）而 EPERM。权限收紧
+    是纵深防御，不该因为收不紧就让服务起不来 —— 但能收紧时必须收紧。
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _load_or_create_secret(path: str, min_len: int = 32) -> str:
+    """读取密钥文件；缺失**或长度不足**时重新生成，写回并收紧权限（审计 S17）。
+
+    `min_len` 不是形式主义：截断或空文件过去被直接当密钥用（`.cursor_secret` 根本没检查，
+    `.secret_key` 只检查"是否为空"）。空文件最危险 —— HMAC 用空 key 等于没有签名，游标
+    可以伪造；会话签名同理。长度不足一律重新生成，代价是旧游标/旧会话失效，这正是想要
+    的取舍。
+
+    返回最终使用的密钥（调用方决定用途，例如 Flask 的 SECRET_KEY）。
+    """
+    existing = ''
+    try:
+        with open(path, encoding='utf-8') as f:
+            existing = f.read().strip()
+    except OSError:
+        existing = ''   # 不存在/不可读 → 走生成分支
+    if len(existing) < min_len:
+        if existing:
+            logging.getLogger(__name__).warning(
+                f'[config] {os.path.basename(path)} 内容过短（{len(existing)} 字符），已重新生成')
+        existing = secrets.token_hex(32)
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(existing)
+    _restrict_secret_file(path)
+    return existing
+
+
 _cursor_secret_path = os.path.join(_instance_dir, '.cursor_secret')
-if os.path.exists(_cursor_secret_path):
-    with open(_cursor_secret_path) as _f:
-        CURSOR_SECRET = _f.read().strip()
-else:
-    CURSOR_SECRET = secrets.token_hex(32)
-    os.makedirs(_instance_dir, exist_ok=True)
-    with open(_cursor_secret_path, 'w') as _f:
-        _f.write(CURSOR_SECRET)
+CURSOR_SECRET = _load_or_create_secret(_cursor_secret_path)
 
 # Cookie 文件路径（根据环境自动切换）
 if platform.system() == 'Linux' and os.path.exists('/etc/pixiv-viewer/cookies.txt'):
