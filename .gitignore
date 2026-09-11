@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 cookies.txt
+cookies.txt.tmp
 downloads/
 instance/
 .env

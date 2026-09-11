@@ -156,4 +156,109 @@ class TestAtomicWriteJson:
             helpers._atomic_write_json(str(target), {'bad': _Unserializable()})
 
         assert target.read_text(encoding='utf-8') == original
+
+
+class TestAtomicWriteText:
+    """纯文本的原子写（审计 S19 遗留：设置页写 cookies.txt）。
+
+    与 JSON 版同一套纪律，但读侧完全不同：`fetcher._load_cookie()` 在其它线程读同一
+    路径，读到空串还会**把空值连同 mtime 一起缓存住**。所以这里除了"失败不动旧文件"，
+    还多两条契约：不创建父目录（目录写错要明确失败）、Windows 共享冲突有界重试。
+    """
+
+    def test_write_replaces_content_and_leaves_no_tmp(self, tmp_path):
+        target = tmp_path / 'cookies.txt'
+        target.write_text('PHPSESSID=old\n', encoding='utf-8')
+
+        helpers._atomic_write_text(str(target), 'PHPSESSID=new\n')
+
+        assert target.read_text(encoding='utf-8') == 'PHPSESSID=new\n'
+        assert list(tmp_path.iterdir()) == [target], '同目录不得残留 .tmp'
+
+    def test_write_creates_the_file_when_missing(self, tmp_path):
+        target = tmp_path / 'cookies.txt'
+
+        helpers._atomic_write_text(str(target), 'PHPSESSID=fresh\n')
+
+        assert target.read_text(encoding='utf-8') == 'PHPSESSID=fresh\n'
+        assert list(tmp_path.iterdir()) == [target]
+
+    def test_does_not_create_missing_parent_directory(self, tmp_path):
+        """父目录不存在要**明确失败**，不能静默补出来。
+
+        与 `_atomic_write_json` 的差别是刻意的：Cookie 落点由 `config.COOKIE_PATH`
+        决定（Linux 上可能是 `/etc/pixiv-viewer/`），目录不存在属于部署配置错误，
+        悄悄 makedirs 会把错误藏起来；旧实现 `open(path, 'w')` 也是直接失败。
+        """
+        target = tmp_path / 'missing-dir' / 'cookies.txt'
+
+        with pytest.raises(FileNotFoundError):
+            helpers._atomic_write_text(str(target), 'PHPSESSID=x\n')
+
+        assert not (tmp_path / 'missing-dir').exists()
+
+    def test_replace_failure_keeps_old_bytes_and_cleans_tmp(self, tmp_path, monkeypatch):
+        """替换失败时旧 Cookie 必须原样可用，且不留半份 tmp。
+
+        旧实现"先截断再写"会把保存失败升级成"立刻断网"；原子写不会。
+        """
+        target = tmp_path / 'cookies.txt'
+        original = 'PHPSESSID=still-good\n'
+        target.write_text(original, encoding='utf-8')
+
+        def _boom(src, dst, *a, **kw):
+            raise OSError('模拟 os.replace 失败')
+
+        monkeypatch.setattr(helpers.os, 'replace', _boom)
+
+        with pytest.raises(OSError):
+            helpers._atomic_write_text(str(target), 'PHPSESSID=new\n')
+
+        assert target.read_text(encoding='utf-8') == original
+        assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
+
+    def test_permission_error_is_retried(self, tmp_path, monkeypatch):
+        """Windows：读侧正持着目标文件时 `os.replace` 抛 PermissionError，要有界重试。
+
+        POSIX 的 rename 没有这个问题，所以这条是为开发机（以及可能的 Windows 部署）
+        准备的，不重试就会把"保存 Cookie"变成偶发 500。
+        """
+        target = tmp_path / 'cookies.txt'
+        target.write_text('PHPSESSID=old\n', encoding='utf-8')
+        real_replace = helpers.os.replace
+        attempts = []
+
+        def _flaky(src, dst, *a, **kw):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise PermissionError(13, 'Permission denied（模拟共享冲突）')
+            return real_replace(src, dst, *a, **kw)
+
+        monkeypatch.setattr(helpers.os, 'replace', _flaky)
+
+        helpers._atomic_write_text(str(target), 'PHPSESSID=new\n')
+
+        assert len(attempts) == 3, '前两次失败后应重试，第三次成功'
+        assert target.read_text(encoding='utf-8') == 'PHPSESSID=new\n'
+        assert list(tmp_path.iterdir()) == [target], '成功后不得残留 .tmp'
+
+    def test_permission_error_after_retries_is_raised(self, tmp_path, monkeypatch):
+        """重试耗尽要原样抛出（调用方据此回 500），并清掉 tmp。"""
+        target = tmp_path / 'cookies.txt'
+        original = 'PHPSESSID=old\n'
+        target.write_text(original, encoding='utf-8')
+        attempts = []
+
+        def _always_denied(src, dst, *a, **kw):
+            attempts.append(1)
+            raise PermissionError(13, 'Permission denied（模拟持续占用）')
+
+        monkeypatch.setattr(helpers.os, 'replace', _always_denied)
+
+        with pytest.raises(PermissionError):
+            helpers._atomic_write_text(str(target), 'PHPSESSID=new\n')
+
+        assert len(attempts) == 5, '重试次数必须有界'
+        assert target.read_text(encoding='utf-8') == original
+        assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
         assert list(tmp_path.iterdir()) == [target]

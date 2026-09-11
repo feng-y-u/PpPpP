@@ -289,6 +289,154 @@ class TestSettingsCookie:
         assert _ORIGINAL_COOKIE_PATHS['app'] == config.COOKIE_PATH
         assert _ORIGINAL_COOKIE_PATHS['fetcher'] == config.COOKIE_PATH
 
+    def test_cookie_write_is_an_atomic_swap(self, client, _isolate_cookies_txt, monkeypatch):
+        """写 Cookie 必须是"同目录 tmp → os.replace"，**不能先把目标文件截断再写**。
+
+        为什么这在这里是必需品而不是洁癖：`fetcher._load_cookie()` 在其它线程里读同一
+        路径（生产是 `gunicorn -w 1 --threads 8`），而 `open(path, 'w')` 会**先截断**。
+        读侧读到空串时会把 `_cookie_value` 置空并**连同 mtime 一起缓存**（见
+        `fetcher._load_cookie`），之后除非文件 mtime 再变，那条线程/那个连接池会一直
+        用空 Cookie —— 症状就是"设置页明明保存成功了，搜索仍 401/空结果，重启才好"。
+
+        本用例在 `os.replace` 被调用的**那一刻**取证：目标文件必须仍是完整的旧值
+        （说明它从未被提前截断），tmp 里已是完整的新值。
+        """
+        target = _isolate_cookies_txt
+        target.write_text('PHPSESSID=old-token\n', encoding='utf-8')
+        real_replace = os.replace
+        observed = []
+
+        def spy(src, dst, *args, **kwargs):
+            if os.path.abspath(dst) == os.path.abspath(str(target)):
+                with open(dst, encoding='utf-8') as f:
+                    old_seen = f.read()
+                with open(src, encoding='utf-8') as f:
+                    new_seen = f.read()
+                observed.append((old_seen, new_seen))
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, 'replace', spy)
+
+        resp = _post_settings(client, {'cookie': 'new-token'})
+
+        assert resp.status_code == 200
+        assert observed == [('PHPSESSID=old-token\n', 'PHPSESSID=new-token\n')], (
+            '替换瞬间应当是"旧值仍完整、新值已完整落在 tmp"；'
+            '观测为空说明没有走 tmp+replace 原子替换')
+        assert target.read_text(encoding='utf-8') == 'PHPSESSID=new-token\n'
+        assert not os.path.exists(str(target) + '.tmp'), '成功路径不得残留 tmp'
+
+    def test_failed_cookie_write_keeps_the_previous_cookie(
+            self, client, _isolate_cookies_txt, monkeypatch):
+        """交换失败时必须保住原来那个能用的 Cookie，并清掉 tmp。
+
+        旧实现"先截断再写"会把"保存失败"直接升级成"立刻断网"：中途任何失败都留下
+        一个空文件，而读侧还会把空值缓存住。
+        """
+        target = _isolate_cookies_txt
+        target.write_text('PHPSESSID=old-token\n', encoding='utf-8')
+        real_replace = os.replace
+
+        def explode(src, dst, *args, **kwargs):
+            if os.path.abspath(dst) == os.path.abspath(str(target)):
+                raise OSError('disk full（模拟替换失败）')
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, 'replace', explode)
+
+        resp = _post_settings(client, {'cookie': 'new-token'})
+
+        assert resp.status_code == 500
+        assert str(target) in resp.get_json()['error'], '错误信息要给出实际路径'
+        assert target.read_text(encoding='utf-8') == 'PHPSESSID=old-token\n', (
+            '写入失败不得破坏原来可用的 Cookie')
+        assert not os.path.exists(str(target) + '.tmp'), '失败路径必须清掉 tmp'
+
+    def test_concurrent_reader_never_sees_a_truncated_cookie(
+            self, client, _isolate_cookies_txt):
+        """读侧并发（`--threads 8` 的真实情形）：读到的值必须是旧的或新的，**绝不能是空串**。
+
+        这是症状级断言：空串一旦被 `_load_cookie` 缓存住（它读到空就把 `_cookie_value`
+        置空并连 mtime 一起记下），那条线程会一直用空 Cookie，直到 mtime 再变。
+        读线程每次强制把 `_cookie_mtime` 归零，保证它真的回读磁盘（模拟"刚建连接池/
+        换了线程"），否则 mtime 缓存会把问题挡住。
+
+        平台差异（如实断言，不放宽核心保证）：POSIX 的 `rename` 是原子的，读侧既不会
+        读到半截内容、也不会报错；Windows 上 `os.replace` 期间目标名会短暂处于"删除
+        待定"状态，读侧 `open` 可能抛 **PermissionError** —— 那仍不是读到脏内容。所以
+        这里对"绝不出现空/半截值"在两端都断言（这才是被审计的缺陷），对"读侧不报错"
+        只在 POSIX 上断言。生产是 Linux（systemd + gunicorn），Windows 只是开发机。
+
+        读侧刻意 sleep 2ms 而不是死循环空转：真实读侧是请求线程在 mtime 变化时 open
+        一次（`fetcher._load_cookie`），不是自旋。自旋会把 Windows 的共享冲突放大成
+        "目标文件永远开着"，那是测试造出来的现象、不是产品现象。2ms 的轮询仍然比写侧
+        的截断窗口快几个数量级 —— 旧实现上照样能复现读到空串（2026-09-11 实测 120 轮
+        内必现）。
+        """
+        import threading
+        import time
+
+        target = _isolate_cookies_txt
+        target.write_text('PHPSESSID=old-token\n', encoding='utf-8')
+        rounds = 120
+        seen_values = []
+        read_errors = []
+        stop = threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    fetcher._cookie_mtime = 0.0
+                    fetcher._load_cookie()
+                    seen_values.append(fetcher._cookie_value)
+                except PermissionError as exc:
+                    read_errors.append(exc)   # 仅 Windows 的共享冲突，见 docstring
+                except Exception as exc:
+                    read_errors.append(exc)
+                time.sleep(0.002)
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        try:
+            for i in range(rounds):
+                resp = _post_settings(client, {'cookie': f'new-token-{i}'})
+                assert resp.status_code == 200, f'第 {i} 次写入失败: {resp.get_json()}'
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+
+        if os.name == 'posix':
+            assert not read_errors, f'POSIX 下读侧不该报错: {read_errors[:3]}'
+        else:
+            unexpected = [e for e in read_errors if not isinstance(e, PermissionError)]
+            assert not unexpected, f'Windows 下只允许共享冲突型 PermissionError: {unexpected[:3]}'
+
+        allowed = {'old-token'} | {f'new-token-{i}' for i in range(rounds)}
+        bad = [v for v in seen_values if v not in allowed]
+        assert not bad, (
+            f'读到非完整值（空/截断）{bad[:5]}，共读取 {len(seen_values)} 次；'
+            '写侧必须先写 tmp 再原子替换')
+
+        # 收尾一致性：磁盘上是最后一次写进去的值，且能被读回来
+        fetcher._cookie_mtime = 0.0
+        fetcher._load_cookie()
+        assert fetcher._cookie_value == f'new-token-{rounds - 1}'
+
+    @pytest.mark.skipif(os.name != 'posix', reason='POSIX 权限位（Windows 的 chmod 语义不同）')
+    def test_cookie_write_preserves_existing_file_mode(self, client, _isolate_cookies_txt):
+        """已加固过的 Cookie 文件权限不得被设置页悄悄放宽。
+
+        旧实现 `open(path, 'w')` 对**已存在**的文件是保留原权限的；换成 tmp+replace 后
+        新文件的权限来自 tmp（默认 umask），所以必须显式把原模式挪到 tmp 上。
+        """
+        target = _isolate_cookies_txt
+        target.write_text('PHPSESSID=old-token\n', encoding='utf-8')
+        os.chmod(target, 0o600)
+
+        assert _post_settings(client, {'cookie': 'new-token'}).status_code == 200
+
+        assert oct(os.stat(target).st_mode & 0o777) == oct(0o600)
+
 
 class _AliveThread:
     """最小替身：`get_background_health()` 只对线程对象调 `is_alive()`。"""

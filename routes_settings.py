@@ -21,7 +21,7 @@ import config as config_module
 import fetcher
 from fetcher import clear_search_cache
 from background import get_background_health
-from helpers import _atomic_write_json
+from helpers import _atomic_write_json, _atomic_write_text
 from middleware import (_csrf_required, _get_csrf_token, _get_json_body,
                         _is_authed, _rate_limit, _safe_next)
 from routes_prefetch import _PREFETCH_SETTINGS_KEYS
@@ -231,8 +231,9 @@ def api_settings_post() -> Response:
         # 不再静默写到一个无害文件然后假装成功。
         cookie_path = app.COOKIE_PATH
         try:
-            with open(cookie_path, 'w') as f:
-                f.write(f'PHPSESSID={clean_val}\n')
+            # 原子写：读侧在其它线程读同一路径（--threads 8），先截断再写会让它读到
+            # 空串并把空值连同 mtime 一起缓存住（此后一直用空 Cookie，重启才恢复）。
+            _atomic_write_text(cookie_path, f'PHPSESSID={clean_val}\n')
         except OSError as e:
             return jsonify({'error': f'cookies.txt 写入失败（{cookie_path}）: {e}'}), 500
         fetcher._cookie_value = clean_val

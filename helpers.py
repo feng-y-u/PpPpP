@@ -63,6 +63,60 @@ def _atomic_write_json(path: str, data) -> None:
                 pass
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    """原子写纯文本文件：同目录 tmp → fsync → `os.replace` 覆盖（审计 S19 遗留）。
+
+    与 `_atomic_write_json` 同款纪律（tmp 走同目录以免跨设备退化成复制、替换前
+    fsync、失败清 tmp），但**刻意不去改动/复用那个函数** —— 它服务 settings.json，
+    行为已稳定且有既有用例；这里唯一多出来的语义是"保留目标文件原有权限位"（见下）。
+
+    为什么 Cookie 需要原子写：读侧 `fetcher._load_cookie()` 在**其它线程**里读同一
+    路径（生产是 `gunicorn -w 1 --threads 8`）。`open(path, 'w')` 会先截断再写，
+    读侧有机会读到空串，而它读到空串时会把 `_cookie_value` 置空并**连同 mtime
+    一起缓存**（见 `_load_cookie`）—— 于是那条线程/那个连接池会一直用空 Cookie，
+    直到文件 mtime 再变。症状是"设置页保存成功了，搜索仍 401/空结果，重启才恢复"。
+    已有回归用例 `test_concurrent_reader_never_sees_a_truncated_cookie` 能在旧实现上
+    复现（120 轮写入期间读到过空串）。
+
+    权限：`open(path, 'w')` 对**已存在**的文件保留原模式，而 tmp 的模式来自 umask，
+    直接 replace 会把管理员加固过的 0600 悄悄放宽成 0644 —— 所以目标已存在时把它的
+    模式搬到 tmp 上（保持既有语义，不是新增收紧）。目标还不存在时保持默认模式。
+
+    不创建父目录：调用方给的落点必须已经存在（与旧行为一致，目录写错要明确失败，
+    而不是被静默补出来）。异常一律原样抛出，由调用方决定回什么错误码。
+    """
+    tmp_path = f'{path}.tmp'
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_path, os.stat(path).st_mode & 0o777)
+        except OSError:
+            pass
+        # Windows：目标文件正被读侧打开时 `os.replace` 会因共享冲突抛 PermissionError
+        # （POSIX 的 rename 不受影响，所以生产 Linux 从未见过）。读侧持句柄的时间极短，
+        # 有界重试即可；仍然失败就原样抛出，由调用方回 500。
+        replace_error = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, path)
+                replace_error = None
+                break
+            except PermissionError as e:
+                replace_error = e
+                time.sleep(0.02 * (attempt + 1))
+        if replace_error is not None:
+            raise replace_error
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def enforce_image_cache_limit(cache_dir: str, force: bool = False) -> int:
     """把缩略图磁盘缓存压回容量上限，返回删除的字节数。
 
