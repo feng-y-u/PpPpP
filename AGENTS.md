@@ -134,7 +134,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **`COOKIE_SECURE` 默认 true**：本地 HTTP 调试必须设 `COOKIE_SECURE=false`（环境变量或 `.env`），否则登录态不回传。
 - **旧 `SETTINGS_PASSWORD` 流程仍保留**：已全局登录则直通设置页，否则走设置解锁页。
 - `_AUTH_EXEMPT_PATHS = {'/login', '/favicon.ico', '/csrf-token'}`，`/static` 前缀豁免。
-- `/api/open-dir` 仅允许 `remote_addr` 为 `127.0.0.1` / `::1`。
+- `/api/open-dir` 仅允许 `remote_addr` 为 `127.0.0.1` / `::1`，且**只要请求带 `X-Forwarded-For` 就直接 403**（fail-closed：反代后面该功能一律不可用，需要时用 SSH 隧道直连本机端口；见 `docs/maintenance.md`「8. 公网部署检查清单」）。
 
 ### API 行为
 
@@ -142,7 +142,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **搜索是异步的**：`GET /search` 立即返回 `task_id`，后台线程拉取，前端轮询 `/api/search/status/<task_id>`。任务存于 `_search_tasks`，访问 status 时顺带清理过期任务；游标含时间戳，**24 小时过期**。空页去重与死游标作废由前端处理。
 - **提交新搜索会取消所有在途搜索任务**（`_submit_search_task` 置位旧任务的 `cancel_event`，单人应用同时只该有一个搜索在跑，旧任务继续拉详情只会烧令牌桶拖慢新搜索）。fetcher 侧取消机制：`SearchCancelledError` + `_cancel_begin/_cancel_end/_cancelled`（与详情预算同款 `threading.local`，预取/后台补全线程不受影响），检查点在 `paginated_search` 翻页前后与 `_fetch_details_parallel` 每个 worker 发请求前；**在途请求照常处理完并入库**（下次搜索命中 `existing_map` 免重拉），未发起的直接跳过。任务终态：`done` / `error` / `cancelled`（cancelled 返回 200）。前端用搜索代数（`searchGeneration`）让旧任务的轮询静默失效。
 - **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。所有 Pixiv 请求**必须经 `fetcher.build_pixiv_session()`** 构造 session，禁止裸建 `requests.Session()`。
-- **缩略图代理 `/thumb/<base64_url>`**：仅允许 `https://i.pximg.net/` 白名单，磁盘缓存 7 天 + 失败 URL 冷却，防刷新时打爆图床。
+- **缩略图代理 `/thumb/<base64_url>`**：入口仅允许 `https://i.pximg.net/` 白名单，磁盘缓存 7 天 + 失败 URL 冷却，防刷新时打爆图床。**重定向不自动跟随**（`allow_redirects=False`）：3xx 时按凭据分级跟随**一次** —— 目标在 `config.IMAGE_HOST_ALLOWLIST` 内用带凭据连接池；白名单外的公网 https 用无凭据连接池（要求 `Content-Type: image/*`）并记入发现表（`GET/DELETE /api/thumb/redirect-hosts`，落盘 `instance/thumb_redirect_hosts.json`，`THUMB_REDIRECT_DISCOVERY=false` 可关闭跨域跟随）。非法目标（非 https / 内网 / 云元数据 / userinfo / 非 443）与嵌套重定向、缺 `Location` 一律 502 且**不发第二次请求**。发现表**不会**自动变成白名单（白名单只决定"是否携带凭据"）—— 确认是官方 CDN 后手工加进 `config.IMAGE_HOST_ALLOWLIST` 并重启。
 - **热点路径必须复用连接池**：`/thumb` 与 `_fetch_details_parallel` 走 `fetcher.get_pooled_session()`（线程内复用 Session），**不要在这些循环里调 `build_pixiv_session()`**。原因见文末「连接复用」。
 - **详情 API 三级令牌桶**：`DETAIL_RATE_PER_MINUTE=45`（前台搜索）、`FILL_RATE_PER_MINUTE=20`（后台补全）、`TOTAL_RATE_PER_MINUTE=60`（总闸）。
 - **详情拉取的重试是分类的**：连接错误立即放弃、限流（403/429）退避重试 —— 详见文末「重试策略」，不要在两处同时放开。
@@ -170,7 +170,8 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ### 下载
 
-- **SSL 验证默认关闭**（`SSL_VERIFY = False`）。生产环境已安装 CA 证书时可设为 `True`。
+- **SSL 校验默认开启**（`SSL_VERIFY = True`）。仅当代理**确实在做 TLS 拦截**（自签根证书解密流量）时才设 `SSL_VERIFY=false`；先跑只读诊断 `python scripts/check_tls.py` 判定（退出码 0 可安全开启校验 / 1 疑似拦截或缺 CA / 2 无法判定），处置见 `docs/maintenance.md`「9. TLS 校验与代理」。
+- **图片地址硬校验 + 凭据分级**（`helpers.check_image_url` + `config.IMAGE_HOST_ALLOWLIST`）：下载与 `/thumb` 重定向共用同一判定 —— 非 https / 内网与云元数据地址 / 带 userinfo / 非 443 端口一律拒绝且**不发起请求**；白名单（`i.pximg.net`）内用带凭据会话，白名单外的公网 https 改用 `fetcher.build_credentialless_session()`（无 Cookie 头、空 cookie jar）继续取图。根因是 `build_pixiv_session()` 的 Cookie 挂在**会话级** header 上，requests 会把它发给任意主机。
 - 下载引擎在 `background.py`：`_download_illust` 用 `download_locks` 去重、支持取消、按 `PAGE_DOWNLOAD_INTERVAL` 在页间间隔；**无 `original_urls` 时不固化为 `done`**，而是置空以便重试。
 - 自动关注发现的新作品先 `commit` 再提交下载任务（否则 `_download_illust` 查不到行会静默跳过）。
 
@@ -186,7 +187,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份）、`test_helpers.py`（下载目录扫描等纯工具函数）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**作者搜索切片与结果缓存**/**详情预算**）、`test_prefetch.py`（预取引擎/容量清理）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向：凭据分级/发现表/观测 API）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。

@@ -1,7 +1,8 @@
 # Pixiv Viewer 高风险修复计划（P0 / P1）
 
 > 来源：《Pixiv Viewer 深度架构与风险审计报告》（`docs/risk-audit-report.md`，2026-09-10）。
-> 日期：2026-09-10。状态：**规划阶段，未写任何代码**。
+> 日期：2026-09-10。状态：**P0（S1–S7b）已实现、已提交、已推送，并在真实部署上验证；P1（S8–S18）待实施**。
+> P0 的提交清单、测试增量、逐步证伪证据与部署验证见文末「七、P0 实施与验证结果」。
 > 硬约束：不重写；不改"单人自部署 + Flask + SQLite + gunicorn -w 1"总体架构；最小修改优先；每步必须有测试；不顺手做无关重构；不为优雅改变已稳定行为。
 
 ## 0. 前置约束（贯穿全部步骤）
@@ -19,27 +20,27 @@
 
 顺序原则：**P0 全部先行 → P1；同文件步骤相邻**（减少反复触碰同一函数的冲突与回归风险）；**测试基建隔离前置**到"测试补齐"之前。
 
-| 步骤 | 优先级 | 问题 | 主要文件簇 | 可合并提交 |
-|---|---|---|---|---|
-| S1 | P0 | 下载取消/reset 竞态（幻影 done） | background.py / routes_download.py | — |
-| S2 | P0 | download safe_commit 异常 → downloading 卡死 | background.py / routes_download.py | — |
-| S3 | P0 | 下载 queued 窗口丢失（+ `_queued_downloads` 并发快照） | runtime.py / background.py / routes_download.py | — |
-| S4 | P0 | 预取异常导致容量清理被跳过 | background.py | 可与 S2 合并（不同函数，建议独立） |
-| S5 | P0 | SQLite WAL 备份缺陷 | migrations/runner.py | — |
-| S6 | P0 | 公网部署安全姿态 | app.py / routes_gallery.py / routes_settings.py / docs/maintenance.md | — |
-| S7a | P0 | SSL_VERIFY 默认值（探测已完成：代理透传）+ 下载 URL 校验 | config.py / background.py / scripts/check_tls.py / docs/maintenance.md | 与 S6 顺序执行 |
-| S7b | P0 | /thumb 越界重定向拒绝 + 自动发现机制 | config.py / runtime.py / routes_gallery.py / helpers.py | 复用 S16 的 _atomic_write_json（未合并前内联） |
-| S8 | P1(前置) | 测试基建隔离（密钥/settings/缓存目录） | config.py / routes_gallery.py / tests/conftest.py | — |
-| S9 | P1 | 重复下载保护 | background.py / routes_download.py | — |
-| S10 | P1 | SearchCache 并发一致性 | background.py | — |
-| S11 | P1 | thumb 信号量饥饿 | runtime.py / routes_gallery.py | — |
-| S12 | P1 | 后台线程 heartbeat | background.py / routes_prefetch.py | 可与 S11 合并 |
-| S13 | P1 | Pixiv 403 分类 | fetcher.py | — |
-| S14 | P1 | `_fill_last_attempt` 内存增长 | fetcher.py | 可与 S13 合并 |
-| S15 | P1 | ZIP 内存问题 | routes_download.py / config.py | — |
-| S16 | P1 | settings.json 原子写 | helpers.py / routes_settings.py / routes_prefetch.py / config.py | — |
-| S17 | P1 | secret 文件权限 | config.py / app.py | 可与 S16 合并 |
-| S18 | P1 | 下载/图片/settings 测试补齐 | tests/（新增 3 文件 + conftest） | 收口步骤 |
+| 步骤 | 优先级 | 问题 | 主要文件簇 | 可合并提交 | 状态 |
+|---|---|---|---|---|---|
+| S1 | P0 | 下载取消/reset 竞态（幻影 done） | background.py / routes_download.py | — | ✅ `81300ec` |
+| S2 | P0 | download safe_commit 异常 → downloading 卡死 | background.py / routes_download.py | — | ✅ `1f510d5` |
+| S3 | P0 | 下载 queued 窗口丢失（+ `_queued_downloads` 并发快照） | runtime.py / background.py / routes_download.py | — | ✅ `981628e` |
+| S4 | P0 | 预取异常导致容量清理被跳过 | background.py | 可与 S2 合并（不同函数，建议独立） | ✅ `4a5dd97` |
+| S5 | P0 | SQLite WAL 备份缺陷 | migrations/runner.py | — | ✅ `b55541b` |
+| S6 | P0 | 公网部署安全姿态 | app.py / routes_gallery.py / routes_settings.py / docs/maintenance.md | — | ✅ `6e446e3` |
+| S7a | P0 | SSL_VERIFY 默认值（探测已完成：代理透传）+ 下载 URL 校验 | config.py / background.py / scripts/check_tls.py / docs/maintenance.md | 与 S6 顺序执行 | ✅ `e5b73b8` |
+| S7b | P0 | /thumb 越界重定向拒绝 + 自动发现机制 | config.py / runtime.py / routes_gallery.py / helpers.py | 复用 S16 的 _atomic_write_json（未合并前内联） | ✅ `7fea3b5` |
+| S8 | P1(前置) | 测试基建隔离（密钥/settings/缓存目录） | config.py / routes_gallery.py / tests/conftest.py | — | ⬜ 待实施 |
+| S9 | P1 | 重复下载保护 | background.py / routes_download.py | — | ⬜ 待实施 |
+| S10 | P1 | SearchCache 并发一致性 | background.py | — | ⬜ 待实施 |
+| S11 | P1 | thumb 信号量饥饿 | runtime.py / routes_gallery.py | — | ⬜ 待实施 |
+| S12 | P1 | 后台线程 heartbeat | background.py / routes_prefetch.py | 可与 S11 合并 | ⬜ 待实施 |
+| S13 | P1 | Pixiv 403 分类 | fetcher.py | — | ⬜ 待实施 |
+| S14 | P1 | `_fill_last_attempt` 内存增长 | fetcher.py | 可与 S13 合并 | ⬜ 待实施 |
+| S15 | P1 | ZIP 内存问题 | routes_download.py / config.py | — | ⬜ 待实施 |
+| S16 | P1 | settings.json 原子写 | helpers.py / routes_settings.py / routes_prefetch.py / config.py | — | ⬜ 待实施 |
+| S17 | P1 | secret 文件权限 | config.py / app.py | 可与 S16 合并 | ⬜ 待实施 |
+| S18 | P1 | 下载/图片/settings 测试补齐 | tests/（新增 3 文件 + conftest） | 收口步骤 | ⬜ 待实施 |
 
 **依赖关系**：
 - S1/S2/S3/S9 都改 `_download_illust` / `routes_download.py` → 顺序执行，不并行。
@@ -447,3 +448,60 @@
 1. 全量离线测试全绿 + 真实环境冒烟：启动 `gunicorn -w 1 --threads 8`，手工验证"搜索一次 / 下载一次 / 图库一页缩略图 / 设置页保存一次 / 预取状态页"。
 2. 回写 `docs/superpowers/plans/2026-09-10-risk-audit-fixes.md` 各步骤状态与验证结果（仓库既有纪律）。
 3. 更新 `docs/risk-audit-report.md` 中对应问题的状态（已修复/已缓解），保留未处理项（P2/P3）与"暂不修"清单。
+
+---
+
+## 七、P0 实施与验证结果（S1–S7b，2026-09-10 ~ 2026-09-11）
+
+**结论**：P0 的 8 步全部实现、独立提交、推送远程，并已在真实部署（`pixiv-viewer.service`）上验证。P1（S8–S18）尚未开始。
+
+**基线数字**：测试函数 309 → **371**（+62）；全量离线收集 **391 例 / 387 passed**。
+`tests/test_test_setup.py` 的 4 例失败为**预先存在**（Windows 沙箱 ConstrainedLanguage 下子进程 PowerShell 检查），已用 `git stash` 回退本阶段全部改动复现同一失败，与本阶段无关。
+
+### 7.1 提交与测试增量
+
+| 步骤 | 提交 | 新增测试函数 | 触及的测试文件 |
+|---|---|---|---|
+| S1 | `81300ec` | 7 | `tests/test_download.py` |
+| S2 | `1f510d5` | 6 | `tests/test_download.py` |
+| S3 | `981628e` | 5 | `test_download.py`、`test_prefetch.py` |
+| S4 | `4a5dd97` | 4 | `tests/test_prefetch.py` |
+| S5 | `b55541b` | 3 | `tests/test_migrations.py` |
+| S6 | `6e446e3` | 7 | `tests/test_auth.py` |
+| S7a | `e5b73b8` | 17 | `test_download.py`、`test_fetcher.py`、`test_auth.py`、新增 `tests/test_tls_config.py` |
+| S7b | `7fea3b5` | 13 | 新增 `tests/test_thumb.py` |
+
+### 7.2 逐步证伪证据（已按「通用验收模板」第 2 条执行）
+
+方法统一为：`git stash push -- <该步源码文件>`（保留测试）→ 跑该步用例 → 期望出现失败 → `git stash pop` → `grep` 确认修复标记已恢复。
+
+| 步骤 | 回退修复后的失败形态（行为级） |
+|---|---|
+| S1 | `test_reset_racing_worker_never_leaves_phantom_done`、`test_reset_during_final_write_leaves_no_phantom_done` 失败：出现 DB=`done` 而文件已被 reset 删除的幻影态 |
+| S2 | `test_download_terminal_commit_failure_resets_to_failed`、`test_download_start_commit_failure_aborts_without_touching_state` 失败：提交异常后状态停在 `downloading`；`test_ghost_detection_keeps_live_download` 失败：幽灵复位误伤活跃下载 |
+| S3 | `test_download_missing_row_logs_failed`、`test_queued_download_access_always_under_lock`、`test_capacity_cleanup_keeps_queued_download` 失败：queued 窗口内的作品行被缓存清理删除且无任何记录 |
+| S4 | `test_prefetch_loop_runs_cleanup_when_refresh_raises`、`test_prefetch_loop_runs_cleanup_when_tag_raises` 失败：`_prefetch_capacity_cleanup` 的 mock 计数为 0 → 容量上限失效 |
+| S5 | `test_backup_captures_wal_uncheckpointed_data` 失败：用 `sqlite3` 打开 `.bak` 读不到仍在 WAL 中的已提交行；`test_backup_copies_wal_when_checkpoint_fails` 用 `raising=False` 让失败成为行为级而非结构性 |
+| S6 | `test_rejects_spoofed_loopback_via_xff`（伪造 XFF 打 `/api/open-dir` 得到 200）、`test_dev_server_bind_defaults_to_loopback`、`test_unlock_failure_applies_delay`（`sleeps == []`）失败 |
+| S7a | 9 例非法地址用例全灭，其中 `http://169.254.169.254/latest/meta-data/` 报 **`assert 'done' == 'failed'`** —— 旧代码把云元数据端点当图片下载成功并标记 `done`；`test_download_does_not_follow_redirect`、`test_ssl_verify_defaults_to_true` 同时失败；凭据分级用例因旧代码无该 API 报 `AttributeError`（结构性，已在报告中如实标注） |
+| S7b | A/B 探测（同一替身会话分别跑新旧代码）：旧代码初始请求 `allow_redirects=True`，且**跨域第二个出站请求携带 `cookie=PHPSESSID=secret`**；新代码为 `allow_redirects=False` + `cookie=NONE` + 发现表记录 `img-cdn.example.net` |
+
+### 7.3 真实部署验证（2026-09-11，服务器 `pixiv-viewer.service`）
+
+| 检查 | 结果 |
+|---|---|
+| `scripts/check_tls.py` | **退出码 0**：`www.pixiv.net` / `i.pximg.net` 在 `direct` 链路 `verify=True` 均成功，issuer=Google Trust Services WE1 / WR1 |
+| 指纹交叉印证 | 开发机（经代理）与服务器（直连）两条独立链路得到**同一组叶证书指纹**（`baaff5d5e06af2d2` / `eded7a031557e60`）→ 进一步支持"链路无劫持" |
+| 新默认是否生效 | 运行时 `config.SSL_VERIFY=True`；systemd unit 无 `Environment=` 覆盖、服务器 `.env` 未设该键 → **未使用 `SSL_VERIFY=false` 逃生门**，默认值如期生效 |
+| 重启后日志 | 无 SSL 报错、无 traceback；`[prefetch] 后台线程已启动，interval=3600s`；"免认证"告警如期未出现（该部署设了 `ACCESS_PASSWORD`） |
+| 真实取图冒烟（开发机，离线探测真实 `i.pximg.net` URL） | 缩略图 `200 / image/jpeg / 21242B`、原图 `200 / image/png / 1085377B`，均 `is_redirect=False` → 证明"禁止跟随重定向"不误伤真实取图 |
+
+### 7.4 本阶段遗留（诚实记录）
+
+1. **`AGENTS.md` 文档同步**：S6/S7a/S7b 改变了公网部署姿态、`SSL_VERIFY` 默认值与 `/thumb` 重定向策略，`AGENTS.md` 对应小节原写"SSL 验证默认关闭"等，**需同步**（本阶段末尾随 `docs:` 提交处理）。
+2. **`docs/risk-audit-report.md` 逐条状态回写**（本文件「收口验收」第 3 条）尚未做，留到 S18 收口时一并处理。
+3. **已知边界（有意不改，记录在案）**：
+   - 下载路径未校验响应 `Content-Type`（`/thumb` 的 B 级重定向路径已校验 `image/*`）；
+   - `/thumb` B 级未做图片 magic bytes / 体积上限校验；
+   - `check_image_url` 刻意不做 DNS 解析（防 TOCTOU 与每图一次解析开销），域名的信任来自证书校验 + 凭据分级。
+4. **`instance/thumb_redirect_hosts.json`** 为新增的观测数据文件（可随时删除）；发现表不参与任何判定，也不自动提升白名单。
