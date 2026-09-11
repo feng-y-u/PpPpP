@@ -124,7 +124,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 - **settings.json 需重启服务器**：`config.py` 在 import 时读取 `instance/settings.json` 覆盖全局常量。Web UI 修改后需重启才生效；例外是 `prefetch_interval`（经 `/api/prefetch/config` 或设置页保存后**立即生效**）。
 - **config.py 在 import 时执行所有副作用**：读取 `.env`、`settings.json`、生成 `instance/.secret_key` 与 `instance/.cursor_secret`。测试必须在 import 前覆盖 `config.DATABASE_PATH`（见 `tests/conftest.py`）。删除密钥文件会使所有会话/游标失效。
-- **`.env` 支持**：用 `os.environ.setdefault`（不覆盖已有环境变量）。
+- **`.env` 支持**：用 `os.environ.setdefault`（不覆盖已有环境变量），且在实例目录派生之前加载。**`PIXIV_INSTANCE_DIR`（环境变量或 `.env`）可整体重定向实例目录** —— `.cursor_secret` / `.secret_key` / `settings.json` / `pixiv.db` / `image_cache` / 重定向发现表全部由 `config._instance_dir` 单点派生，必须在 `import config` 之前设置，测试靠它隔离；未设置时仍是仓库内 `instance/`，覆盖值不可用（如指向文件）时 import 即失败、**故意不回落到默认目录**。
 - 新增设置键**只改 `config.SETTINGS_KEYS`**，设置页白名单与默认值由它派生。
 
 ### 认证

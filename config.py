@@ -6,19 +6,8 @@ import secrets
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 游标签名密钥
-_instance_dir = os.path.join(BASE_DIR, 'instance')
-_cursor_secret_path = os.path.join(_instance_dir, '.cursor_secret')
-if os.path.exists(_cursor_secret_path):
-    with open(_cursor_secret_path) as _f:
-        CURSOR_SECRET = _f.read().strip()
-else:
-    CURSOR_SECRET = secrets.token_hex(32)
-    os.makedirs(_instance_dir, exist_ok=True)
-    with open(_cursor_secret_path, 'w') as _f:
-        _f.write(CURSOR_SECRET)
-
 # ── .env 文件加载 ──
+# 必须在实例目录派生之前：PIXIV_INSTANCE_DIR 与其它键一样允许写进 .env。
 _dotenv = os.path.join(BASE_DIR, '.env')
 if os.path.exists(_dotenv):
     with open(_dotenv) as _f:
@@ -33,6 +22,25 @@ if os.path.exists(_dotenv):
                 if _k and _v:
                     os.environ.setdefault(_k, _v)
 
+# 实例数据目录：数据库 / 密钥 / settings.json / 图片缓存全部由它派生，只此一处定义。
+# PIXIV_INSTANCE_DIR 用于重定向实例目录（测试隔离、多实例部署），必须在 import config
+# 之前设置；未设置时仍是仓库内的 instance/，生产默认行为不变。
+# 故意不做"目录不可用时回落到默认目录"的兜底 —— 覆盖值写错就该在 import 时炸掉，
+# 否则测试/部署会静默读写真实实例数据。
+_instance_dir = os.path.abspath(os.path.expanduser(
+    os.environ.get('PIXIV_INSTANCE_DIR') or os.path.join(BASE_DIR, 'instance')))
+
+# 游标签名密钥
+_cursor_secret_path = os.path.join(_instance_dir, '.cursor_secret')
+if os.path.exists(_cursor_secret_path):
+    with open(_cursor_secret_path) as _f:
+        CURSOR_SECRET = _f.read().strip()
+else:
+    CURSOR_SECRET = secrets.token_hex(32)
+    os.makedirs(_instance_dir, exist_ok=True)
+    with open(_cursor_secret_path, 'w') as _f:
+        _f.write(CURSOR_SECRET)
+
 # Cookie 文件路径（根据环境自动切换）
 if platform.system() == 'Linux' and os.path.exists('/etc/pixiv-viewer/cookies.txt'):
     COOKIE_PATH = '/etc/pixiv-viewer/cookies.txt'
@@ -40,7 +48,7 @@ else:
     COOKIE_PATH = os.path.join(BASE_DIR, 'cookies.txt')
 
 # 数据库
-DATABASE_PATH = os.path.join(BASE_DIR, 'instance', 'pixiv.db')
+DATABASE_PATH = os.path.join(_instance_dir, 'pixiv.db')
 
 # 下载目录
 DOWNLOAD_DIR = os.path.join(BASE_DIR, 'downloads')
@@ -164,7 +172,7 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'prefetch_max_illusts': ('PREFETCH_MAX_ILLUSTS', 10000),
 }
 
-_settings_path = os.path.join(BASE_DIR, 'instance', 'settings.json')
+_settings_path = os.path.join(_instance_dir, 'settings.json')
 if os.path.exists(_settings_path):
     try:
         with open(_settings_path, 'r', encoding='utf-8') as _f:

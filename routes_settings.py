@@ -113,7 +113,7 @@ def remove_blocked_tag(tag: str) -> Response:
 
 # ── 设置 ──
 
-_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'settings.json')
+_SETTINGS_PATH = os.path.join(config_module._instance_dir, 'settings.json')
 
 # 设置页可编辑键与默认值：由 config.SETTINGS_KEYS（唯一来源）派生，
 # 排除密码类与 cookie_secure（这些只通过 settings.json/环境变量管理）。

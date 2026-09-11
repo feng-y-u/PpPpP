@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 
 import fetcher
 import runtime
-from config import IMAGE_HOST_ALLOWLIST, THUMB_REDIRECT_DISCOVERY
+from config import IMAGE_HOST_ALLOWLIST, THUMB_REDIRECT_DISCOVERY, _instance_dir
 from fetcher import PixivAuthError, get_pooled_session, reset_pooled_session
 from helpers import (_build_orphan_dicts, _delete_illust_files, _delete_orphan_files,
                      _extract_ext, _fetch_original_urls, _fmt_num, _get_download_dir,
@@ -36,8 +36,9 @@ logger = logging.getLogger(__name__)
 
 bp = Blueprint('gallery', __name__)
 
-# 缩略图代理磁盘缓存目录（app.py 中同名定义路径一致：instance/image_cache）
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'image_cache')
+# 缩略图代理磁盘缓存目录：路径由 config 的实例目录派生（单一来源；此前这里与 app.py
+# 各写一份，靠注释约定保持一致，PIXIV_INSTANCE_DIR 一旦重定向就会漏改）
+CACHE_DIR = os.path.join(_instance_dir, 'image_cache')
 
 
 # ── 图片服务 / 详情页 ──

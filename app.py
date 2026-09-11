@@ -18,6 +18,7 @@ from config import (
     DOWNLOAD_DIR,
     MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE, SSL_VERIFY,
+    _instance_dir,  # 实例目录单一来源：密钥文件路径由它派生（PIXIV_INSTANCE_DIR 可整体重定向）
 )
 from models import init_db, get_session  # get_session：tests 补丁目标（test_prefetch.py setattr(app, 'get_session')）
 import fetcher
@@ -72,7 +73,7 @@ app = Flask(__name__)
 from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
-_secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', '.secret_key')
+_secret_path = os.path.join(_instance_dir, '.secret_key')
 if os.path.exists(_secret_path):
     with open(_secret_path) as f:
         _secret = f.read().strip()

@@ -5,6 +5,14 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ── ⚠ 必须在 import config 之前重定向实例目录 ──
+# config.py 在 import 时就把实例目录（.cursor_secret / settings.json / pixiv.db /
+# image_cache）算好了，app.py 还会往里写 .secret_key，事后覆盖无效：测试会读写
+# 真实 instance/（首次运行生成密钥，或写 settings.json / image_cache / 发现表）。
+# 这里强制覆盖（不用 setdefault）：外部环境变量不能把测试指向真实实例目录。
+_TEST_INSTANCE_DIR = os.path.join(tempfile.gettempdir(), f'pixiv_test_instance_{os.getpid()}')
+os.environ['PIXIV_INSTANCE_DIR'] = _TEST_INSTANCE_DIR
+
 # ── ⚠ 必须在 import models/app 之前覆盖数据库路径 ──
 # models.py 在 import 时即 create_engine(DATABASE_PATH)，事后覆盖无效，
 # 会导致测试直连并清空生产数据库（2026-07-25 审查 P0-1）。
