@@ -588,7 +588,7 @@ P3（长期演进）
 
 ---
 
-## 33. P1 修复台账（S8–S22，2026-09-11）
+## 33. P1 修复台账（S8–S23，2026-09-11）
 
 本节是**追加**的修复状态记录，不改动 §1–§32 的审计口径与评分。P0（S1–S7b）的验证记录在 `docs/superpowers/plans/2026-09-10-risk-audit-fixes.md` §七，此处只列 P1（S8–S18）中被本报告命中的发现；各步的完整方案、测试清单与遗留边界见该计划文档对应小节与 §八。§33.3 另记两条**原审计未命中、由 S18 补测跑出来**的缺陷。
 
@@ -647,13 +647,15 @@ P3（长期演进）
    **证伪**：① 实现前先跑（当时既无写入也无清空）→ "干净收尾清空"与"出错留痕"两条用例双双失败；② 把清空挪到"每轮开头"（看似等价）→ `test_empty_following_list_is_not_an_error` 失败，证明**清空时机是承重设计**而不是随手放置；③ 去掉 `except` 里的留痕 → `test_failure_records_error_and_next_good_round_clears_it` 失败。修完全量 **536 例 = 530 passed / 2 skipped / 4 failed**（4 例为预先存在的 Windows 沙箱子进程检查）。
    **补测的副产物**：`_auto_follow_worker` 在此之前**一个用例都没有**（只在真实运行里被间接覆盖）。补测试时暴露出一个**未被修复的既有缺陷**，见 §33.5。
 
-### 33.5 S22 过程中发现的既有缺陷（**未修复**，待决策）
+### 33.5 S22 过程中发现的既有缺陷（**已修，S23**）
 
-**自动关注"发现新作品 → 入库"这条路径当前必然失败**，且失败被宽 `except` 吞成一行日志 —— 这正是 S20/S22 两轮都在追的那类"静默失效"，只是这次它不在可观测性上，而在功能本身。
+**自动关注"发现新作品 → 入库"这条路径当时必然失败**，且失败被宽 `except` 吞成一行日志 —— 这正是 S20/S22 两轮都在追的那类"静默失效"，只是这次它不在可观测性上，而在功能本身。
 
 - **证据（本机实测）**：`tests/test_auto_follow.py` 第一版按真实数据形状构造（`upload_date` 用 `fetch_following` 实际返回的类型）运行时，每轮都抛 `TypeError: SQLite DateTime type only accepts Python datetime and date objects as input`；日志行为 `background.py:146 自动关注出错：(builtins.TypeError) …`，`last_check` 永不更新。把该字段改成 `datetime` 对象后同一用例立刻通过 —— 变量只剩这一个。
 - **根因**：`fetch_following` 返回的是 `_process_items` 的产物，而那是 `Illust.to_dict()` 形状的 dict，其中 `upload_date` 是 `self.upload_date.isoformat()`（**字符串**）。`_auto_follow_worker` 拿到后原样塞回模型：`Illust(..., upload_date=r['upload_date'], ...)` → `DateTime` 列拒收字符串。
-- **影响面**：只影响"该轮有**新**作品要入库"的分支（`if new_illusts:` 的 `safe_commit`）。关注列表里全是已知作品时那一轮能干净收尾 —— 所以它**不是**每轮都报错，而是"一有新作品就失败"，且失败后那些作品不会被写入，下一轮仍会被当成新作品再试一次、再失败一次。出现频率取决于 `upload_date` 是否为空（`None` 能过 ✓，字符串必炸 ✗）与是否有新作品。
-- **为什么之前没被发现**：该 worker 零测试覆盖；错误只进日志（`Werkzeug` 请求日志被压到 WARNING，但这是应用日志），设置页在 S20 之前连"线程是否活着"都不显示，更看不到"每轮都在失败"。
-- **建议的最小修法（未实施，等确认）**：在 worker 里按真实含义转换，例如用 `fetcher._parse_date(r['upload_date'])`（该函数已存在且就是 `_illust_from_item` 解析 `updateDate` 用的那个），或让 worker 别复用 `to_dict()` 的展示形状。两种都是一行级改动，但**属于另一个问题**，按"一次只处理一个问题"的约定没有塞进 S22。
-- **S22 的关联价值**：S22 落地后，这类失败不再只躺在日志里 —— 设置页会显示"最近一轮出错：自动关注异常: …（TypeError…）"并标红，**下一次真机上出新作品时它会自己暴露出来**。
+- **影响面**：只影响"该轮有**新**作品要入库"的分支（`if new_illusts:` 的 `safe_commit`）。关注列表里全是已知作品时那一轮能干净收尾 —— 所以它**不是**每轮都报错，而是"一有新作品就失败"，且失败后那些作品不会被写入，下一轮仍会被当成新作品再试一次、再失败一次。出现频率取决于 `upload_date` 是否为空（`None` 能过，字符串必炸）与是否有新作品。
+- **为什么之前没被发现**：该 worker 零测试覆盖；错误只进日志，设置页在 S20 之前连"线程是否活着"都不显示，更看不到"每轮都在失败"。
+- **S23 的修法（一行）**：`upload_date=fetcher._parse_date(r['upload_date'])` —— 复用它解析 Pixiv `updateDate` 的同一函数（`_illust_from_item` 用的就是它），**它容忍 `None`**，因此不必自己写守卫。选它而不是 `datetime.fromisoformat(...)`：后者对 `None` 会抛 `TypeError`，等于用同一类错误换了个字段。
+- **证伪**：① 修复前先跑新用例 → 4 例失败（3 个参数化的"新作品入库" + "先 commit 再提交下载"），症状与预判一致；② 把该行改回原样塞字符串 → 同样 4 例失败；③ 改成**无守卫**的 `datetime.fromisoformat(r['upload_date'])` → `test_item_without_upload_date_is_still_persisted` 失败（证明 `None` 分支承重）。
+  一个**诚实的边界**：把该行换成"带 `if ... else None` 守卫的裸 `fromisoformat`"时 9 例全过 —— 这说明用例锁的是**行为**（字符串被解析、`None` 被容忍），而不是"必须调 `_parse_date`"这个实现选择；两个实现都正确。
+- **顺带说明**：S22 落地后，这类失败不再只躺在日志里 —— 设置页会显示"最近一轮出错：自动关注异常: …（TypeError…）"并标红。**先有 S22 的可观测性，S23 才有机会在真机上被发现**；反过来 S23 让 S22 的告警不必再响。

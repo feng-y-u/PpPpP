@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 536 用例约 20s，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 541 用例约 20s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -155,6 +155,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 - **写入必须用 `safe_commit()`，不要直接 `db.commit()`**。注意其语义：**失败时 `rollback()` 后原样抛出，不做内部重试**（重试只会得到一次空提交、静默掩盖数据丢失）。`PRAGMA busy_timeout=10000` 提供 10 秒等锁窗口。
 - **入库去重走 `fetcher._insert_new_illusts()`（`INSERT ... ON CONFLICT DO NOTHING`）**：`_process_items` 的查重→拉详情（网络耗时）→INSERT 之间有并发窗口（其他标签预取/手动刷新/用户在途搜索可能先插入同一 pid），普通 `db.add()+flush()` 撞 `UNIQUE constraint failed` 会让**整批事务作废**。任何新插作品都经这个冲突容忍写入 + 按 pid 回查赢家行，别改回逐条 flush。
+- **`_process_items` / `fetch_following` 返回的是 `Illust.to_dict()` 形状，不能直接回灌模型**：那是**展示用** dict —— `upload_date` 是 `isoformat()` **字符串**，`tags` / `original_urls` 是 list（写回模型要走 `*_list` 属性），而 `DateTime` 列只收 datetime 对象。`_auto_follow_worker` 就这么踩过：`Illust(upload_date=r['upload_date'])` 让 `safe_commit` 抛 `TypeError`，被宽 `except` 吞成一行日志 —— 只在"该轮有新作品"时触发，于是"一有新作品就静默失败、下轮重试再失败"、`last_check` 永不更新（审计 §33.5，S23 修）。**要回灌就用 `fetcher._parse_date(r['upload_date'])`**（Pixiv `updateDate` 的同一个解析器，容忍 `None`），别写无守卫的 `datetime.fromisoformat(...)`（`None` 会炸）。
 - **获取 session 用 `get_session()`**，不要直接 `Session(engine)`（`init_db()` 等启动逻辑除外）。
 - **轻量迁移系统**：启动时 `create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行；当前版本 v1 `migrate_collection_positions`（补 `collection_items.position` 并回填）、v2 `migrate_illust_schema`（补 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`，DROP `description`/`is_favorite`/`favorited_at`）、v3 `repair_illust_schema`、v4 `add_illust_refresh_failed_at`（补 `refresh_failed_at` 刷新失败退避时间戳）。`init_db()` 在迁移后**无条件再跑一次** `repair_illust_schema` 兜底，并额外幂等调用一次 `add_illust_refresh_failed_at`（v4 列不在 v2 的列集里，用于覆盖外部改动丢列）。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。**新增 schema 变更必须追加新版本，不得修改已发布版本。**
 - **收藏语义完全由 Collection 驱动**：切换收藏即在"我的收藏"收藏夹增删 `CollectionItem`。`Illust.is_favorite` 列已废弃删除，不要再依赖；判断收藏用 `models.get_favorite_pids()`。
@@ -189,7 +190,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。

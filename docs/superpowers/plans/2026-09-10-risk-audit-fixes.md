@@ -518,7 +518,30 @@
 
 **遗留边界**：`last_error` 只记**最近一轮**，会被下一次成功覆盖（这是刻意的，与预取一致：非空即"最近一轮有问题"），不保留历史/不落盘（重启即清）；仍**没有** supervisor / 自动重启；仍未做"陈旧超过 X 小时就标红"的阈值告警。
 
-**⚠️ 本步顺带发现的既有缺陷（未修，已记入审计报告 §33.5）**：补测试时按真实数据形状构造用例，暴露出 `_auto_follow_worker`"发现新作品 → 入库"这条路径**必然失败** —— `fetch_following` 返回的是 `Illust.to_dict()` 形状（`upload_date` 是 `isoformat()` 字符串），worker 原样塞回 `Illust(upload_date=...)`，`DateTime` 列抛 `TypeError`，被 `except` 吞成日志。该分支只在"该轮有新作品"时走到，所以症状是"一有新作品就静默失败、下轮重试再失败"。属于**另一个问题**，按"一次只处理一个问题"没有塞进 S22；S22 落地后这类失败会直接显示在设置页上（这正是本项的价值）。
+---
+
+### S23（P1）修自动关注"发现新作品 → 入库"的类型缺陷（S22 发现的既有 bug）
+
+**来源**：S22 补测试时按**真实数据形状**构造用例暴露的 —— `_auto_follow_worker` 此前零覆盖，而它"把新作品写进库"的那条路径一直是坏的。审计报告 §33.5 有完整证据链。
+
+**调用链（改前重查过）**：`fetch_following` → `fetcher._process_items`（返回 `existing.to_dict()` / `winners[pid].to_dict()`，即**展示用** dict）→ `background._auto_follow_worker` 逐个 `Illust(...)` 回灌 → `safe_commit` → 打开自动下载时再 `download_executor.submit`。
+
+**根因**：`Illust.to_dict()` 的 `upload_date` 是 `datetime.isoformat()` 的**字符串**，而 `Illust.upload_date` 是 `DateTime` 列，只收 datetime 对象 → `safe_commit` 抛 `TypeError` → 被该 worker 的宽 `except Exception` 吞成一行日志。只在"该轮有**新**作品"时触发，所以症状是"一有新作品就静默失败、下轮重试再失败"，`last_check` 永不更新。
+
+**改动（一行）**：`upload_date=r['upload_date']` → `upload_date=fetcher._parse_date(r['upload_date'])`，并在原地留注释说明"为什么必须转、为什么是这个函数"。
+- 选 `fetcher._parse_date` 而不是 `datetime.fromisoformat`：前者就是 `_illust_from_item` 解析 Pixiv `updateDate` 的同一函数，且**容忍 `None`**（有的作品没有 `updateDate`，`to_dict()` 会回 `None`）。`background.py` 顶部已有 `import fetcher`，不需要改 import。
+- **刻意不改**：`Illust.to_dict()` 的输出形状（前端/接口都在消费 isoformat 字符串）；`_process_items` 的返回值（同理）；worker 的宽 `except`（它同时兜住网络/DB 各类异常，本轮只修类型转换这一个具体缺陷）。
+- **全套只改了这一个字段**：先枚举了 worker 传给 `Illust(...)` 的 8 个字段（其余 7 个是 int/str，唯一 DateTime 列就是 `upload_date`），并 `grep` 确认全仓库只有 `background.py` 这一处把 `to_dict()` 形状的 dict 回灌模型（另两处 `Illust(...)` 在 `fetcher._illust_from_item` / `_illust_from_detail`，都是直接从 API 原始字段构造，用的就是 `_parse_date`）。
+
+**测试**：`tests/test_auto_follow.py` 补齐此前**无法写出**的那条路径（+5 例，文件 4 → 9）：
+- `test_new_illust_is_persisted`（**参数化 3 种真实字符串形状**：`+00:00` / `+09:00` / 朴素）—— 断言该轮跑完、`last_error` 为空、`last_count == 1`、库里真有这一行、`upload_date` 是 `datetime` 且年月日正确、其余字段照旧。
+- `test_item_without_upload_date_is_still_persisted` —— `None` 不能整轮失败。
+- `test_download_is_submitted_after_the_row_is_committed` —— 竞态类：在 `download_executor.submit` 的**那一刻**回查数据库，确认行已可见（把"先 commit 再提交下载"这条文档里的不变式钉住）。夹具顺带把 `_queued_downloads` 的收尾还原补上（worker 会往里丢 pid，属进程级共享状态）。
+
+**证伪**：① 修复前先跑 → 4 例失败（3 个参数化 + 下载顺序那条）；② 改回原样塞字符串 → 同样 4 例失败；③ 改成**无守卫**的 `datetime.fromisoformat(...)` → `None` 那条用例失败。修完全量 **541 例 = 535 passed / 2 skipped / 4 failed**（4 例为预先存在的 Windows 沙箱子进程检查）。
+**诚实边界**：换成"带 `if ... else None` 守卫的 `fromisoformat`"时 9 例全过 —— 用例锁的是行为（字符串被解析、`None` 被容忍），不是"必须调 `_parse_date`"。
+
+**遗留边界**：worker 的宽 `except` 还在（新作品入库失败仍只留日志 + `last_error`，不会重试/回滚半批 —— 但 `safe_commit` 失败会 `rollback`，所以不会留下半批脏数据）；`upload_date` 的时区在 SQLite 里会被丢弃（既有行为，与其它入库路径一致，本次不改）；**注意**：本缺陷存在期间"发现新作品"从未成功过，因此此前没有任何"自动关注入库"的存量数据受影响。
 
 ---
 
