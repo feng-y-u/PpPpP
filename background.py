@@ -121,7 +121,14 @@ def _auto_follow_worker() -> None:
                     pixiv_id=r['pixiv_id'], title=r['title'],
                     user_id=r['user_id'], user_name=r['user_name'],
                     page_count=r['page_count'], bookmark_count=r['bookmark_count'],
-                    thumb_url=r['thumb_url'], upload_date=r['upload_date'],
+                    thumb_url=r['thumb_url'],
+                    # r 是 `_process_items` 的产物，即 `Illust.to_dict()` 形状：这里的
+                    # `upload_date` 是 **isoformat 字符串**（`to_dict()` 就是这么输出的），
+                    # 直接塞进 DateTime 列会让 safe_commit 抛 TypeError，而它会被下面的
+                    # 宽 except 吞成一行日志 —— 症状是"一有新作品就静默失败、下轮重试再
+                    # 失败"，且 last_check 永不更新（审计 §33.5）。用 fetcher 里解析
+                    # Pixiv `updateDate` 的同一个函数转回来（它容忍 None）。
+                    upload_date=fetcher._parse_date(r['upload_date']),
                 )
                 illust.tags_list = r.get('tags', [])
                 illust.original_urls_list = r.get('original_urls', [])

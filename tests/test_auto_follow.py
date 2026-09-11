@@ -82,12 +82,14 @@ def worker(monkeypatch):
     - 自己一份 stop event（`monkeypatch` 换掉模块全局）：收尾时只停本用例起的线程，
       不碰 app 级别那个（`app.py` import 时就启动了，conftest 把它设成 interval=0）。
     - interval 设成 0.05s 让用例秒级跑完；`auto_download` 关掉，绝不真下载。
-    - 两个值都在收尾还原（它是进程级共享状态）。
+    - 三个进程级共享状态（interval / auto_download / `_queued_downloads`）都在收尾还原：
+      worker 会把新作品的 pid 丢进 `_queued_downloads`，留给后面的用例就是脏状态。
     """
     stop = threading.Event()
     monkeypatch.setattr(background, '_auto_follow_stop', stop)
     original_interval = runtime._auto_follow_state['interval']
     original_auto_download = runtime._auto_follow_state['auto_download']
+    queued_before = set(runtime._queued_downloads)
     runtime._auto_follow_state['interval'] = 0.05
     runtime._auto_follow_state['auto_download'] = False
     started: list[threading.Thread] = []
@@ -105,6 +107,9 @@ def worker(monkeypatch):
     stop.set()
     for thread in started:
         thread.join(timeout=5)
+    with runtime._download_queue_lock:
+        runtime._queued_downloads.clear()
+        runtime._queued_downloads.update(queued_before)
 
 
 def test_clean_round_updates_last_check_and_clears_error(clean_db, monkeypatch, worker):
@@ -212,3 +217,89 @@ def test_status_key_set_is_stable_while_worker_writes(client, clean_db, monkeypa
 
     assert len(seen_shapes) == 1, f'响应键集合必须恒定（懒加键会让并发遍历崩）：{seen_shapes}'
     assert STATUS_KEYS <= set(next(iter(seen_shapes))), 'S20/S21 的字段一个都不能少'
+
+
+@pytest.mark.parametrize('raw_date,expected', [
+    ('2026-09-11T00:00:00+00:00', (2026, 9, 11)),   # 常见：UTC 偏移
+    ('2026-09-11T09:30:00+09:00', (2026, 9, 11)),   # Pixiv 的 updateDate 常带 +09:00
+    ('2026-09-11T00:00:00', (2026, 9, 11)),         # 朴素时间（无偏移）
+], ids=['utc_offset', 'jst_offset', 'naive'])
+def test_new_illust_is_persisted(clean_db, monkeypatch, worker, raw_date, expected):
+    """**新作品必须真的入库** —— 这条路径此前必然抛异常（见审计报告 §33.5）。
+
+    `fetch_following` 返回的是 `Illust.to_dict()` 形状，`upload_date` 是 isoformat
+    **字符串**；worker 原样塞回 `Illust(upload_date=...)`，DateTime 列拒收 → `safe_commit`
+    抛 TypeError → 被宽 `except` 吞成一行日志。只在"该轮有新作品"时触发，症状是
+    "一有新作品就静默失败、下一轮重试再失败"，而 `last_check` 永远不更新。
+
+    参数化的是 `to_dict()` 实际会输出的几种字符串形状（它就是 `datetime.isoformat()`
+    的产物），确保解析往返不挑形状。
+    """
+    pid = 900101
+    item = _item(pid)
+    item['upload_date'] = raw_date
+    monkeypatch.setattr(background, 'fetch_following', lambda page=1: ([item], False))
+    monkeypatch.setitem(runtime._auto_follow_state, 'last_check', None)
+    monkeypatch.setitem(runtime._auto_follow_state, 'last_error', None)
+
+    worker()
+
+    assert _wait_for(lambda: runtime._auto_follow_state['last_check']), \
+        '有_new_illusts 的那一轮必须能走完（此前会卡在 safe_commit 的 TypeError）'
+    assert runtime._auto_follow_state['last_error'] is None, '这一轮不该出错'
+    assert runtime._auto_follow_state['last_count'] == 1
+    with models.get_session() as db:
+        row = db.query(models.Illust).filter(models.Illust.pixiv_id == pid).one()
+        assert isinstance(row.upload_date, datetime), \
+            f'upload_date 必须是 datetime 而不是 isoformat 字符串（拿到 {row.upload_date!r}）'
+        assert (row.upload_date.year, row.upload_date.month, row.upload_date.day) == expected, \
+            f'日期要按真实含义解析，不能丢（{raw_date} → {row.upload_date!r}）'
+        assert row.title == '作品 900101' and row.page_count == 1 and row.bookmark_count == 5, \
+            '其余字段照旧入库'
+        assert row.tags_list == [] and row.original_urls_list == []
+
+
+def test_item_without_upload_date_is_still_persisted(clean_db, monkeypatch, worker):
+    """Pixiv 不给 `updateDate` 时 `upload_date` 是 None（`to_dict()` 会回 None）——
+    解析必须容忍它，不能因此整轮失败。"""
+    item = _item(900102)
+    item['upload_date'] = None
+    monkeypatch.setattr(background, 'fetch_following', lambda page=1: ([item], False))
+    monkeypatch.setitem(runtime._auto_follow_state, 'last_check', None)
+
+    worker()
+
+    assert _wait_for(lambda: runtime._auto_follow_state['last_check']), '没有日期也要能入库'
+    with models.get_session() as db:
+        row = db.query(models.Illust).filter(models.Illust.pixiv_id == 900102).one()
+        assert row.upload_date is None
+
+
+def test_download_is_submitted_after_the_row_is_committed(clean_db, monkeypatch, worker):
+    """自动下载的**顺序不变式**：先 commit 再提交下载任务。
+
+    反过来的话 `_download_illust` 查不到行会静默跳过（`background` 里有注释写明的坑）。
+    这里在 submit 的**那一刻**回查数据库，确认行已经可见 —— 竞态类用例，靠时序断言。
+    """
+    item = _item(900103)
+    item['original_urls'] = ['https://i.pximg.net/img/900103.jpg']
+    monkeypatch.setattr(background, 'fetch_following', lambda page=1: ([item], False))
+    monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', True)  # 夹具默认关掉
+    monkeypatch.setitem(runtime._auto_follow_state, 'last_error', None)
+
+    visible_rows_at_submit: dict[int, int] = {}
+
+    def spy_submit(fn, pid):
+        with models.get_session() as db:
+            visible_rows_at_submit[pid] = db.query(models.Illust).filter(
+                models.Illust.pixiv_id == pid).count()
+
+    monkeypatch.setattr(background.download_executor, 'submit', spy_submit)
+
+    worker()
+
+    assert _wait_for(lambda: 900103 in visible_rows_at_submit), \
+        '有新作品且 auto_download 打开时必须提交下载'
+    assert visible_rows_at_submit[900103] == 1, \
+        '提交下载时该作品必须已经 commit（否则下载会静默跳过）'
+    assert runtime._auto_follow_state['last_error'] is None
