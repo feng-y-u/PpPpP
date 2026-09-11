@@ -251,6 +251,8 @@
 - `tests/test_test_setup.py` 增加 `test_instance_dir_isolated_in_tests`（断言 `config._instance_dir` 为临时目录、真实 instance 未被写入）。
 - 既有隔离用例保持全绿。
 
+**已实现 + 验证结果（2026-09-11，提交 `4e49cf2`）**：改了 `config.py`（`_instance_dir` 由 `PIXIV_INSTANCE_DIR` 派生、`.env` 加载前移到派生之前、`DATABASE_PATH`/`_settings_path` 改为从它派生）、`app.py` / `routes_gallery.py` / `routes_settings.py`（原先各自拼一份 `BASE_DIR/instance`，全部改为派生）、`tests/conftest.py`（在 `import config` **之前**强制设置该变量，**刻意不用 `setdefault`** —— 外部环境变量不得把测试指向真实实例目录）、`AGENTS.md`。新增 5 例：全部派生路径的隔离断言、默认分支（把 `config.py` 复制到临时目录后 exec，`BASE_DIR` 随 `__file__` 走）、覆盖分支（四条路径全部跟着走且不再创建默认目录）、覆盖值指向文件时必须 import 即失败、conftest 顺序守卫；全量 392 passed。**证伪为行为级（强）**：回退 4 个生产文件后 3 例失败（覆盖不生效、指向文件时静默回落、隔离断言失败）；另做 A/B 实验 —— 临时移走真实的 `.secret_key`/`.cursor_secret` 后跑全量，旧代码在**真实** `instance/` 里重新生成了这两个文件，修复后同一实验对真实 `instance/` **零写入**。**边界**：覆盖值不可用时**故意不回落**默认目录（不然测试/部署会静默读写真实实例数据）；本步未动 `config.py` import 期执行副作用的整体设计。
+
 ---
 
 ### S9（P1）重复下载保护
@@ -267,6 +269,8 @@
 - `test_download_illust_noop_when_done`。
 - `test_redownload_after_delete_still_works`（回归）。
 
+**已实现 + 验证结果（2026-09-11，提交 `2e14c66`）**：改了 `routes_download.py`（`trigger_download` 在 done/downloading 判定之后补排队判定、判定与入队放进同一把 `_download_queue_lock`、`batch_download` 的 queued pid 计入 skipped、两个入队点在 submit 失败时把 pid 撤出队列）、`background.py`（`_download_illust` 取到行后若已是 `done` 就记日志返回）。新增 7 例：排队中重复触发 / 批量跳过排队 / 并发触发恰好提交一次（6 线程 × 8 轮 barrier 同发）/ done 守卫不发请求也不删文件不写 start / 删除后重下回归 / 单条与批量提交失败都不残留队列。**证伪为行为级**：回退 `routes_download.py` + `background.py` 后 6/7 失败（"删除后重下"两侧都通过，它是回归守卫）；恢复后 `tests/test_download.py` 36 passed、全量 399 passed。**边界**：`download_locks` 的 `is` 比较语义、`_release_download_lock` 与 queued 不持久化（重启即丢）均未改；入队失败时的补偿只是把 pid 撤出队列，不重试。
+
 ---
 
 ### S10（P1）SearchCache 并发一致性
@@ -279,6 +283,8 @@
 - `test_search_cache_merge_and_remove_serialized`：多线程反复 merge + 删除同一 pid，断言最终 `illust_ids` 不含已删 pid（无幽灵引用）。
 - `test_search_cache_lock_scope_excludes_network`（白盒：断言 merge 锁段内不发起网络调用）。
 
+**已实现 + 验证结果（2026-09-11，提交 `cb64ff7`）**：改了 `background.py`（新增模块级 `_search_cache_guard`；`_prefetch_one_tag` 的合并段"读 → 合并 → 那次提交"与 `_remove_pids_from_search_caches` 的改列段整体入锁）。锁**不**罩搜索/详情等网络阶段（否则预取的网络耗时会把删除请求一起拖住），空 pid 列表提前返回不拿锁，事务边界不动（删除侧仍不 commit，由调用方提交）。新增 4 例：幽灵引用（用事件把合并卡在"已读到旧值、尚未提交"那一刻，另一线程在该窗口里删除并提交）、锁范围不含网络阶段（用记录 owner 线程的探针锁断言，`Lock.locked()` 是所有线程共享的视图、分不清谁在锁里）、删除侧必须持同一把锁、空列表不拿锁。**证伪为行为级（强）**：仅回退 `background.py` 后前 3 例失败，幽灵引用用例实测值是 `illust_ids=[9202, 9201]` —— 已删的 9201 被写回；恢复后 `tests/test_prefetch.py` 59 passed、全量 403 passed。**残留（如实记录）**：删除侧的 commit 仍在锁外，最终值取决于两个全列写（`UPDATE ... SET illust_ids=?`）的提交次序；极端情况下合并这次提交可能等锁超时而**丢失一次合并**（有日志与下一轮重试，不再留下幽灵引用）。彻底线性化要把两侧 commit 都收进锁内或改 CAS，会动事务边界，不在本次范围。
+
 ---
 
 ### S11（P1）thumb 信号量饥饿
@@ -290,6 +296,8 @@
 **测试**：
 - `test_thumb_returns_503_when_semaphore_exhausted`（占满名额 + monkeypatch 超时 → 503 且无网络请求）。
 - `test_thumb_releases_semaphore_after_failure`。
+
+**已实现 + 验证结果（2026-09-11，提交 `9c71903`）**：改了 `runtime.py`（新增 `THUMB_SEM_TIMEOUT = 15.0`，**调用时读取**，便于测试与将来调整）、`routes_gallery.py`（改为 `if not _thumb_sem.acquire(timeout=runtime.THUMB_SEM_TIMEOUT)` → 记 warning 并返回 503，取图段用 `try/finally` 归还名额）。15s 远大于正常单张耗时（通常 < 2s），只在图床确实卡住时触发。新增 3 例：槽位耗尽返回 503 且不发起取图请求（等待上限取自 `runtime` 常量，并用永不发名额的替身锁死"必须带 timeout"这条契约）、成功与失败两条路径都归还名额（真 `Semaphore(1)` 验证）、6 个并发请求 + 槽位 2 时并发峰值不超上限且名额全部归还。**证伪为行为级（强）**：仅回退 `routes_gallery.py` + `runtime.py` 后，槽位耗尽用例失败在「不得用 `with` 获取信号量（没有等待上限）」—— 旧实现正是无上限阻塞获取；另两例是回归防线，两侧都通过。恢复后 `tests/test_thumb.py` 23 passed、全量 406 passed。**边界**：`THUMB_CONCURRENCY` 默认值、失败 URL 冷却、磁盘缓存键与 7 天 mtime 语义、原子写、重定向凭据分级全部未动；前端对非 200 本来就占位/重试，503 与既有 502 同属"这张图暂时没有"。
 
 ---
 
@@ -306,6 +314,8 @@
 - `test_prefetch_status_reports_alive_and_stale`、`test_prefetch_status_not_stale_when_disabled`。
 - `test_prefetch_loop_records_last_error`。
 
+**已实现 + 验证结果（2026-09-11，提交 `df7cd94`）**：改了 `background.py`（`_start_prefetch_thread` 保留 `_prefetch_thread` 引用、新增 `get_background_health()`、`_prefetch_loop` 四个 except 分支写 `last_error` 并用本地 `round_error` 标志在整轮干净收尾时清空 —— 于是"`last_error` 非空"= 最近一轮就有问题，而不是历史上某轮出过问题）、`routes_prefetch.py` 与 `runtime.py`（status 新增 `alive`/`auto_follow_alive`/`stale`/`last_error`；`stale` 阈值 `2*interval+600`，`interval<=0` 时恒为 False）。新增 4 例：单轮异常留痕且下一轮干净收尾清空、标签列表读不出来也留痕且不打死线程、status 的四种时序（超阈值 stale / 阈值内不 stale / 线程死掉但数据新（只有 alive 能暴露）/ `interval>0` 但从未跑完一轮）、`interval=0` 时不判 stale；既有 status 字段集断言同步纳入新字段（合约变更，其余断言原样保留并补了新字段断言）。证伪：回退 `background.py` + `runtime.py` + `routes_prefetch.py` 后 5 例失败（新字段缺失、`last_error` 未定义），恢复后 96 passed、全量 410 passed。**如实说明**：本项是**新增可观测面**，证伪表现为"字段缺失/行为未定义"，不是修掉某个既有错误值；本步**没有**加 supervisor 或自动重启，`_start_prefetch_thread` 内 `_run` **仍无兜底 try** —— `_prefetch_loop` 之外的异常仍能打死线程，区别只在于 `prefetch_alive` 现在看得出来（审计报告 §16 建议里的"给 `_run` 加 try 兜底"未做）。
+
 ---
 
 ### S13（P1）Pixiv 403 分类
@@ -318,6 +328,8 @@
 - `test_search_tag_403_returns_empty_not_auth_error`、`test_search_tag_401_raises_auth_error`。
 - `test_fetch_following_403_returns_empty`、`test_user_profile_403_returns_empty`。
 
+**已实现 + 验证结果（2026-09-11，提交 `dde7221`）**：改了 `fetcher.py`（新增 `_warn_403(api)`；`search_by_tag` / `browse_discovery` / `_get_user_profile_ids` / `fetch_following` 四处改为 **401 → `PixivAuthError`**、**403 → warning「疑似限流/风控（非认证失效）」后按既有失败形态返回空结果**）。原有的 `logger.error(f'XXX API failed: ...')` 与返回形态一字未动，告警是额外一条。新增 9 例：四处 403 返回空结果且只发一次请求（不重试）、同样四处 401 仍抛 `PixivAuthError`、详情路径 403 仍退避重试且绝不上报认证失效。**证伪为行为级（强）**：仅回退 `fetcher.py` 后**恰好**那 4 个 403 用例失败（旧代码抛 `PixivAuthError`），401 与详情回归用例两侧都通过；恢复后 `tests/test_fetcher.py` 77 passed、全量 419 passed。**边界**：`_get_illust_detail` 的 403/429 退避语义与 `RETRYABLE_GLOBAL_DETAIL` 哨兵、`DETAIL_MAX_RETRIES`、三级令牌桶常量、`_is_auth_error(msg)` 的 JSON 报错文本判定均未动；**列表类请求仍然零限流**（审计报告 §15-4 不在本次范围）。
+
 ---
 
 ### S14（P1）`_fill_last_attempt` 内存增长
@@ -328,6 +340,8 @@
 
 **测试**：
 - `test_fill_attempt_map_pruned_when_large`、`test_fill_attempt_recent_kept`。
+
+**已实现 + 验证结果（2026-09-11，提交 `ad7ad4e`）**：改了 `fetcher.py`（新增 `_FILL_ATTEMPT_MAX_ENTRIES = 1000`；在 `_background_fill_details` 既有的 `_fill_lock` 段内，**仅当** `len(_fill_last_attempt) > 1000` 时清理 `now - ts >= _FILL_ATTEMPT_INTERVAL * 2` 的条目）。只清"远超节流窗口"的条目是关键：这类条目留着的话下一轮判定 `now - ts >= _FILL_ATTEMPT_INTERVAL` 也必然通过，删掉不改变任何节流行为。新增 4 例：表超上限时过期条目被清而窗口内条目保留、未超上限时一条都不清（清理不每轮扫全表）、清理不放宽节流（窗口内作品仍被跳过且不刷新时间戳）、8 线程并发补全时判定与清理互斥且不抛 `dictionary changed size`。**证伪为行为级**：仅回退 `fetcher.py` 后 2 例失败（旧代码不清理），另 2 例"不得放宽节流"两侧都通过（它们是用来看住修复别做过头）；恢复后 `tests/test_fetcher.py` 81 passed、全量 423 passed。**边界**：清理**只在超上限时触发**，窗口内（300s）条目一律保留 —— 这张表仍可能短暂超过 1000，是"有界"而非"硬顶"；实测 10 万条目约 10.0 MB（其中 dict 本体 5.0 MB，`sys.getsizeof` 实测）；节流常量、`_filling_ids` 语义、`_fetch_details_parallel` 与 DB 写入流程未动。
 
 ---
 
@@ -349,6 +363,8 @@
 2. `Response.call_on_close` 的回调**永远不会被执行**（没人调用那个 Response 的 close），每个大包漏一份几百 MB 临时文件。
 实际落地：把清理挂在 body 上（`routes_download._DeletingBody` 转发 `send_file` 的 body），覆盖「读完 EOF」「`close()`（客户端断开 / HEAD / 416 空 body）」两条路径，另加两个兜底：`send_file` 抛异常（Range 不可满足 → 416）当场删、`200/206` 之外的响应（304 类）先关句柄再当场删。**206 必须排除在「无内容」之外** —— 它会发送内容且此刻句柄仍开着，误判会导致删除失败且下载拿不到数据（实现过程中踩到过，已由 `test_download_file_partial_range_still_works_and_cleans` 看住）。测试从计划里的 4 个扩到 11 个（含 HEAD / 416 / 206 / 304 四种响应形态）。
 
+**已实现 + 验证结果（2026-09-11，提交 `70dded0`）**：改了 `config.py`（新增 `ZIP_MEMORY_THRESHOLD_BYTES = 200 * 1024 * 1024`）、`routes_download.py`（+170：`_write_zip_entries` / `_total_bytes` / `_remove_temp_zip` / `_close_body_chain` / `_DeletingBody` 与两条发送路径）、`tests/test_app.py`（+221）。新增用例清单：阈值内不落临时文件且包内容正确、超阈值落临时文件且包内容一致、响应关闭后临时文件消失、读完整包后消失、HEAD 不漏文件、Range 不可满足(416)不漏文件、Range 正常(206)仍可用且不漏文件、非内容响应(304)不漏文件、打包途中文件消失则跳过其余照常、全部消失则 404 且不残留、单文件仍直接返回原图。**证伪分两级如实记录**：① 只回退 `routes_download.py` + `config.py` 时 11 例中 10 例失败，但失败原因是**新 seam 不存在**（`AttributeError: ... has no attribute 'tempfile'`）—— **seam 缺失型、证据偏弱**；② 因此补做**机制级证伪**（保留 seam，把阈值判断改成恒真以强制走内存路径），8 例以 `assert 0 == 1` 失败，证明它们确实在盯新分支而不是只碰到 seam。恢复后 `tests/test_app.py` 71 passed、全量 434 passed。**遗留边界**：清理依赖 WSGI 关闭 body 的契约（另有 EOF 自清理兜底）；大包改吃临时目录空间（`/tmp` 若是 tmpfs 仍算内存，但只占一份而不是"整包 + 读缓冲"）；磁盘满时 `OSError` 会清理并 500；阈值常量改动需重启；**计划批准的行为变化** —— 所有条目都消失时由"空 zip 200"改为 404「文件已丢失」。
+
 ---
 
 ### S16（P1）settings.json 原子写
@@ -365,6 +381,8 @@
 - `test_prefetch_config_atomic_write`。
 - `test_corrupt_settings_backed_up_on_load`。
 
+**已实现 + 验证结果（2026-09-11，提交 `4c7c783`）**：改了 `helpers.py`（新增 `_atomic_write_json`：同目录写 `<path>.tmp` → `flush` + `fsync` → `os.replace`，`finally` 里无论成败清掉残留 tmp，异常原样抛出由调用方决定错误码；tmp 特意放**同目录**，跨设备时 `os.replace` 会退化成复制+删除、就不原子了）、`routes_settings.py` 与 `routes_prefetch.py`（两个写入点改用它，调用顺序与错误语义一字未改 —— 仍是"先写盘成功，再更新内存"，失败仍 500 且不更新 `_prefetch_state`；顺带删掉因改动变成死引用的 `import os`）、`config.py`（新增 `_backup_corrupt_settings`，读取失败时把损坏文件复制为 `settings.json.corrupt.bak`，**仅在副本不存在时**；备份失败只记日志）。新增 11 例，分布在 `tests/test_helpers.py`（4：替换内容不留 `.tmp`、目录缺失自动创建、`os.replace` 失败时旧字节完整保留、序列化失败时旧文件不动）、`tests/test_app.py`（2，**此前 `POST /api/settings` 零覆盖**）、`tests/test_prefetch_api.py`（2，守住"先写盘成功再更新内存"这条既有约定）、`tests/test_test_setup.py`（3，复用既有的 `_load_config_probe` 独立 exec `config.py` 的 seam）。**证伪**：回退 4 个生产文件后 11 例中 7 例失败，其中 **4 例是 seam 缺失型**（`helpers._atomic_write_json` 不存在）**证据偏弱、如实标注**；另 3 例为**行为型**且抓到具体原因 —— 两个路由用例 `assert 200 == 500`（旧代码不经过 `os.replace`，注入的失败根本不生效）、配置用例「损坏文件必须留一份副本」。恢复后全量 445 passed。**遗留边界**：每次保存多一次 `fsync`（用户手动低频操作，代价可忽略）；`SIGKILL` 落在写 tmp 与 replace 之间会残留 `settings.json.tmp`（无害半成品，读取侧只认 `settings.json`，下次写入覆盖）；`settings.json.corrupt.bak` 不自动清理，与 `settings.json` 同目录同权限（内含可能的密码类键，不额外扩大暴露面）；**损坏时仍回退默认值** —— "设置页下次保存会用默认值覆盖"的语义未改，只是多了 `.bak` 可恢复。
+
 ---
 
 ### S17（P1）secret 文件权限
@@ -379,6 +397,8 @@
 - `test_short_secret_regenerated`、`test_empty_secret_regenerated`（回归）。
 - `test_secret_file_mode_0600`（`skipif win32`）。
 
+**已实现 + 验证结果（2026-09-11，提交 `578c0c1`）**：改了 `config.py`（新增 `_load_or_create_secret(path, min_len=32)` 与 `_restrict_secret_file(path)`：文件缺失**或长度不足**时用 `secrets.token_hex(32)` 重新生成并写回，长度足够则原样使用；无论走哪条分支最后都 `os.chmod(path, 0o600)`，失败静默）、`app.py`（`.secret_key` 改走同一助手，删掉重复的写盘分支与因此变成死引用的 `import secrets`）、`tests/test_auth.py`（`TestSecretFiles`，9 例）。测试覆盖：截断文件与空文件都重生成且写回、首次生成不产生"内容过短"告警噪声而真出现截断时必须有告警、长度足够的密钥原样保留（稳定性守卫）、写入后权限 0600 且已有文件被放宽成 0644 后下次启动收紧、三条分支都确实请求了 `0o600`（用 `os.chmod` 替身盯权限位，避免"只在 Linux 上才验证"）、`chmod` 抛 `OSError` 不影响启动、`app.py` 与 `config.py` 共用同一助手（AST 确认模块级确实调用了它 —— 该文件没有可重跑的 seam，重跑等于建第二个 Flask 应用并起后台线程；并核对运行态 `app.config['SECRET_KEY']` 与文件内容一致、两条密钥长度都 ≥ 32）。**证伪分两级如实记录**：① 回退 `config.py` + `app.py` 后 8 例失败，但其中 7 例是 **seam 缺失型**（`AttributeError: module 'config' has no attribute '_load_or_create_secret'`）—— **证据偏弱**；② 因此补做**机制级证伪**（保留 seam，把 `min_len` 默认值改成 0、`_restrict_secret_file` 改成 no-op），拿到行为级原因：`assert 'abc' != 'abc'`（3 字符密钥被原样采用）、`assert 0 == 3`（一次 chmod 都没发生）、`assert '内容过短' in ''`，并暴露 `min_len=0` 时缺失文件会返回空密钥且不落盘（说明该参数同时守着"文件必须被创建"）。恢复后 `tests/test_auth.py` 40 passed / 1 skipped、全量 453 passed / 1 skipped。**遗留边界**：长度不足时重新生成会使**该部署既有会话与游标失效**（有意取舍：弱密钥比登出危险得多）；`0600` 只在 POSIX 有意义，Windows 上断言按 `skipif` 跳过，本机**只验证了"确实请求了 0o600"**，POSIX 端到端权限未在本机证实（部署后可用 `ls -l instance/.secret_key` 复核）；`chmod` 失败静默。
+
 ---
 
 ### S18（P1）下载 / 图片 / settings 测试补齐（收口）
@@ -392,6 +412,30 @@
 4. 参数化 **CSRF 矩阵**：`test_all_mutating_endpoints_require_csrf` 覆盖全部修改型端点（当前 27 个），防止未来漏挂装饰器。
 
 **测试（本步即测试）**：验收要求见 §六；目标：总用例数 ≥ 420、离线全绿、单轮 < 30s。
+
+**状态：已完成（2026-09-11）。** 补齐了三个零覆盖区并做了 CSRF 参数化矩阵；过程中**发现并修复了两个此前无人知道的缺陷**（见下）。
+
+**实现偏差（与上面"核心方案"的差异，如实记录）**：
+1. **矩阵规模是 29 个端点而不是 27**：S11/S16 之后修改型路由共 29 个（collections 8、download 4、gallery 5、prefetch 5、search 1、settings 6）。矩阵不只有手写清单，还加了 `test_mutating_endpoint_matrix_is_complete` 做**静态对账**（从 `routes_*.py` 抓 `@bp.route(..., methods=[...])` 与矩阵比对，新增路由会被这条先拦住）——只写清单的话，将来"清单忘了加"和"装饰器忘了挂"是同一类静默风险。
+2. **settings 用例落在新文件 `tests/test_settings_api.py`**，并把 S16 那两个 settings 写盘用例从 `test_app.py` **迁入**该文件（避免同一契约两处维护）；`test_app.py` 只留 CSRF 契约。
+3. **`tests/conftest.py` 未改动**：实际不需要新夹具（`clean_db` / `client` 已够用，`cookies.txt` 落点用改写 `routes_settings.__file__` 的方式隔离）。
+4. **两个新缺陷的修复超出"只加测试"的边界，但必须做**（否则只能删掉失败的断言 —— 那正是本阶段明令禁止的）：见下"顺带修复"。
+
+**顺带修复（S18 补测发现，失败先行）**：
+- **设置页保存预取配置从未生效**：`routes_settings.api_settings_post` 把 settings.json 的**长键**（`prefetch_interval`/`prefetch_pages`/`prefetch_max_illusts`）直接写进 `_prefetch_state`，而 `background` 的预取循环读的是**短键**（`interval`/`pages`/`max_illusts`）—— 等于写进三个没人读的键，`AGENTS.md` 里"经设置页保存后立即生效"的说明自 Blueprint 拆分重构（`73a8f0e`）起就不成立。修法：改用 `routes_prefetch._PREFETCH_SETTINGS_KEYS` 映射（单一来源，不再复制一份键表）。**证伪**：改回旧逻辑后 `test_prefetch_keys_apply_immediately` 失败于 `assert 0 == 321`。
+- **排队中取消会永久毁掉该作品的下载**：`background._download_illust` 的 `session_obj = None` 位于"取消标记检查"**之后**，而该检查处有一条提前 `return`；于是 `finally` 首行就抛 `UnboundLocalError`，其后所有清理（`_download_progress.pop`、`lock.release()`、`_release_download_lock`、`download_cancellations.discard`、`_queued_downloads.discard`）**全部跳过** → 该作品的下载锁永远不放、取消标记永远留着，之后每次触发都在 `lock.acquire(blocking=False)` 处**静默**跳过（用户看到"已加入下载队列"但永远不动），进度条目也永久挂在下载管理页。修法：把两个 session 的初始化提到取消检查之前。**证伪**：把初始化放回原位后 `test_download_cancelled_before_start_does_nothing` 失败于 `UnboundLocalError: cannot access local variable 'session_obj'`；修复后该用例还额外断言"取消过的作品必须能重新下载"（症状级守卫）。
+
+**已实现 + 验证结果（2026-09-11，提交见 §8.1 表）**：新增 **55 例**：
+- `tests/test_settings_api.py`（新文件，13 例）：GET 脱敏（密码类与 `cookie` 一律回空，且响应体里搜不到明文）、缺文件回默认值、损坏文件不 500、锁定态 GET/POST 双 403 且不写盘、POST 只合并已知键、原子写不留 `.tmp`、替换失败 500 且旧字节不变 + 内存态不漂移、`prefetch_*` 保存即生效（回归守卫）、Cookie 单行写入、控制字符剔除（`\r\n\t\0` 不能造成第二行注入）、纯控制字符 400、空 Cookie 不动文件、cookies.txt 写失败 500 **且 settings.json 一个字节都不写**。`cookies.txt` 落点用改写 `routes_settings.__file__` 隔离，并在收尾**兜底断言仓库根目录的真实 cookies.txt 逐字节没变**（路由是用 `__file__` 推项目根，不是 `config.COOKIE_PATH`，没有可直接 patch 的路径变量）。
+- `tests/test_app.py`（+30 例）：29 个修改型端点的 CSRF 矩阵（缺头一律 403 且错误文案一致）+ 1 例静态对账。**证伪**：临时摘掉 `/api/prefetch/refresh-reset` 的 `@_csrf_required` 后，恰好对应用例失败于「POST /api/prefetch/refresh-reset 未受 CSRF 保护」。
+- `tests/test_download.py`（+6 例）：中途取消（第 1 页下完后取消 → 状态复位、半成品目录清掉、记 `cancelled`、不固化 `done`、无残留状态）、排队中取消（不起请求、不写日志、且删除锁/标记/进度条目，另加"之后仍能正常下载"的症状级守卫）、`/download/cancel` 的 happy 与 400/404、`/download_status/<pid>` 与 `/api/download/status/batch`（含 400 与"库里没有的 pid 给 none"）、`/downloads` 页面、`/api/downloads` 四段聚合（active 带 `_download_progress` 进度、queued、completed、logs）。
+- `tests/test_thumb.py`（+8 例）：缓存命中不发网络且 mtime 不变 + `Content-Type` 从 `.meta` 回放 + `max-age=604800`、`.meta` 缺失按 jpeg 兜底、失败冷却期内不再发请求且过期后恢复、成功后清冷却、原子写失败降级为直接转发响应且不留缓存与 `.tmp`、`/api/image` 的 DB 路径 / 目录兜底（含页号排序 `_p10` 在 `_p2` 之后）/ 404 三分支（目录不存在、index 越界、DB 有记录但文件已删）。
+
+**记错与纠正（如实记录）**：写冷却用例时我最初断言"首次失败总共 1 次出站请求"，实际 `_thumb_request` 对非超时连接失败会重建连接池**重试一次**（既有设计），首次失败本身就是 2 次调用 —— 是**我的断言写错**而不是代码错，已改为断言"冷却期内请求数不再增长"。
+
+**测试结果**：全量 **513 例（508 passed / 1 skipped / 4 failed，17.10s）**；4 例失败为预先存在的 Windows 沙箱子进程检查，1 例 skip 为 S17 的 POSIX 权限断言。§六 的"≥ 420 例、离线全绿、单轮 < 30s"中，用例数与耗时达标；"全绿"受那 4 个**既存、与本阶段无关**的沙箱用例影响，未变绿 —— **不宣称全绿**。
+
+**遗留边界**：CSRF 矩阵只证明"缺头时 403"，**不证明各端点的业务授权逻辑**（如收藏夹归属校验）；下载引擎的多 worker 抢同一 pid、前端 JS、`/api/image` 的 Range/ETag、令牌桶时序、真实旧库上的迁移升级仍未覆盖；`test_settings_api.py` 里 `cookies.txt` 的隔离依赖改写模块 `__file__`（路由若改用 `config.COOKIE_PATH` 更干净，但那会改变 Windows/Linux 的写入目标，属行为变更，未做）。
 
 ---
 
@@ -458,7 +502,7 @@
 
 ## 七、P0 实施与验证结果（S1–S7b，2026-09-10 ~ 2026-09-11）
 
-**结论**：P0 的 8 步全部实现、独立提交、推送远程，并已在真实部署（`pixiv-viewer.service`）上验证。P1（S8–S18）尚未开始。
+**结论**：P0 的 8 步全部实现、独立提交、推送远程，并已在真实部署（`pixiv-viewer.service`）上验证。P1（S8–S18）的实施与验证结果见 §八（其中 S18 进行中）。
 
 **基线数字**：测试函数 309 → **371**（+62）；全量离线收集 **391 例 / 387 passed**。
 `tests/test_test_setup.py` 的 4 例失败为**预先存在**（Windows 沙箱 ConstrainedLanguage 下子进程 PowerShell 检查），已用 `git stash` 回退本阶段全部改动复现同一失败，与本阶段无关。
@@ -510,3 +554,49 @@
    - `/thumb` B 级未做图片 magic bytes / 体积上限校验；
    - `check_image_url` 刻意不做 DNS 解析（防 TOCTOU 与每图一次解析开销），域名的信任来自证书校验 + 凭据分级。
 4. **`instance/thumb_redirect_hosts.json`** 为新增的观测数据文件（可随时删除）；发现表不参与任何判定，也不自动提升白名单。
+
+---
+
+## 八、P1 实施与验证结果（S8–S18，2026-09-11）
+
+**结论**：S8–S18 十一步全部实现、逐项独立提交，每步都有新增测试与证伪记录（各节末「已实现 + 验证结果」）。**S18 在补测过程中发现并修复了两个此前无人知道的缺陷**（预取配置键映射错位、排队中取消导致下载锁与取消标记永久泄漏），两者都有失败先行的证据，详见该节末。
+
+**基线数字**：P0 结束时（§七）全量离线收集 391 例。各步提交说明声称的新增用例合计 122（67 ＋ S18 的 55），与本次实测的 **513 例（508 passed / 1 skipped / 4 failed）**一致（391＋122＝513）。**口径声明**：本次回写独立复算的只有"全量收集/通过/跳过/失败"这一组数字；各步骤小节里的文件级 `passed` 数与新增用例数**取自该步提交说明**（本会话逐项记录），未逐个重跑复核。**不写"测试函数"口径的数字**：函数级计数未复核，避免两套口径混用。
+其中 **4 例失败为预先存在**（`tests/test_test_setup.py` 的 Windows 沙箱 PowerShell 子进程检查，§七 已用 `git stash` 复现同款），本阶段改动前后都是这 4 例；**1 例 skip** 是 S17 新增的 `0600` 权限断言（`skipif win32`，Windows 无 POSIX 权限语义）。
+单轮耗时 **17.10s**，满足 §六 的"单轮 < 30s"。
+
+### 8.1 提交与用例增量
+
+| 步骤 | 提交 | 新增用例 | 触及的测试文件 |
+|---|---|---|---|
+| S8 | `4e49cf2` | 5 | `tests/test_test_setup.py`、`tests/conftest.py` |
+| S9 | `2e14c66` | 7 | `tests/test_download.py` |
+| S10 | `cb64ff7` | 4 | `tests/test_prefetch.py` |
+| S11 | `9c71903` | 3 | `tests/test_thumb.py` |
+| S12 | `df7cd94` | 4 | `test_prefetch.py`、`test_prefetch_api.py`（+ 字段集断言同步） |
+| S13 | `dde7221` | 9 | `tests/test_fetcher.py` |
+| S14 | `ad7ad4e` | 4 | `tests/test_fetcher.py` |
+| S15 | `70dded0`（偏差记录 `1b40c7c`） | 11 | `tests/test_app.py` |
+| S16 | `4c7c783` | 11 | `test_helpers.py`、`test_app.py`、`test_prefetch_api.py`、`test_test_setup.py` |
+| S17 | `578c0c1` | 9 | `tests/test_auth.py` |
+| S18 | 见本节「S18」段 | 55 | 新增 `tests/test_settings_api.py`；`test_app.py`、`test_download.py`、`test_thumb.py` |
+
+### 8.2 证伪结论（含"证据偏弱"的如实标注）
+
+- **行为级、证据强**：S8（回退后 3 例失败 + "真实 `instance/` 零写入" A/B 实验）、S9（6/7）、S10（幽灵引用实测 `illust_ids=[9202, 9201]`）、S11（失败在「不得用 `with` 获取信号量（没有等待上限）」）、S13（回退后**恰好**那 4 个 403 用例失败）、S14（2 例失败，另 2 例"不得放宽节流"两侧都通过）。S16 的 3 例、S17 的机制级 7 例也属此类（见下）。
+- **seam 缺失型、证据偏弱（如实标注）**：S15（回退后 10 例失败，但原因是新 seam 不存在 `AttributeError: ... has no attribute 'tempfile'`）、S16（7 例中 4 例是 `helpers._atomic_write_json` 不存在）、S17（8 例中 7 例是 `module 'config' has no attribute '_load_or_create_secret'`）。这三步**都补做了机制级证伪**（保留 seam，只改判定/阈值/权限调用）：S15 得到 8 例 `assert 0 == 1`，S16 得到 2 例 `assert 200 == 500` + 1 例「损坏文件必须留一份副本」，S17 得到 `assert 'abc' != 'abc'` / `assert 0 == 3` / `assert '内容过短' in ''`。
+- **S12 属新增可观测面**：证伪表现为"字段缺失/行为未定义"，不是修掉某个既有错误值 —— 这类修复的证伪强度天然弱于行为修复，不应按同一标准宣称"已证明修好"。
+- **S18 的两处行为级强证据**（补测发现的新缺陷，不是既有修复）：① 预取键映射：把 `routes_settings` 的同步逻辑改回旧的"直接用长键"后，`test_prefetch_keys_apply_immediately` 立即失败于 `assert 0 == 321`；② 排队中取消：把 `session_obj = None` 放回取消检查之后，`test_download_cancelled_before_start_does_nothing` 失败于 `UnboundLocalError: cannot access local variable 'session_obj'`；③ CSRF 矩阵：临时摘掉 `/api/prefetch/refresh-reset` 的 `@_csrf_required` 后，恰好对应用例失败于「POST /api/prefetch/refresh-reset 未受 CSRF 保护」。
+
+### 8.3 本阶段遗留与边界（诚实记录）
+
+1. **S12 只把"后台线程静默死亡"变成可观测**（`prefetch_alive` / `stale` / `last_error`），**未加 supervisor、未自动重启**，`_start_prefetch_thread` 内 `_run` **仍无兜底 try**：`_prefetch_loop` 之外的异常仍能打死线程，只是这次看得见。
+2. **S10 的残留**：删除侧 `commit` 仍在锁外，最终值取决于两个全列写的提交次序；极端情况下合并可能等锁超时而丢一次合并（有日志与下一轮重试，不再产生幽灵引用）。
+3. **S14 是"有界"而非"硬顶"**：清理只在表超上限时触发，节流窗口内的条目一律保留。
+4. **S15 的临时文件清理依赖 WSGI 关闭 body 的契约**（另有 EOF 自清理兜底）；大包改占临时目录空间；阈值常量改动需重启。
+5. **S16 只降低"settings.json 被写坏"的概率并保留证据**，未改变"损坏即回退默认值"的语义 —— 审计报告 §10-4 的"损坏 → 登录墙静默失效"因此只是被降低概率，**未被消除**。
+6. **S17 的长度校验会重生成密钥** → 该部署既有会话与游标失效（有意取舍）；`0600` 的 POSIX 端到端权限**未在本机证实**（Windows 上断言 skip，只验证了"确实请求了 0o600"）。
+7. **不在本阶段范围的审计发现**（仍未修）：列表请求零限流（报告 §15-4）、`_db_pids_cache` 尖峰与缺索引（§11-4 / §12-3）、`settings.json` 明文存口令与损坏回退语义（§10-4）、Windows 保留名（§10-6）、备份保留策略（§14-4）。
+8. **S18 补测发现并修复的两个缺陷**（原审计未命中，见报告 §33.3）：① 设置页保存 `prefetch_*` 时把 settings.json 的**长键**写进 `_prefetch_state`，而预取循环读的是**短键** → "保存即生效"自 Blueprint 拆分重构（`73a8f0e`）起就没生效过；② `_download_illust` 的 `session_obj = None` 位于取消检查之后，**排队中被取消**的任务会在 `finally` 首行抛 `UnboundLocalError`，导致锁未释放、取消标记与进度条目泄漏 → 该作品**再也下载不了**（worker 在 `lock.acquire(blocking=False)` 处静默跳过）。两处修法都是"把初始化/映射摆到正确位置"，未改任何语义分支。
+9. **S18 仍未覆盖的面**（诚实边界）：下载引擎的并发细节（多 worker 抢同一 pid）、前端 JS 无测试（仓库向来如此）、`/api/image` 的 Range/ETag 行为、`fetcher` 的令牌桶时序、迁移在真实旧库上的升级（只在临时库验证）。**CSRF 矩阵是静态对账 + 请求级 403 双保险**，但它只证明"缺头时 403"，不证明各端点的业务授权逻辑（例如收藏夹归属校验）—— 那需要逐端点用例，本步未做。
+10. **审计报告的回写范围**：本次只回写被 S8–S18 覆盖的发现（`docs/risk-audit-report.md` 新增 §33 台账 + 相关条目状态标注）；报告 §1–§32 的评分与结论**保持审计当时的口径**，不据修复结果改写评分。P0（S1–S7b）的状态回写见 §七，不在 §33 重复。

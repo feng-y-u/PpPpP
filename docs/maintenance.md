@@ -17,6 +17,34 @@
 
 ---
 
+## 1b. 实例目录重定向（`PIXIV_INSTANCE_DIR`）
+
+上面三类存储里的"实例数据"默认都在仓库内的 `instance/`。设 `PIXIV_INSTANCE_DIR` 可以把**整个实例目录**搬到别的位置：`.cursor_secret` / `.secret_key` / `settings.json` / `pixiv.db`（+WAL/SHM）/ `image_cache/` / `backups/` / `thumb_redirect_hosts.json` 都由 `config._instance_dir` 单点派生，跟着一起走。
+
+```bash
+# Linux：systemd unit 里用 Environment=PIXIV_INSTANCE_DIR=/srv/pixiv-data ，或写进 .env
+PIXIV_INSTANCE_DIR=/srv/pixiv-data gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
+```
+
+```powershell
+# Windows 开发机
+$env:PIXIV_INSTANCE_DIR = 'D:\pixiv-data' ; flask run --debug
+```
+
+- **必须在 `import config` 之前设置**（环境变量与 `.env` 都可以，`.env` 在实例目录派生之前加载）。`config.py` 在 import 时就派生好全部路径并生成密钥，**事后改环境变量无效**。
+- **不设置时行为不变**：仍是仓库内 `instance/`（生产默认姿态）。
+- **覆盖值不可用时 import 直接失败，故意不回落到默认目录**。这一条是刻意的：静默回落意味着测试或部署会悄悄读写真实实例数据（历史上测试就是往真实 `instance/` 里写密钥的）。所以路径写错要当"启动报错"处理，不要期待它自己纠正；目录不存在会被自动创建，而指向一个**文件**则启动即报错。
+- 典型用途：多实例共用一份代码（各用各的数据目录）、把数据放到更大的盘或独立分区、自动化测试隔离（`tests/conftest.py` 就是靠它在 `import config` 之前把整轮测试重定向到临时目录）。
+- **迁移已有的 `instance/`**：新目录不会自动搬。停服后把 `instance/` 整个拷过去（数据库连 `-wal`/`-shm` 一起拷，或先停服让 WAL checkpoint —— 见第 4 节），再设变量重启。
+- **换了目录就等于换了密钥**：`.secret_key` / `.cursor_secret` 若不在新目录里会被重新生成 → 所有登录会话与搜索游标失效，用户需要重新登录。要保留登录态就把这两个文件一起拷过去。
+
+```bash
+# 改过配置后值得跑一次：确认当前进程实际用哪个目录
+python -c "import config; print(config._instance_dir); print(config.DATABASE_PATH)"
+```
+
+---
+
 ## 2. 开发启动（Windows）
 
 ```powershell

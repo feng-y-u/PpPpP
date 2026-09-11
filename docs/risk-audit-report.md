@@ -4,6 +4,7 @@
 > 审计方法：全部源码逐行阅读（app/config/runtime/models/middleware/helpers/fetcher/background/routes_*/migrations/tests/scripts/templates/static）+ 6 路并行专项审计（下载并发 / 预取搜索状态机 / 安全渗透 / 性能内存 / 测试覆盖 / 上游依赖）。
 > 证据等级：**CONFIRMED**（源码直证）/ **HIGH CONFIDENCE**（调用链推导）/ **POSSIBLE**（需运行时验证）/ **SPECULATION**（推测，不列入严重问题）。
 > 引用位置用「符号名（文件:行号）」，行号仅供参考，可能随重构漂移。
+> **修复进展（2026-09-11 追加）**：P0（S1–S7b）与 P1（S8–S17）已实施并验证，逐条记录见 `docs/superpowers/plans/2026-09-10-risk-audit-fixes.md` §七 / §八 / §33。本报告 §1–§32 的**评分、严重度与结论保持审计当时（基线 `615cdf0`）的口径不变**，仅在受本次修复覆盖的条目后追加「✅ 已修复 / ⚠️ 部分缓解」标注（`<提交号>` 指向修复提交）；未标注的发现一律视为未处理。完整台账见 §33。
 
 ---
 
@@ -47,10 +48,10 @@
 | 3 | `SSL_VERIFY=False` + 跟随重定向 + 全局 Cookie 头 → on-path 窃取 PHPSESSID / 盲 SSRF | Critical | Medium | Pixiv 账号接管、内网探测 | CONFIRMED（链路） | SSL_VERIFY 默认 True；/thumb 重定向复检；下载 URL 校验 |
 | 4 | 下载引擎 `safe_commit` 异常被线程池静默吞掉 → 永久卡 `downloading`，不可观测 | High | Low | 单作品死锁直至重启 | CONFIRMED | 包异常→置 failed+日志 |
 | 5 | 预取刷新未分类异常冒泡 → 当轮 `_prefetch_capacity_cleanup` 被跳过，上限失效 | High | Low-Med | 容量无界膨胀 | CONFIRMED | refresh 加宽 except 不冒泡；清理移出共用 try |
-| 6 | 重复提交/重下同一 pid → 重下失败删除上次成功文件 | High | Low-Med | 数据丢失（可重下） | HIGH CONFIDENCE | 入口复查 status/加唯一任务键 |
+| 6 | 重复提交/重下同一 pid → 重下失败删除上次成功文件 | High | Low-Med | 数据丢失（可重下） | HIGH CONFIDENCE | 入口复查 status/加唯一任务键（✅ `2e14c66`） |
 | 7 | 下载"队窗"（queued→首 commit）内被容量清理删行 → 下载静默消失无日志 | Medium | Medium | 下载丢失 | HIGH CONFIDENCE | 清理并入 `_queued_downloads` 判定；缺行留痕 |
-| 8 | 限流覆盖不全：列表类请求（search/discovery/follow）绕过令牌桶；403 在列表端误报"认证失效" | Medium | High | 触发 Pixiv 封禁、误导排障 | CONFIRMED | 列表端补限流；403 分类统一 |
-| 9 | 数据规模增长：10 万+ 行全表扫描（tags DISTINCT、`_db_pids_cache`）、`_fill_last_attempt` 无界增长、ZIP 整包内存 | Medium | High（时间尺度） | 查询秒级、内存 100MB+ | CONFIRMED（源码推断） | 补索引、周期压缩、ZIP 落盘 |
+| 8 | 限流覆盖不全：列表类请求（search/discovery/follow）绕过令牌桶；403 在列表端误报"认证失效" | Medium | High | 触发 Pixiv 封禁、误导排障 | CONFIRMED | 列表端补限流；403 分类统一（⚠️ 403 已修 `dde7221`；列表端限流**未做**） |
+| 9 | 数据规模增长：10 万+ 行全表扫描（tags DISTINCT、`_db_pids_cache`）、`_fill_last_attempt` 无界增长、ZIP 整包内存 | Medium | High（时间尺度） | 查询秒级、内存 100MB+ | CONFIRMED（源码推断） | 补索引、周期压缩、ZIP 落盘（✅ 压缩 `ad7ad4e` / ZIP 落盘 `70dded0`；补索引**未做**） |
 | 10 | 上游 Pixiv API 变化（endpoint/schema/403 策略）导致全功能静默降级，无告警 | High | Medium | 空结果/下载失效 | HIGH CONFIDENCE | 关键路径错误分类+告警；schema 校验点 |
 
 ---
@@ -160,11 +161,11 @@ DB = done，磁盘文件已被 reset 删除 → 幻影成功
 | C1 | 取消检查→提交非原子（幻影 done） | background.py `_download_illust` L685→L704 | CONFIRMED | 见 §4-1 |
 | C2 | 锁竞争失败静默丢弃新任务 | `_download_illust` L615-616 `lock.acquire(blocking=False)` 失败即 return，无日志 | HIGH CONFIDENCE | 用户收到 accepted 但任务从未执行；`_queued_downloads` 由旧任务 finally 清掉 |
 | C3 | `setdefault→acquire` 双窗口 | L613-615 | POSSIBLE | `_release_download_lock` 的 `is` 比较挡住大部分；理论窗口极小 |
-| C4 | 重复提交同一 pid | routes_download `trigger_download`/`batch_download` | CONFIRMED | 锁防双执行但有"返回 accepted 实为 no-op"与"重下失败毁旧文件"两个后果 |
+| C4 | 重复提交同一 pid | routes_download `trigger_download`/`batch_download` | CONFIRMED | 锁防双执行但有"返回 accepted 实为 no-op"与"重下失败毁旧文件"两个后果 —— ✅ 已修复：`2e14c66`（排队判定与入队同锁 + `_download_illust` 的 done 守卫 + 提交失败把 pid 撤出队列） |
 | C5 | 下载队窗静默丢失 | routes_download.py L45-46 → background.py L626-628 | HIGH CONFIDENCE | 容量清理在 queued→首 commit 窗口删行，worker 查不到行静默 return |
 | C6 | `api_downloads` 无锁遍历 `_queued_downloads`（`list(set)` 可抛 changed size） | routes_download.py L205 | POSSIBLE | 违反 AGENTS 自己定的容器遍历加锁约定 |
 | C7 | 限流器锁 | middleware.py `_check_rate_limit` | 已修复✓ | 整事务持锁 + 并发爆破测试（test_auth 40 轮）——正面案例 |
-| C8 | 缩略图信号量饥饿 | runtime.py `_thumb_sem`（12）> `--threads 8` | HIGH CONFIDENCE | 冷缓存双标签页 12+ 并发时请求线程可全部阻塞在信号量上，全站 API 冻结（断网时放大到 30s） |
+| C8 | 缩略图信号量饥饿 | runtime.py `_thumb_sem`（12）> `--threads 8` | HIGH CONFIDENCE | 冷缓存双标签页 12+ 并发时请求线程可全部阻塞在信号量上，全站 API 冻结（断网时放大到 30s） —— ✅ 已修复：`9c71903`（`_thumb_sem.acquire` 加 `THUMB_SEM_TIMEOUT`=15s 上限，超时 503） |
 | C9 | `_search_tasks` 读无锁 | routes_search.py `search_status` | 可接受✓ | 写方最后置 status 的约定成立，除 §9-2 的 error 字段写序瑕疵 |
 | C10 | `_last_fetch_stats` 互相覆盖 | fetcher.py | 已知可接受✓ | 仅影响展示统计 |
 
@@ -174,7 +175,7 @@ DB = done，磁盘文件已被 reset 删除 → 幻影成功
 
 1. **DB=done 文件缺失（幻影成功）**：§4-1。不可自愈，需人工删稿重下。CONFIRMED。
 2. **文件删了 DB 仍 done**（用户手动删文件、pixiv-cleanup.sh 与 app 并发）：`serve_image`/`download_file` 有 404 兜底但 DB 状态不自动修正，图库长期显示"已下载"空卡。POSSIBLE（行为确认，触发看用户）。建议在下载管理页做文件对账。
-3. **SearchCache 幽灵引用（永不自愈）**：手动刷新 merge 与删除路径跨 session 读改写同一 JSON 列（background.py `_prefetch_one_tag` L189-201 vs `_remove_pids_from_search_caches` L226-238），WAL last-writer-wins 无冲突检测；已删 pid 被写回 → `total`/`filtered_total` 长期不一致（查询按 INNER 语义静默跳过）。CONFIRMED（路径）/ POSSIBLE（触发）。建议进程级锁或 CAS。
+3. **SearchCache 幽灵引用（永不自愈）**：手动刷新 merge 与删除路径跨 session 读改写同一 JSON 列（background.py `_prefetch_one_tag` L189-201 vs `_remove_pids_from_search_caches` L226-238），WAL last-writer-wins 无冲突检测；已删 pid 被写回 → `total`/`filtered_total` 长期不一致（查询按 INNER 语义静默跳过）。CONFIRMED（路径）/ POSSIBLE（触发）。建议进程级锁或 CAS。**✅ 已修复：`cb64ff7`（`background._search_cache_guard` 罩住合并段与删除改列段；幽灵引用用例在回退修复后实测 `illust_ids=[9202, 9201]`，即已删 pid 被写回，修复后消失。删除侧 `commit` 仍在锁外，残留见 §33）**
 4. **容量清理两段式（清引用 commit → 删行 commit）间崩溃**：行保留、其他标签引用已丢——依赖"下轮重新出现在结果页"才自愈，非永久不一致。HIGH CONFIDENCE。
 5. **失败路径先删文件后提交**（background.py L671-682）：文件已删、commit 失败 → DB=downloading + 文件缺失的不一致方向。建议统一"先提交 failed 再清理文件（清理失败仅告警）"。
 6. **`_reset_stuck_downloads` 无条件整目录删除**：多页作品已完成页在崩溃重启时被一并删除（无续传设计，有意为之但值得记录）；重下中崩溃会把上一轮成功文件一起删。CONFIRMED（设计行为）。
@@ -192,7 +193,7 @@ DB = done，磁盘文件已被 reset 删除 → 幻影成功
 | D1 | `download_cancellations` 标记由"旧 worker 的 finally"清理：旧 worker 已退出而新任务未启动时，标记残留期新任务被静默跳过（L618-622） | HIGH CONFIDENCE（时序上界毫秒，实际影响小） |
 | D2 | reset 与 worker 各自写日志（failed + cancelled 两条） | CONFIRMED（噪音级） |
 | D3 | 取消生效延迟 ≤ 单页最慢请求（10s 连接超时 + 60s 读超时），页面间才有检查点（L652）——超长单页无法快速取消 | HIGH CONFIDENCE（设计权衡） |
-| D4 | `download_file` ZIP：整包 `BytesIO`（50 页×10MB ≈ 500MB 常驻请求线程，8 线程可乘 N 倍）；L164-181 之间文件消失 → TOCTOU 500 | HIGH CONFIDENCE |
+| D4 | `download_file` ZIP：整包 `BytesIO`（50 页×10MB ≈ 500MB 常驻请求线程，8 线程可乘 N 倍）；L164-181 之间文件消失 → TOCTOU 500 —— ✅ 已修复：`70dded0`（总大小超 `ZIP_MEMORY_THRESHOLD_BYTES` 时落临时文件流式发送；打包途中消失的文件跳过其余照常，全部消失返回 404「文件已丢失」而不是空 zip 或 500。清理机制见计划文档 S15「实现偏差」） | HIGH CONFIDENCE |
 | D5 | 下载引擎每任务 `build_pixiv_session` 新建 + 关闭（非池化）：单任务多页 OK，但 batch 下载 N 个作品 = N 次 TCP+TLS 握手 | HIGH CONFIDENCE（性能） |
 | D6 | `download_status='failed'` 无自动重试；批量下载个别失败静默 | CONFIRMED（UX） |
 
@@ -248,8 +249,8 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 **已确认问题**：
 1. XFF 伪造链（§4-2）——含登录限流 5/min 被旋转 XFF 绕过（仅剩 1s sleep）；`/api/settings/unlock` 连 1s 延迟都没有（routes_settings.py:158-170）。CONFIRMED。
 2. TLS/重定向/Cookie 链（§4-3）。CONFIRMED。
-3. 密钥文件权限：`.secret_key`/`.cursor_secret` 生成无 chmod（Linux 默认 0644）；`.cursor_secret` 截断/短密钥文件**直接使用**（config.py:12-19 只处理不存在，不校验长度，与 app.py:76-84 的空文件处理不一致）。CONFIRMED。
-4. settings.json 明文存放两把口令；损坏回退默认 → **已部署的登录墙静默失效**（config.py:152-166 捕获后忽略一切，`ACCESS_PASSWORD` 恢复为空）。CONFIRMED（低概率路径，安全姿态降级）。
+3. 密钥文件权限：`.secret_key`/`.cursor_secret` 生成无 chmod（Linux 默认 0644）；`.cursor_secret` 截断/短密钥文件**直接使用**（config.py:12-19 只处理不存在，不校验长度，与 app.py:76-84 的空文件处理不一致）。CONFIRMED。**✅ 已修复：`578c0c1`（`config._load_or_create_secret(path, min_len=32)` 统一长度校验 + `os.chmod(0o600)`，`.secret_key` 与 `.cursor_secret` 共用同一助手）**
+4. settings.json 明文存放两把口令；损坏回退默认 → **已部署的登录墙静默失效**（config.py:152-166 捕获后忽略一切，`ACCESS_PASSWORD` 恢复为空）。CONFIRMED（低概率路径，安全姿态降级）。**⚠️ 仅部分缓解：`4c7c783` 把 settings.json 改为原子写（同目录 tmp → `fsync` → `os.replace`）并在损坏时留 `settings.json.corrupt.bak` —— 这让"被写坏"的概率大幅下降且有现场可查，但"损坏即回退默认值"的语义**未改**：手工改坏这个文件时登录墙仍会静默失效。明文存口令也未处理。**
 5. 默认免认证 + `0.0.0.0` 绑定（§4-2）。CONFIRMED。
 6. 路径遍历：`local_paths` 无远程污染途径（仅 `_download_illust` 写固定格式），当前不可达；`download_file` 文件名消毒未处理 Windows 保留名（CON/NUL）与首尾点空格（功能级）。CONFIRMED（纵深缺口）/ POSSIBLE（利用）。
 7. SSRF 面：`/thumb` 白名单可靠（startswith 精确前缀），但重定向目标不校验（合并入 §4-3）；`original_urls` 下载直连无校验（纵深）。CONFIRMED（缺口）/ POSSIBLE（利用）。
@@ -279,8 +280,8 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 
 ## 12. 内存问题
 
-1. **`fetcher._fill_last_attempt` 只增不删（确认的慢泄漏）**：后台补全每次尝试写时间戳，无任何删除路径；10 万 pid ≈10MB、100 万 ≈100MB。建议周期性压缩（保留最近 N 天或改 LRU）。
-2. **`download_file` ZIP 整包内存**：峰值≈文件总和（不翻倍，但从 BytesIO 常驻请求线程）；建议超过阈值（如 200MB）时改用临时文件。
+1. **`fetcher._fill_last_attempt` 只增不删（确认的慢泄漏）**：后台补全每次尝试写时间戳，无任何删除路径；10 万 pid ≈10MB、100 万 ≈100MB。建议周期性压缩（保留最近 N 天或改 LRU）。**✅ 已修复：`ad7ad4e`（`_FILL_ATTEMPT_MAX_ENTRIES = 1000`，在既有 `_fill_lock` 段内清理远超节流窗口的条目；窗口内条目一律保留，故是"有界"而非"硬顶"）**
+2. **`download_file` ZIP 整包内存**：峰值≈文件总和（不翻倍，但从 BytesIO 常驻请求线程）；建议超过阈值（如 200MB）时改用临时文件。**✅ 已修复：`70dded0`（`config.ZIP_MEMORY_THRESHOLD_BYTES = 200MB`，超阈值走临时文件 + 流式发送；阈值内仍走原内存路径，行为不变）**
 3. **`_db_pids_cache` 30s 尖峰**：1M 行 ≈40-80MB 集合。可改流式分批。
 4. **`_get_illust_detail` 峰值 ~2.5MB**（5 worker 并发，无问题）。✓
 5. **`_thumb_failed`/`_SEARCH_CACHE`(64)/`_USER_PROFILE_CACHE`(64)/`_detail_error_samples`(20)**：全部有界或自限。✓
@@ -294,7 +295,7 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 1. **`_reset_stuck_downloads` 整目录删除**（§6-6，与续传矛盾，属设计决策，建议文档注明）。
 2. **临时文件**：`/thumb` 原子写（唯一 tmp → `os.replace`）设计正确；`os.replace` 后 `.meta` 单独写存在半程（mimetype 回退 jpeg，可接受）。✓
 3. **孤儿文件**：删除接口支持无 DB 行孤儿（已修复）；`_scan_local_downloads` 会把孤儿渲染为卡片——有专用删除路径。✓
-4. **settings.json 非原子写**：`open(...,'w')` 直接覆盖，断电/崩溃 → 损坏 → 回退默认（含口令丢失、登录墙失效）。建议写临时文件 + `os.replace`。
+4. **settings.json 非原子写**：`open(...,'w')` 直接覆盖，断电/崩溃 → 损坏 → 回退默认（含口令丢失、登录墙失效）。建议写临时文件 + `os.replace`。**✅ 已修复：`4c7c783`（`helpers._atomic_write_json`：同目录 `<path>.tmp` → `flush`+`fsync` → `os.replace`，失败路径清掉残留 tmp 且原文件字节不变；`api_settings_post` 与 `prefetch_config_post` 两个写入点都改用它）**
 5. **磁盘满**：写入无预检，失败路径大多有 `except OSError` 兜底（`_download_illust` 失败分支会清理）；`/thumb` 写失败降级流式返回。可接受。✓
 6. **路径穿越**：无远程污染途径（§10-6）。✓
 7. **mtime 语义**：命中缓存不刷 mtime 保持 ETag 稳定——正确权衡。✓
@@ -320,7 +321,7 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 ## 15. 上游 Pixiv API 风险
 
 1. **Endpoint 变化的影响面**：`/ajax/search/illustrations`、`/ajax/illust/{id}`、`/ajax/discovery/artworks`、`/ajax/user/{id}/profile/all`、`/ajax/follow_latest/illust`、`i.pximg.net` 图片。任何 schema 变化 → 各解析点（`_parse_tags`、`_extract_original_urls`、`illustManga.data` 路径）已有宽容的 None/缺省降级，**不会崩溃但会静默空结果/缺字段**（作品可用但 original_urls 空 → 下载不可用）。失败隔离做得好，但**无 schema 校验与告警**——Pixiv 改版后用户只会看到"搜不到"。
-2. **403 语义分裂**：列表端点把 403 归类为 `PixivAuthError`（fetcher.py:1088/1156/1290/1330）→ 前端显示"Cookie 已过期"；详情端把 403 当限流退避。而项目自己的注释说"并发 3 即触发 403"——**403 更可能是限流而非认证**，用户排障会被误导。建议 403 与 401 分开归类。
+2. **403 语义分裂**：列表端点把 403 归类为 `PixivAuthError`（fetcher.py:1088/1156/1290/1330）→ 前端显示"Cookie 已过期"；详情端把 403 当限流退避。而项目自己的注释说"并发 3 即触发 403"——**403 更可能是限流而非认证**，用户排障会被误导。建议 403 与 401 分开归类。**✅ 已修复：`dde7221`（`fetcher._warn_403`；四处列表端点 403 → warning「疑似限流/风控」+ 按既有失败形态返回空结果，401 仍抛 `PixivAuthError`；详情端 403 退避语义未动）**
 3. **Cookie 失效语义**：`PixivAuthError` → 搜索任务 error(auth)→401；预取刷新只中止不标记（正确）；下载引擎不检测认证错误（图片 URL 无需 Cookie）✓；自动关注失败静默 continue——**没有主动通知"Cookie 过期"的机制**。
 4. **限流覆盖**：详情/profile 双桶+总闸 ✓；**列表请求（search/discovery/follow_latest）零限流**（仅翻页间 sleep1s）——高频翻页/自动关注 10 页连点可触发 403。确认的合规漏洞。
 5. **重试策略**：连接失败 fail-fast、限流 3s/9s 退避、404 不重试、401 上报——策略精细且有测试。✓（风险在"两层重试叠加"已被注释与测试锁住）。
@@ -340,6 +341,8 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 
 **核心缺口**：后台线程无 supervisor / heartbeat / last_run 告警。`_prefetch_state['last_check']` 存在但没有任何"超过 X 小时未更新→告警"的消费方；线程死后 UI 仍显示一切正常（`/api/prefetch/status` 的 running 只是运行时标志）。建议：给 `_prefetch_loop` 的 `_run` 加 try 兜底 + 状态机记录 error；prefetch/auto-follow 的 last_check 在状态 API 里暴露"延迟"。
 
+**✅ 部分修复：`df7cd94`** —— `background.get_background_health()` 保留线程引用并回答"线程还在不在"，`/api/prefetch/status` 新增 `prefetch_alive` / `auto_follow_alive` / `stale`（阈值 `2*interval+600`，`interval<=0` 恒 False）/ `last_error`（"非空"= 最近一轮就有问题）。**但没有加 supervisor 或自动重启，`_start_prefetch_thread` 内 `_run` 仍无兜底 try** —— `_prefetch_loop` 之外的异常仍能打死线程，区别只在于现在看得出来（详见 §33 遗留第 1 条）。
+
 ---
 
 ## 17. 部署与运维问题
@@ -348,7 +351,7 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 2. **`systemctl restart` 安全性**：in-flight 下载被 `download_executor.shutdown(wait=False)` 放弃，文件半写 + DB=downloading → 重启 `_reset_stuck_downloads` 清理 ✓（幂等设计正确）；WAL 保证 DB 不损坏 ✓。但**重启会丢失 queued（内存）任务且无日志**。
 3. **升级**：迁移自动备份+版本化 ✓；settings.json 向后兼容 ✓；但 6.3 注释/10.7 docstring 等文档失步会误导部署排障。
 4. **恢复演练**：无。备份的"可恢复性"未被任何测试/文档流程验证（尤其 WAL 缺陷 §14-4 使备份可能不完整）。
-5. **`--threads 8` 与 `_thumb_sem=12` 的线程饥饿**（§5-C8）：建议 CONCURRENCY ≤ 线程数或 acquire 带超时。
+5. **`--threads 8` 与 `_thumb_sem=12` 的线程饥饿**（§5-C8）：建议 CONCURRENCY ≤ 线程数或 acquire 带超时。**✅ 已修复：`9c71903`（`runtime.THUMB_SEM_TIMEOUT`，超时返回 503 而不是无限期占住请求线程）**
 6. **日志**：werkzeug 压到 WARNING 防 Cookie 泄露 ✓；应用日志无分级路由（全进 journald——可接受）。
 7. **`pixiv-cleanup.sh`**：路径越界保护（realpath 校验）✓、pid 数字校验 ✓、sqlite3 并发错误被 `|| true` 静默吞掉（失败静默）；Windows 环境（当前开发机）无法直接运行 bash 脚本。
 
@@ -363,12 +366,12 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 | C. 进程 OOM | 杀进程 | 服务挂 | downloading/fetching 残留 | 全丢 | 半写 | 重启时重置 ✓ | 无 | 无 |
 | D. kill -9 | 同 C | 服务挂 | downloading 残留 | 全丢 | 半写 | 重启时重置并**删除全部已下载页**（含完成页） | 无 | 接受（文档化）；或改"保留完成页" |
 | E. Cookie 过期 | PixivAuthError | 搜索 401、预取中止、自动关注静默 | 不变 | 不变 | 不变 | 否 | 更新 cookies.txt | 状态 API 主动告警 |
-| F. Pixiv 403 | 详情端退避、列表端误报 auth | "Cookie 已过期"误导 | 不变 | 退避/标记 | 不变 | 自动（退避） | 无 | 403/401 分离（§15-2） |
+| F. Pixiv 403 | 详情端退避、列表端误报 auth | "Cookie 已过期"误导 | 不变 | 退避/标记 | 不变 | 自动（退避） | 无 | 403/401 分离（§15-2，✅ `dde7221`） |
 | G. Pixiv 429 | 详情退避 3s/9s、刷新熔断 3 连 | 搜索变慢 | 不变 | 熔断计数 | 不变 | 自动 ✓ | 降低并发配置 | 已完善 |
 | H. 网络断开 | 连接失败 fail-fast | 搜索空结果、下载 failed | 下载 failed ✓ | 线程继续 | 清理 ✓ | 自动 | 无 | 已完善（重试收敛 10s） |
 | I. 下载中断电 | killing | 见 D | downloading | 丢 | 半写 | 重启重置 | 无 | 接受 |
 | J. 用户手动删文件 | DB=done 文件无 | 图库空卡、灯箱 404 | done 不变 | 不变 | 缺 | **否** | 手动处理 | 增加文件对账/重下入口提示 |
-| K. settings.json 损坏 | 读取回退默认 | 密码墙消失、设置重置 | 不变 | 不变 | 损坏文件保留 | 部分（回退） | 重建 | 原子写 + 损坏时保留 .bak |
+| K. settings.json 损坏 | 读取回退默认 | 密码墙消失、设置重置 | 不变 | 不变 | 损坏文件保留 | 部分（回退） | 重建 | 原子写 + 损坏时保留 .bak（✅ `4c7c783`；回退默认值的语义仍未改） |
 | L. 迁移中途失败 | 事务回滚，user_version 不推进 | 启动失败/重试 | 不变 | — | 备份已生成 | 重试即可 ✓ | 可用 .bak 回退（未验证流程） | 补"恢复演练"测试 |
 
 ---
@@ -381,7 +384,7 @@ none →(trigger)→ queued →(worker 启动)→ downloading →(全部页成�
 3. `_auto_follow_worker`、`start_background_threads` 幂等、`_shutdown_background_threads`、`_reset_stuck_downloads` 零测试。
 4. `/api/settings` 写入面（cookie 写失败 500、损坏 JSON 回退、写失败 500、控制字符剔除）零测试。
 5. 迁移：partial DDL 回滚、备份恢复流程、备份失败中止、版本合法性校验——均无测试。
-6. **测试隔离缺陷（CONFIRMED）**：`import config` 会向**真实** `instance/` 写 `.cursor_secret`；`import app` 写 `.secret_key`、对**真实 image_cache** 执行强制容量清理、建真实 downloads/；真实 settings.json 的覆盖（如 access_password）泄漏进整个测试进程（设了密码的机器上跑测试会全挂）。运行 `run_tests.ps1` 前请知情。
+6. **测试隔离缺陷（CONFIRMED）**：`import config` 会向**真实** `instance/` 写 `.cursor_secret`；`import app` 写 `.secret_key`、对**真实 image_cache** 执行强制容量清理、建真实 downloads/；真实 settings.json 的覆盖（如 access_password）泄漏进整个测试进程（设了密码的机器上跑测试会全挂）。运行 `run_tests.ps1` 前请知情。**✅ 已修复：`4e49cf2`（conftest 在 `import config` **之前**强制设置 `PIXIV_INSTANCE_DIR` 到临时目录，密钥 / settings.json / pixiv.db / image_cache / 重定向发现表全部跟着走；A/B 实验——临时移走真实密钥后跑全量，旧代码会在真实 `instance/` 重新生成，修复后同一实验零写入）**
 
 **P1**：`/thumb`（白名单 403/冷却 502/命中不刷 mtime/原子写降级）、`/api/image` 两分支、`_fetch_original_urls` 惰性路径、容量清理 tier2 created_at 3 天阈值分支（当前表达式只被 refresh_failed_at 路径覆盖）、`_prefetch_capacity_cleanup` 的 upload_date 破平局、游标 24h 过期分支、图库 json_each 损坏降级、孤儿卡片构建（`_db_pids_cache` 窗口）。
 
@@ -582,3 +585,50 @@ P3（长期演进）
 **3. 使用一年后的规模退化（不会坏，但会肉眼可见地变慢）**。预取 10000 条上限 + 下载数百作品 + 1GB 缩略图缓存的规模下，全表扫描类查询（tags 列表、容量清理、`_db_pids_cache`）开始秒级、`_fill_last_attempt` 无声吃内存、后台补全/预取刷新与搜索抢令牌桶让搜索越来越慢。**这是唯一"可预见、可提前修"的风险**：补三个索引 + 一个周期性压缩就能把退化点推迟一个数量级。
 
 **一句话结论**：架构健康、工程纪律优秀、但下载引擎的竞态与默认安全姿态是两颗"定时炸弹"——前者会在日常使用中炸（数据不一致），后者会在暴露网络时炸（账号与数据泄露）；一年后的体验瓶颈是规模查询退化而非功能损坏。**按 P0 清单先修 7 项，这个项目就足够安全稳定地再跑一年。**
+
+---
+
+## 33. P1 修复台账（S8–S18，2026-09-11）
+
+本节是**追加**的修复状态记录，不改动 §1–§32 的审计口径与评分。P0（S1–S7b）的验证记录在 `docs/superpowers/plans/2026-09-10-risk-audit-fixes.md` §七，此处只列 P1（S8–S18）中被本报告命中的发现；各步的完整方案、测试清单与遗留边界见该计划文档对应小节与 §八。§33.3 另记两条**原审计未命中、由 S18 补测跑出来**的缺陷。
+
+| 步骤 | 修复的发现（本报告位置） | 提交 | 验证方式（测试 / 证伪结论） |
+|---|---|---|---|
+| S8 | §19-6 测试隔离缺陷（import `config`/`app` 会写真实 `instance/`） | `4e49cf2` | 新增 5 例（隔离断言 / 默认分支 / 覆盖分支 / 覆盖值指向文件必须 import 即失败 / conftest 顺序守卫）；**行为级证伪**：回退 4 个生产文件后 3 例失败，外加"临时移走真实密钥后跑全量 → 真实 `instance/` 零写入"的 A/B 实验 |
+| S9 | §3 Top10-6 重复提交 / 重下毁旧文件、§5-C4、§28 phantom success 的 C4 半 | `2e14c66` | 新增 7 例（含 6 线程 × 8 轮 barrier 并发恰好提交一次）；证伪：回退后 6/7 失败（"删除后重下"两侧都通过，是回归守卫） |
+| S10 | §6-3 SearchCache 幽灵引用（永不自愈）、§8 P-3 | `cb64ff7` | 新增 4 例；**行为级证伪**：回退 `background.py` 后幽灵引用用例实测 `illust_ids=[9202, 9201]` —— 已删 pid 被写回 |
+| S11 | §5-C8 缩略图信号量饥饿、§17-5 | `9c71903` | 新增 3 例；**行为级证伪**：回退后失败在「不得用 `with` 获取信号量（没有等待上限）」 |
+| S12 | §16 核心缺口（后台线程无心跳、死亡不可知） | `df7cd94` | 新增 4 例（另同步 status 字段集断言）；证伪表现为"字段缺失 / 行为未定义" —— 属**新增可观测面**，不是行为修复，证伪强度天然弱 |
+| S13 | §15-2 403 语义分裂、§3 Top10-8 的 403 半、§18-F | `dde7221` | 新增 9 例；**行为级证伪（强）**：回退后**恰好**那 4 个 403 用例失败（旧代码抛 `PixivAuthError`） |
+| S14 | §12-1 `_fill_last_attempt` 只增不删、§3 Top10-9 的压缩半 | `ad7ad4e` | 新增 4 例；证伪：回退后 2 例失败，另 2 例"不得放宽节流"两侧都通过 |
+| S15 | §7-D4 ZIP 整包内存 + TOCTOU 500、§12-2 | `70dded0` | 新增 11 例（此前 `/download_file` 零覆盖）；证伪分两级：回退后 10 例失败但属 **seam 缺失型（证据偏弱）**，补做机制级证伪得 8 例 `assert 0 == 1` |
+| S16 | §13-4 settings.json 非原子写、§18-K；§10-4 部分缓解 | `4c7c783` | 新增 11 例（含此前零覆盖的 `POST /api/settings`）；证伪：7/11 失败，其中 4 例 seam 型（偏弱）、3 例行为型（两个路由用例 `assert 200 == 500` + 配置用例"损坏文件必须留一份副本"） |
+| S17 | §10-3 密钥文件权限与长度校验、§23-11 后半 | `578c0c1` | 新增 9 例（1 例 `skipif win32`）；证伪：8 例失败但 7 例 seam 型（偏弱），补做机制级证伪得 `assert 'abc' != 'abc'`、`assert 0 == 3` |
+| S18 | §19 测试缺口（下载引擎/路由、`/thumb`、`/api/image`、settings 写入面、CSRF 全覆盖）、§20-3；另发现 §33.3 两条 | 见计划文档 §8.1 | 新增 55 例（含新文件 `tests/test_settings_api.py`、29 端点 CSRF 矩阵 + 静态对账）；**行为级证伪**：摘掉一个 `@_csrf_required` → 恰好对应用例失败；§33.3 两条各有失败先行的证据 |
+
+**验证口径**：全量离线收集 **513 例（508 passed / 1 skipped / 4 failed，17.10s）**。4 例失败为**预先存在**（`tests/test_test_setup.py` 的 Windows 沙箱 PowerShell 子进程检查，P0 阶段已用 `git stash` 复现同款），与本阶段无关；1 例 skip 为 S17 的 POSIX 权限断言。P0 结束时的基线为 391 例，各步提交说明声称的新增用例合计 122（P1 的 S8–S17 为 67，S18 为 55），与实测一致。
+
+### 33.1 明确"仍未处理"的发现（避免被误读为已修）
+
+1. **§15-4 列表类请求零限流**（search / discovery / follow_latest）：S13 只修了 403 的**分类**，没有给列表端点补令牌桶。
+2. **§10-4 的"损坏 → 回退默认值 → 登录墙静默失效"**：S16 只降低"被写坏"的概率并保留 `.bak`，回退语义未改；`settings.json` 明文存口令也未处理。
+3. **§11-4 / §12-3 / §14-4**：缺索引与全表扫描、`_db_pids_cache` 30s 尖峰、备份保留策略 —— 均未动。
+4. **§16 的 supervisor / 自动重启**：S12 只让线程死亡变得可观测，没有让它不可能发生。
+5. **§19 的测试缺口**：S18 已补齐三个零覆盖区（下载引擎与下载路由、`/thumb` 与 `/api/image`、settings 写入面）并加了 29 个修改型端点的 CSRF 矩阵；**仍未覆盖**：各端点的业务授权逻辑（矩阵只证明"缺头 403"）、下载引擎多 worker 抢同一 pid、前端 JS、`/api/image` 的 Range/ETag、令牌桶时序、真实旧库上的迁移升级。
+6. **§20-3 `AGENTS.md` 用例数过期**（原文记 270）：已订正（同时补上此前遗漏的 `scripts/check_tls.py`、`instance/thumb_redirect_hosts.json`、`_thumb_redirect_lock` 与新增的 `tests/test_settings_api.py`）。
+
+### 33.2 修复自身的遗留边界（影响"能不能算修好了"）
+
+- **S10**：删除侧 `commit` 仍在锁外 → 极端情况下合并可能等锁超时而丢一次合并（不再产生幽灵引用）。
+- **S12**：`_start_prefetch_thread` 内 `_run` 仍无兜底 try，线程仍可能静默死亡（只是现在看得见）。
+- **S14**：清理只在表超过 1000 条时触发、节流窗口内条目一律保留 → 是"有界"而非"硬顶"。
+- **S15**：临时文件清理依赖 WSGI 关闭 body 的契约（另有 EOF 自清理）；大包改占临时目录空间；`ZIP_MEMORY_THRESHOLD_BYTES` 改动需重启。
+- **S16**：`SIGKILL` 落在写 tmp 与 `os.replace` 之间会残留 `settings.json.tmp`；`settings.json.corrupt.bak` 不自动清理。
+- **S17**：密钥长度不足时会重新生成 → 该部署既有会话与游标失效（有意取舍）；`0600` 的 POSIX 端到端权限**未在本机证实**（Windows 上断言 skip，只验证了"确实请求了 0o600"）。
+
+### 33.3 S18 补测发现并修复的两个缺陷（原审计未命中）
+
+这两条是"补测试"这一步的副产品：原审计（§1–§32）没有命中它们，是本阶段新增用例跑出来的**真实生产缺陷**，修法与证伪如下。两处都是"把初始化/映射摆到正确位置"，未改任何语义分支。
+
+1. **设置页保存预取配置从未生效**（`routes_settings.api_settings_post`）。保存 `prefetch_*` 时把 settings.json 的**长键**（`prefetch_interval` / `prefetch_pages` / `prefetch_max_illusts`）直接写进 `_prefetch_state`，而 `background` 的预取循环读的是**短键**（`interval` / `pages` / `max_illusts`）—— 等于写进三个没人读的键。`AGENTS.md` 里"prefetch_interval 经设置页保存后立即生效"的说明自 Blueprint 拆分重构起就不成立；受影响的是"改了预取间隔却要等到重启"这一交互，**不会**丢数据。修法：改用 `routes_prefetch._PREFETCH_SETTINGS_KEYS` 映射（单一来源）。**证伪**：改回旧逻辑后 `tests/test_settings_api.py::TestSettingsPost::test_prefetch_keys_apply_immediately` 失败于 `assert 0 == 321`。
+2. **排队中取消会让该作品永久无法下载**（`background._download_illust`）。`session_obj = None` 位于"取消标记检查"**之后**，而该检查处有一条提前 `return`；于是 `finally` 首行抛 `UnboundLocalError`，其后所有清理（`_download_progress.pop`、`lock.release()`、`_release_download_lock`、`download_cancellations.discard`、`_queued_downloads.discard`）**全部跳过**：下载锁永远不放、取消标记永远留着，之后每次触发都在 `lock.acquire(blocking=False)` 处**静默**跳过（前端仍显示"已加入下载队列"），进度条目也永久挂在下载管理页。触发姿势很常见 —— 下载队列排队时点"取消"。修法：把两个 session 的初始化提到取消检查之前。**证伪**：把初始化放回原位后 `tests/test_download.py::test_download_cancelled_before_start_does_nothing` 失败于 `UnboundLocalError: cannot access local variable 'session_obj'`；修复后该用例另加"取消过的作品必须能重新下载"的症状级守卫。

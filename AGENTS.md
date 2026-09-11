@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不需要真实 Cookie。完整一轮 270 用例约 15s，见文末「测试」）
+# 默认测试（离线；不需要真实 Cookie。完整一轮 513 用例约 17s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -59,7 +59,7 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `routes_settings.py` | 登录、设置读写、屏蔽标签、自动关注控制 |
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `lightbox.js` + `style.css` + `vendor/bootstrap-5.3.3/` |
-| `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
+| `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`check_tls.py`（只读 TLS 拦截诊断，退出码 0/1/2）、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
 | `migrations/` | `runner.py`（按 `PRAGMA user_version` 版本化执行，**升级前自动备份**）+ `versions.py` |
 | `pixiv-api-http-main/` | 内置第三方 Node.js Pixiv API 参考实现，**仅作接口格式对照，不参与运行** |
 | `docs/` | `architecture.md`（模块地图 + 测试补丁契约，改动前必读）、`maintenance.md`（运维手册）、`superpowers/{plans,specs}/`（近期变更设计文档） |
@@ -173,11 +173,12 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **SSL 校验默认开启**（`SSL_VERIFY = True`）。仅当代理**确实在做 TLS 拦截**（自签根证书解密流量）时才设 `SSL_VERIFY=false`；先跑只读诊断 `python scripts/check_tls.py` 判定（退出码 0 可安全开启校验 / 1 疑似拦截或缺 CA / 2 无法判定），处置见 `docs/maintenance.md`「9. TLS 校验与代理」。
 - **图片地址硬校验 + 凭据分级**（`helpers.check_image_url` + `config.IMAGE_HOST_ALLOWLIST`）：下载与 `/thumb` 重定向共用同一判定 —— 非 https / 内网与云元数据地址 / 带 userinfo / 非 443 端口一律拒绝且**不发起请求**；白名单（`i.pximg.net`）内用带凭据会话，白名单外的公网 https 改用 `fetcher.build_credentialless_session()`（无 Cookie 头、空 cookie jar）继续取图。根因是 `build_pixiv_session()` 的 Cookie 挂在**会话级** header 上，requests 会把它发给任意主机。
 - 下载引擎在 `background.py`：`_download_illust` 用 `download_locks` 去重、支持取消、按 `PAGE_DOWNLOAD_INTERVAL` 在页间间隔；**无 `original_urls` 时不固化为 `done`**，而是置空以便重试。
+- **`_download_illust` 里 `session_obj = None` / `anon_session_obj = None` 必须在"取消标记检查"之前**：那里有一条提前 `return`，而 `finally` 无条件引用这两个变量（关闭连接池）。放后面会让"排队中被取消"的任务在 `finally` 首行抛 `UnboundLocalError`，其后的 `lock.release()` / 取消标记与进度清理**全部跳过** → 该作品的下载锁永远不放、取消标记永远留着，之后每次都静默跳过（用户看到"已加入下载队列"却永远不动）。已有回归用例 `test_download_cancelled_before_start_does_nothing`（含"取消后仍能重新下载"的症状级断言）。
 - 自动关注发现的新作品先 `commit` 再提交下载任务（否则 `_download_illust` 查不到行会静默跳过）。
 
 ### 目录
 
-- **`instance/`**：`.secret_key`、`.cursor_secret`、`pixiv.db`（+ WAL/SHM）、`settings.json`、`image_cache/`、`backups/`（迁移前自动备份）。整个目录在 `.gitignore` 中。
+- **`instance/`**：`.secret_key`、`.cursor_secret`、`pixiv.db`（+ WAL/SHM）、`settings.json`（损坏时另留 `settings.json.corrupt.bak`）、`image_cache/`、`thumb_redirect_hosts.json`（`/thumb` 重定向发现表）、`backups/`（迁移前自动备份）。整个目录在 `.gitignore` 中。
 - **`image_cache/` 有容量上限**：`config.IMAGE_CACHE_MAX_BYTES`（默认 1 GB）。超出后按 mtime 从旧到新淘汰，落到上限的 90%（`IMAGE_CACHE_TARGET_RATIO`）。淘汰只认本缓存写的文件（32 位 md5 名 + 同名 `.meta`），目录里的其他文件一律不动。扫描受 `IMAGE_CACHE_CLEANUP_INTERVAL`（默认 5 分钟）节流，写入缓存时顺便触发；启动时额外强制跑一次。
   注意这是"最旧写入优先"而非严格 LRU：命中缓存**不**刷新 mtime，否则 ETag 会跟着变、让浏览器那 7 天的本地缓存整体失效。
 - **`downloads/`** 和 **`cookies.txt`** 也在 `.gitignore` 中。
@@ -187,7 +188,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向：凭据分级/发现表/观测 API）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。
@@ -210,7 +211,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 生产以 `gunicorn -w 1 --threads 8` 运行，请求由多线程并发处理。共享可变状态必须遵守以下约定（2026-08-29 已按此审计并修复）：
 
-- **容器遍历要加锁**。清理逻辑多为 Python 层推导式（每条之间有字节码边界，可被其他线程抢入），期间被改动会抛 `RuntimeError: dictionary changed size during iteration`。已知并已加锁：`_rate_limit_store`（`_rate_limit_lock`）、`_thumb_failed`（`_thumb_failed_lock`）。
+- **容器遍历要加锁**。清理逻辑多为 Python 层推导式（每条之间有字节码边界，可被其他线程抢入），期间被改动会抛 `RuntimeError: dictionary changed size during iteration`。已知并已加锁：`_rate_limit_store`（`_rate_limit_lock`）、`_thumb_failed`（`_thumb_failed_lock`）、重定向发现表（`routes_gallery._thumb_redirect_lock`）。
 - **"读 → 判定 → 写"必须整体在锁内**。拆成多步时并发请求会各自读到未计入对方的中间状态。限流器是安全控制，这点尤其致命（曾可被并发爆破绕过）。
 - **TTL 缓存先写数据、再写时间戳**。反序会留下"时间戳已刷新、数据仍是旧值"的窗口；`_db_pids_cache` 原先甚至在整条 SQL 查询期间都保持着这个窗口，会让已下载作品被误判成孤儿。
 - **注销资源时只删自己那份**。`download_locks` 的 pop 必须比对锁对象本身，否则会把并发新任务的锁删掉（见 `background._release_download_lock`）。
