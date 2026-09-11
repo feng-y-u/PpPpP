@@ -153,8 +153,16 @@ def thumb_proxy(url_b64: str) -> Response:
     if now - _thumb_failed.get(url, 0.0) < _THUMB_FAIL_COOLDOWN:
         return abort(502)  # 冷却期内直接失败，不重复发起网络请求
 
+    # 等槽位要带上限（审计 S11）：没有上限时，图床变慢会让排在后面的缩略图请求
+    # 无限期挂住，攒到 gunicorn --timeout 300 直接杀 worker、整批一起失败。
+    # 超时就这一张快速失败（前端有占位图），槽位照旧在 finally 里归还。
+    if not _thumb_sem.acquire(timeout=runtime.THUMB_SEM_TIMEOUT):
+        logger.warning(
+            f'/thumb 并发槽位等待超过 {runtime.THUMB_SEM_TIMEOUT}s，放弃本次取图: {url}')
+        return abort(503)
+
     try:
-        with _thumb_sem:
+        try:
             # 用线程内连接池：旧代码每张图都新建 Session 再 close()，等于每张图
             # 重做一次 TCP + TLS 握手（实测 30 张图 = 30 条连接，复用后 = 1 条）。
             resp = _thumb_request(url)
@@ -173,6 +181,8 @@ def thumb_proxy(url_b64: str) -> Response:
                     logger.warning(f'/thumb 重定向目标再次重定向（{status}），拒绝递归跟随')
                     raise _ThumbRedirectRejected('重定向嵌套')
             resp.raise_for_status()
+        finally:
+            _thumb_sem.release()
     except requests.RequestException:
         with _thumb_failed_lock:
             _thumb_failed[url] = now

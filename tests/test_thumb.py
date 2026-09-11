@@ -7,6 +7,8 @@
 import base64
 import json
 import os
+import threading
+import time
 
 import pytest
 import requests
@@ -307,3 +309,122 @@ def test_rejected_counter_counts_each_attempt(thumb_env, client):
         assert client.get(f'/thumb/{_b64(url)}').status_code == 502
 
     assert _rejected('10.0.0.1') == 2
+
+
+# ── 并发槽位纪律（审计 S11）──
+
+class _NoSlotSemaphore:
+    """永不给名额的信号量替身。
+
+    `acquire` 强制要求 timeout：旧实现用 `with _thumb_sem`，在这里会直接抛断言
+    而不是把整个用例挂死（挂死的话失败信息只有"超时"，看不出根因）。`__enter__`
+    同样拒绝 —— 那正是"没有等待上限"的写法。
+    """
+
+    def __init__(self):
+        self.acquire_timeouts: list = []
+
+    def acquire(self, blocking=True, timeout=None):
+        assert timeout is not None, 'acquire 必须带 timeout：无条件阻塞会把整页缩略图挂死'
+        self.acquire_timeouts.append(timeout)
+        return False
+
+    def release(self):
+        raise AssertionError('没拿到名额就不该调用 release')
+
+    def __enter__(self):
+        raise AssertionError('不得用 with 获取信号量（没有等待上限）')
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_thumb_returns_503_when_semaphore_exhausted(thumb_env, client, monkeypatch):
+    """等不到槽位就快速失败：503、不发起取图请求、等待上限取自 runtime 常量。"""
+    thumb_env['registry'].add(THUMB)
+    sem = _NoSlotSemaphore()
+    monkeypatch.setattr(routes_gallery, '_thumb_sem', sem)
+    # raising=False：常量不存在时也要走到"真的发一次请求"再失败（否则证伪跑只会在
+    # 夹具接线处报错，看不出是行为差异）
+    monkeypatch.setattr(runtime, 'THUMB_SEM_TIMEOUT', 0.25, raising=False)
+
+    resp = client.get(f'/thumb/{_b64(THUMB)}')
+
+    assert resp.status_code == 503
+    assert sem.acquire_timeouts == [0.25], '等待上限必须取自 runtime.THUMB_SEM_TIMEOUT'
+    assert thumb_env['registry'].calls == [], '没拿到名额就不该发起取图请求'
+    assert runtime.thumb_redirect_snapshot()['rejected'] == {}, '槽位超时不是重定向拒绝'
+
+
+def test_thumb_releases_semaphore_after_success_and_failure(thumb_env, client, monkeypatch):
+    """成功与失败两条路径都必须归还槽位（否则名额会一张张漏光）。"""
+    sem = threading.Semaphore(1)
+    monkeypatch.setattr(routes_gallery, '_thumb_sem', sem)
+
+    ok_url = f'{THUMB}?release=ok'
+    thumb_env['registry'].add(ok_url)
+    assert client.get(f'/thumb/{_b64(ok_url)}').status_code == 200
+
+    bad_url = f'{THUMB}?release=bad'      # registry 里没有 → 连接错误 → 502
+    assert client.get(f'/thumb/{_b64(bad_url)}').status_code == 502
+
+    assert sem.acquire(blocking=False) is True, '两条路径都该归还槽位'
+    sem.release()
+
+
+def test_thumb_concurrent_requests_never_exceed_semaphore(thumb_env, app, monkeypatch):
+    """并发取图不超过槽位数，且结束后名额全部归还（finally 释放的竞态防线）。"""
+    limit = 2
+    urls = [f'{THUMB}?conc={i}' for i in range(6)]
+    sem = threading.Semaphore(limit)
+    monkeypatch.setattr(routes_gallery, '_thumb_sem', sem)
+    for url in urls:
+        thumb_env['registry'].add(url)
+
+    registry = thumb_env['registry']
+    gate = threading.Lock()
+    state = {'in_flight': 0, 'peak': 0}
+
+    def _instrumented_session(with_cookie: bool = True):
+        session = registry.session(with_cookie)
+        plain_get = session.get
+
+        def _get(url, **kwargs):
+            with gate:
+                state['in_flight'] += 1
+                state['peak'] = max(state['peak'], state['in_flight'])
+            try:
+                time.sleep(0.05)          # 放大窗口：让并发真的叠起来
+                return plain_get(url, **kwargs)
+            finally:
+                with gate:
+                    state['in_flight'] -= 1
+
+        session.get = _get
+        return session
+
+    monkeypatch.setattr(routes_gallery, 'get_pooled_session', _instrumented_session)
+
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def _hit(url: str):
+        try:
+            results.append(app.test_client().get(f'/thumb/{_b64(url)}').status_code)
+        except BaseException as e:      # noqa: BLE001 —— 汇总后统一断言
+            errors.append(e)
+
+    threads = [threading.Thread(target=_hit, args=(url,), daemon=True) for url in urls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+
+    assert not errors, f'并发取图出错：{errors!r}'
+    assert not any(t.is_alive() for t in threads)
+    assert sorted(results) == [200] * len(urls)
+    assert state['peak'] <= limit, f'并发峰值 {state["peak"]} 超过槽位数 {limit}'
+    for _ in range(limit):                # 名额必须全部归还
+        assert sem.acquire(blocking=False) is True, '有槽位没被归还'
+    for _ in range(limit):
+        sem.release()
