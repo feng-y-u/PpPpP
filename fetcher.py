@@ -47,6 +47,20 @@ def _is_auth_error(msg: str) -> bool:
     return False
 
 
+def _warn_403(api: str) -> None:
+    """记一条 403 的分类告警（审计 S13）。
+
+    Pixiv 对**并发/频率过高**也回 403（本模块顶部注释：详情并发 3 实测即触发），
+    所以 403 不能当作"Cookie 失效"上报：
+      - 预取路径收到 `PixivAuthError` 会中止整轮（含容量清理），而换个节奏重试
+        其实就能成功；
+      - 前端会提示用户重新登录，而重登修不好限流。
+    这里按既有失败形态返回空结果（列表 `([], False)`、profile `[]`），并留下这条
+    可检索的告警 —— 同一个 403 是"限流"还是"真被风控"只能靠频率与时机判断。
+    """
+    logger.warning(f'{api} API 返回 HTTP 403，疑似限流/风控（非认证失效），按失败返回空结果')
+
+
 def encode_cursor(data: dict) -> str:
     payload = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
     b64 = urlsafe_b64encode(payload.encode()).decode().rstrip('=')
@@ -1112,8 +1126,10 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
     except requests.RequestException as e:
         logger.error(f'Search API failed: {e}')
         status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status in (401, 403):
+        if status == 401:
             raise PixivAuthError(f'Pixiv API returned HTTP {status}')
+        if status == 403:
+            _warn_403('Search')
         return [], False
 
     if search_data.get('error'):
@@ -1180,8 +1196,10 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
     except requests.RequestException as e:
         logger.error(f'Discovery API failed: {e}')
         status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status in (401, 403):
+        if status == 401:
             raise PixivAuthError(f'Pixiv API returned HTTP {status}')
+        if status == 403:
+            _warn_403('Discovery')
         return [], False
 
     if data.get('error'):
@@ -1314,8 +1332,10 @@ def _get_user_profile_ids(session: requests.Session, user_id: str) -> list[int]:
     except requests.RequestException as e:
         logger.error(f'User profile API failed: {e}')
         status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status in (401, 403):
+        if status == 401:
             raise PixivAuthError(f'Pixiv API returned HTTP {status}')
+        if status == 403:
+            _warn_403('User profile')
         return []
 
     if profile_data.get('error'):
@@ -1354,8 +1374,10 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
     except requests.RequestException as e:
         logger.error(f'Follow latest API failed: {e}')
         status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status in (401, 403):
+        if status == 401:
             raise PixivAuthError(f'Pixiv API returned HTTP {status}')
+        if status == 403:
+            _warn_403('Follow latest')
         return [], False
 
     if data.get('error'):

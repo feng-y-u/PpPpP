@@ -3,6 +3,7 @@ from unittest.mock import patch
 import os
 import time
 import json
+import logging
 import threading
 from datetime import datetime, timezone, timedelta
 
@@ -367,6 +368,105 @@ class TestUserProfileCache:
             assert mock_session.get.call_count == 1
         finally:
             fetcher._USER_PROFILE_CACHE.clear()
+
+
+class TestHttpErrorClassification:
+    """401 = 认证失效，403 = 限流/风控（审计 S13）。
+
+    403 被当成认证失效会把"换个节奏重试就能成功"的限流误报成 Cookie 失效：预取
+    整轮中止（连容量清理一起跳过）、前端提示重新登录，而重登修不好限流。
+    """
+
+    @staticmethod
+    def _failing_session(status: int):
+        class _Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                resp = requests.Response()
+                resp.status_code = status
+                raise requests.HTTPError(f'HTTP {status}', response=resp)
+
+        return _Session()
+
+    def _patched(self, monkeypatch, status: int):
+        session = self._failing_session(status)
+        monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
+        # 旁路令牌桶：只测分类语义，不受全局限速器残留状态影响
+        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        return session
+
+    # ── search_by_tag ──
+
+    def test_search_tag_401_raises_auth_error(self, monkeypatch):
+        """401 才是认证失效：必须上报 PixivAuthError，让用户去更新 Cookie。"""
+        session = self._patched(monkeypatch, 401)
+        with pytest.raises(fetcher.PixivAuthError):
+            fetcher.search_by_tag('s13-401')
+        assert session.calls == 1
+
+    def test_search_tag_403_returns_empty_not_auth_error(self, monkeypatch, caplog):
+        """403 按失败形态返回空结果，并且留下可检索的告警。"""
+        session = self._patched(monkeypatch, 403)
+        with caplog.at_level(logging.WARNING, logger='fetcher'):
+            result = fetcher.search_by_tag('s13-403')
+
+        assert result == ([], False)
+        assert session.calls == 1, '不重试（重试策略未改）'
+        assert '403' in caplog.text and '限流' in caplog.text
+
+    # ── browse_discovery ──
+
+    def test_browse_discovery_403_returns_empty(self, monkeypatch):
+        session = self._patched(monkeypatch, 403)
+        assert fetcher.browse_discovery(page=91) == ([], False)
+        assert session.calls == 1
+
+    def test_browse_discovery_401_raises_auth_error(self, monkeypatch):
+        self._patched(monkeypatch, 401)
+        with pytest.raises(fetcher.PixivAuthError):
+            fetcher.browse_discovery(page=92)
+
+    # ── _get_user_profile_ids ──
+
+    def test_user_profile_403_returns_empty(self, monkeypatch):
+        session = self._failing_session(403)
+        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        assert fetcher._get_user_profile_ids(session, 's13-user-403') == []
+        assert session.calls == 1
+
+    def test_user_profile_401_raises_auth_error(self, monkeypatch):
+        session = self._failing_session(401)
+        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        with pytest.raises(fetcher.PixivAuthError):
+            fetcher._get_user_profile_ids(session, 's13-user-401')
+
+    # ── fetch_following ──
+
+    def test_fetch_following_403_returns_empty(self, monkeypatch):
+        session = self._patched(monkeypatch, 403)
+        assert fetcher.fetch_following(page=93) == ([], False)
+        assert session.calls == 1
+
+    def test_fetch_following_401_raises_auth_error(self, monkeypatch):
+        self._patched(monkeypatch, 401)
+        with pytest.raises(fetcher.PixivAuthError):
+            fetcher.fetch_following(page=94)
+
+    # ── 详情路径的 403 语义不变（退避重试，仍不上报认证失效）──
+
+    def test_detail_403_still_retries_and_never_auth_error(self, monkeypatch):
+        """回归：详情 API 的 403 = 限流，走退避重试（S13 不动这条语义）。"""
+        session = self._failing_session(403)
+        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        with patch('fetcher.time.sleep'):
+            result = fetcher._get_illust_detail(
+                session, 123, limiter=fetcher._TokenBucket(6000))
+
+        assert result is None
+        assert session.calls == fetcher.DETAIL_MAX_RETRIES + 1
 
 
 class TestBookmarkStaleness:
