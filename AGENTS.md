@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 530 用例约 20s，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 536 用例约 20s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -119,7 +119,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **启动即重置**：`_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件；`_reset_stuck_prefetch()` 把 `SearchCache.status='fetching'` 改回 `done`（否则预取抢占逻辑会让该标签被永久跳过）。
 - **限流是每 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，用于 `POST /login` 与 `/api/settings/unlock`。
 - 关键 TTL：`SEARCH_TASK_TTL=600s`、`_SCAN_CACHE_TTL=30s`、`_DB_PIDS_CACHE_TTL=30s`、`_THUMB_FAIL_COOLDOWN=30s`、缩略图并发上限 `config.THUMB_CONCURRENCY`（默认 12）。
-- **后台线程存活只能"看"，不会自动重启**：`background.get_background_health()` 回答 `prefetch_alive` / `auto_follow_alive`（线程引用的唯一持有者在 `background`），`prefetch_alive` 等字段经 `/api/prefetch/status` 暴露，`auto_follow_alive` 另经 `/api/auto-follow/status` 暴露给设置页「自动关注」卡片。三条容易踩的语义：① `auto_follow_alive` **不等于**"在干活" —— 线程活着但每轮都失败（Cookie 失效）时仍是 `True`；② `auto_follow_interval=0`（禁用）时线程照样活着，字段仍为 `True`；③ `_auto_follow_state['last_check']` / `last_count` 只在**成功拉到关注列表并处理完一轮**时更新（拉不到任何作品的那轮直接 `continue`），所以"陈旧"既可能是没有新作品、也可能是每轮都在失败，界面文案不能写成"上次轮询时间"。`alive` 是**派生值**，不要写进 `_auto_follow_state`（该 dict 由自动关注线程与 `/api/auto-follow/config` 共用）。
+- **后台线程存活只能"看"，不会自动重启**：`background.get_background_health()` 回答 `prefetch_alive` / `auto_follow_alive`（线程引用的唯一持有者在 `background`），`prefetch_alive` 等字段经 `/api/prefetch/status` 暴露，`auto_follow_alive` 另经 `/api/auto-follow/status` 暴露给设置页「自动关注」卡片。三条容易踩的语义：① `auto_follow_alive` **不等于**"在干活" —— 线程活着但每轮都失败（Cookie 失效）时仍是 `True`；② `auto_follow_interval=0`（禁用）时线程照样活着，字段仍为 `True`，且禁用期间**不碰** `last_error`（没尝试就没学到新东西）；③ `_auto_follow_state['last_check']` / `last_count` 只在**成功拉到关注列表并处理完一轮**时更新（拉不到任何作品的那轮直接 `continue`），所以"陈旧"既可能是没有新作品、也可能是每轮都在失败，界面文案不能写成"上次轮询时间"。把③那两种"陈旧"分开的就是 `_auto_follow_state['last_error']`（审计 S20 遗留，与预取那套同名同义）：**只在成功跑完一轮时清空**，所以非空 = 最近一轮就失败了；而"拉不到任何作品"**不写也不清**这个字段 —— Cookie 失效时 Pixiv 静默返回空结果，写进去就是假告警、清掉会抹掉真证据。`alive` 是**派生值**，不要写进 `_auto_follow_state`（该 dict 由自动关注线程与 `/api/auto-follow/config` 共用）；`last_error` 相反，它是 worker 写的运行态字段，必须待在 `runtime._auto_follow_state` 的初始字面量里（键集合固定才可无锁读）。
 
 ### 配置与重启
 
@@ -189,7 +189,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。

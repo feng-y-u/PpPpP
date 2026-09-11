@@ -702,6 +702,7 @@ graph LR
 #### /api/blocked-tags — GET 列表 / POST 新增（409 重名，新增后 `clear_search_cache()`）/ DELETE `<path:tag>`（404）。源码：`routes_settings.py:79-111`。
 
 #### /api/auto-follow/status + POST /api/auto-follow/config — 读写 `_auto_follow_state`（interval/auto_download）。源码：`routes_settings.py:58-74`。
+GET 返回 `_auto_follow_state` 的**副本** + 派生字段 `alive`（取自 `background.get_background_health()`）。状态语义（设置页文案依赖，勿简化）：`last_check` / `last_count` 只在**成功拉到关注列表并处理完一轮**时更新；`last_error`（审计 S22）**只在成功跑完一轮时清空**，所以非空 = 最近一轮就失败了 —— 它存在的意义就是把"没有新作品"与"每轮都在失败"分开。**"拉不到任何作品"既不写也不清 `last_error`**：Cookie 失效时 Pixiv 静默返回空结果，写进去是假告警、清掉会抹掉真证据。`alive=True` 也不代表在干活（禁用 interval=0 时线程照样活着）。
 
 ### 13.8 鉴权与错误码总表
 
@@ -1341,6 +1342,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | --- | --- | --- | --- | --- |
 | 统一 Cookie 写盘路径 | 功能不一致（§20.2） | **已完成（2026-09-11）**：`routes_settings` 写 `app.COOKIE_PATH`（= `config.COOKIE_PATH`） | Linux 重启后设置页 Cookie 生效 | 低 |
 | Cookie 写盘原子化（S21） | 并发读侧可能读到空串并把空值缓存住 | **已完成（2026-09-11）**：`helpers._atomic_write_text`（tmp + `os.replace`，权限位保留，`PermissionError` 有界重试） | 保存 Cookie 后不再需要重启才能恢复 | 低（但要求文件所在目录可写） |
+| 自动关注暴露 `last_error`（S22） | "没有新作品"与"每轮都在失败"在界面上分不开（S20 遗留） | **已完成（2026-09-11）**：`_auto_follow_state['last_error']`（成功收尾才清空）+ 设置页状态行显示并标红 | 自动关注的静默失败能在界面上看到，不必翻日志 | 低 |
 | 补齐下载/图片/设置写盘测试 | 回归风险最高的盲区（§19.4） | **已完成（2026-09-11，S18）**：新增 55 例（含 29 个修改型端点的 CSRF 矩阵） | 核心路径可回归 | 中 |
 | 流式 ZIP 导出 | 内存峰值（§21.3） | `zipfile` 写临时文件后用 `send_file` 或流式响应 | 大合集不占内存 | 低 |
 | 补回写 3 份 spec「已实现」 | 文档纪律（§28.10） | git 提交 docs 标记 + 验证结果 | 状态一致 | 低 |

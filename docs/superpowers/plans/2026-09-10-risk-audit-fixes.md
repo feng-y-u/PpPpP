@@ -498,6 +498,30 @@
 
 ---
 
+### S22（P1）给自动关注补 `last_error`（S20 的遗留）
+
+**来源**：S20（`deba036`）自己写下的遗留项 —— 它把"线程死没死"接上了界面，但 worker 的 `except Exception` 只写一行日志、不落 state，于是 `last_check` 陈旧的两层含义（"没有新作品" vs "每轮都在失败"）在界面上依然分不开。
+
+**调用链**：`background._auto_follow_worker`（`try` 覆盖整轮 → `except Exception` 只记日志）→ `runtime._auto_follow_state`（键集合固定的进程级 dict）→ `routes_settings.auto_follow_status`（返回 `dict(_auto_follow_state)` + 派生 `alive`）→ `static/page-settings.js::loadAutoFollowStatus`。
+
+**实现**（照 S12 给预取做的那套，同名同义）：
+- `runtime._auto_follow_state` 增补 `'last_error': None`，写在**初始字面量**里。该 dict 的并发约定是"键集合固定、只改值"（`jsonify` 遍历时不能变 size），懒加键会让接口在并发下崩 —— 有用例盯住。
+- `_auto_follow_worker`：`except` 里写 `f'自动关注异常: {e}'`；**成功收尾**处（与 `last_check` / `last_count` 同一处）清空。禁用（`interval <= 0`）期间不碰它：没尝试就没学到新东西，清掉会让"禁用"看起来像"修好了"。
+- 路由与 `alive` 的语义区分：`last_error` 属于运行态（worker 写，随 `dict(...)` 回传），`alive` 是派生值（只在这里拼）。`/api/auto-follow/status` 无需改动，字段自动出现。
+- `static/page-settings.js`：状态行追加"最近一轮出错：…"，并让它与"线程已停止"一样标红（线程活着但每轮都失败，才是这个字段要暴露的情况）。
+
+**两条刻意不做的**：① 拉不到任何作品**不**写 `last_error` —— Cookie 失效时 Pixiv 静默返回空结果，"空列表"分不清"没关注/没新作品"和"认证失效"，写进去就是假告警；② 那种轮次也**不**清旧错误 —— 会抹掉真证据。因此那里残留的含糊不改由代码假装已知。
+
+**测试**：新增 `tests/test_auto_follow.py`（4 例，此前该 worker **零覆盖**）—— 干净收尾清空 + 更新 `last_check`；出错留痕 + `last_check` 语义不变 + **下一轮恢复后清空**（证明线程没被异常打死）；空关注列表既不报错也不清旧错误；竞态（线程在两态间切换时反复读接口，**响应键集合必须恒定**）。另在 `tests/test_settings_api.py::TestAutoFollowStatus` 加 2 例：路由暴露 `last_error`（并说明它与 `alive` 的归属差异）、前端静态接线真的渲染它。
+
+**证伪**：① 实现前先跑 → 干净收尾与出错留痕两条用例失败（当时既无写入也无清空）；② 把清空挪到"每轮开头"（看似等价）→ 空列表用例失败，证明清空时机承重；③ 去掉 `except` 里的留痕 → 出错留痕用例失败。修完全量 **536 例 = 530 passed / 2 skipped / 4 failed**（4 例为预先存在的 Windows 沙箱子进程检查）。
+
+**遗留边界**：`last_error` 只记**最近一轮**，会被下一次成功覆盖（这是刻意的，与预取一致：非空即"最近一轮有问题"），不保留历史/不落盘（重启即清）；仍**没有** supervisor / 自动重启；仍未做"陈旧超过 X 小时就标红"的阈值告警。
+
+**⚠️ 本步顺带发现的既有缺陷（未修，已记入审计报告 §33.5）**：补测试时按真实数据形状构造用例，暴露出 `_auto_follow_worker`"发现新作品 → 入库"这条路径**必然失败** —— `fetch_following` 返回的是 `Illust.to_dict()` 形状（`upload_date` 是 `isoformat()` 字符串），worker 原样塞回 `Illust(upload_date=...)`，`DateTime` 列抛 `TypeError`，被 `except` 吞成日志。该分支只在"该轮有新作品"时走到，所以症状是"一有新作品就静默失败、下轮重试再失败"。属于**另一个问题**，按"一次只处理一个问题"没有塞进 S22；S22 落地后这类失败会直接显示在设置页上（这正是本项的价值）。
+
+---
+
 ## 五、明确"不应该修改"（本阶段一律不动）
 
 1. **架构与进程模型**：`-w 1` 语义、SQLite WAL、进程内状态设计、Blueprint 划分、`start_background_threads()` 幂等守卫、`atexit` 注册顺序、`gunicorn` 命令与 systemd unit。
