@@ -73,6 +73,11 @@ def auto_follow_status() -> Response:
     任何作品的那一轮直接 continue），所以它陈旧既可能是"关注列表里没有新作品"、
     也可能是"每一轮都在失败"；`last_count` 是那一轮新增入库的作品数（可以是 0）。
     界面文案必须照此措辞，不能写成"上次轮询时间"。
+
+    这正是 `last_error` 存在的理由（审计 S20 遗留，与预取那套同名同义）：它只在
+    成功跑完一轮时清空，所以**非空 = 最近一轮就失败了** —— 把上面那两种"陈旧"
+    分开。注意"拉不到任何作品"不写这个字段（Cookie 失效时 Pixiv 静默返回空结果，
+    写进去就是假告警），那种轮次也不清它（会抹掉真正的证据）。
     """
     data = dict(_auto_follow_state)
     data['alive'] = get_background_health()['auto_follow_alive']

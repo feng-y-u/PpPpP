@@ -79,6 +79,8 @@ def _auto_follow_worker() -> None:
     while not _auto_follow_stop.is_set():
         interval = _auto_follow_state['interval']
         if interval <= 0:
+            # 禁用期间不碰 last_error：没尝试就没学到新东西，清掉会让"禁用"看起来
+            # 像"修好了"，留着则如实反映"最后一次尝试失败了"（界面上会同时显示已禁用）。
             _auto_follow_stop.wait(30)
             continue
         try:
@@ -140,9 +142,17 @@ def _auto_follow_worker() -> None:
             new_count = len(new_illusts)
             _auto_follow_state['last_check'] = datetime.now(timezone.utc).isoformat()
             _auto_follow_state['last_count'] = new_count
+            # 干净收尾才清错误（审计 S20 遗留）：非空即"最近一轮有问题"。
+            # 拉不到作品的那轮在第 97 行就 continue 了，不会走到这里 —— 那是刻意的：
+            # Cookie 失效时 Pixiv 也返回空列表，无法与"本来没有新作品"区分，
+            # 清掉旧错误会把真的证据抹掉。
+            _auto_follow_state['last_error'] = None
             if new_count:
                 logger.info(f'自动关注：发现 {new_count} 件新作品')
         except Exception as e:
+            # 出错留痕（审计 S20 遗留）：只写日志的话，界面上只剩"last_check 很旧"
+            # 这种含糊信号，分不清"没有新作品"和"每轮都失败"。
+            _auto_follow_state['last_error'] = f'自动关注异常: {e}'
             logger.error(f'自动关注出错：{e}')
         _auto_follow_stop.wait(interval)
 

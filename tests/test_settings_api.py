@@ -529,3 +529,34 @@ class TestAutoFollowStatus:
         assert "'/api/auto-follow/status'" in js, '脚本要请求本路由'
         assert '\nloadAutoFollowStatus();' in js, '页面加载时必须真的调用（顶层调用点）'
         assert js.count('loadAutoFollowStatus(') >= 3, '定义 + 页面加载 + 保存后刷新'
+
+    def test_reports_last_error_of_the_most_recent_round(self, client, monkeypatch):
+        """`last_error` 要经本路由暴露（审计 S20 遗留）。
+
+        它是 worker 写的运行态字段（与 `alive` 相反：`alive` 是派生值、只在这里拼），
+        所以直接随 `dict(_auto_follow_state)` 回传。语义：非空 = **最近一轮**失败
+        （成功跑完一轮会清空）—— 这正是把"没有新作品"和"每轮都失败"分开的那个字段。
+        worker 侧的写入/清空时机由 `tests/test_auto_follow.py` 盯住。
+        """
+        import background
+        import runtime
+
+        monkeypatch.setattr(background, '_auto_follow_thread', _AliveThread())
+        monkeypatch.setitem(runtime._auto_follow_state, 'last_error', '自动关注异常: 模拟网络挂了')
+
+        data = client.get('/api/auto-follow/status').get_json()
+
+        assert data['last_error'] == '自动关注异常: 模拟网络挂了'
+        assert data['alive'] is True, '线程活着与最近一轮失败可以同时成立 —— 界面不能只看 alive'
+        assert 'last_error' in runtime._auto_follow_state, '它属于运行态（worker 写），不是派生值'
+
+    def test_settings_page_shows_the_last_round_error(self):
+        """前端接线静态核对：`last_error` 必须真的被渲染出来（否则等于没补这个字段）。"""
+        root = os.path.dirname(os.path.abspath(app.__file__))
+        with open(os.path.join(root, 'static', 'page-settings.js'), encoding='utf-8') as f:
+            js = f.read()
+
+        assert 's.last_error' in js, '脚本要消费这个字段'
+        assert '最近一轮出错' in js, '要有一句人能读懂的文案'
+        assert "el.classList.toggle('text-danger', !s.alive || !!s.last_error)" in js, \
+            '线程活着但每轮都失败也要标红 —— 这正是这个字段存在的意义'

@@ -138,8 +138,10 @@ async function loadPrefetchStatus() {
   } catch { el.textContent = '—'; }
 }
 
-// 自动关注的运行态：线程还在不在（alive）+ 运行中的间隔 + 上次成功检查。
-// “上次检查”只在成功拉到关注列表并处理完一轮时更新，所以文案不写成“上次轮询时间”。
+// 自动关注的运行态：线程还在不在（alive）+ 运行中的间隔 + 上次成功检查 + 最近一轮是否出错。
+// “上次检查”只在成功拉到关注列表并处理完一轮时更新，所以文案不写成“上次轮询时间”；
+// “最近一轮出错”非空就代表最后一轮失败了（成功收尾会清空），用来把“没有新作品”和
+// “每轮都在失败”分开 —— 这两种情况在界面上原本都只表现为“上次成功检查很旧”。
 async function loadAutoFollowStatus() {
   const el = $('#autoFollowStatus');
   if (!el) return;
@@ -148,17 +150,26 @@ async function loadAutoFollowStatus() {
     const s = await r.json();
     const parts = [s.alive ? '后台检查运行中' : '后台检查已停止（线程不在）'];
     parts.push(s.interval > 0 ? `间隔 ${s.interval}s` : '已禁用（间隔 0）');
+    let title;
     if (s.last_check) {
       parts.push(`上次成功检查 ${new Date(s.last_check).toLocaleString('zh-CN')}（新作品 ${s.last_count ?? 0} 件）`);
-      el.title = '“上次成功检查”在拉到关注列表并处理完一轮后更新，没有新作品的一轮也会更新（显示 0 件）。'
-               + '间隔改动需重启服务才生效。';
+      title = '“上次成功检查”在拉到关注列表并处理完一轮后更新，没有新作品的一轮也会更新（显示 0 件）。'
+            + '间隔改动需重启服务才生效。';
     } else {
       parts.push('尚无成功检查记录');
-      el.title = '还没有成功拉到关注列表：未关注任何画师、Cookie 失效或网络失败都会停在这里。'
-               + '间隔改动需重启服务才生效。';
+      title = '还没有成功拉到关注列表：未关注任何画师、Cookie 失效或网络失败都会停在这里。'
+            + '间隔改动需重启服务才生效。';
     }
-    if (!s.alive) el.title = '自动关注的后台线程已不在（不会自动重启），需要重启服务恢复。';
-    el.classList.toggle('text-danger', !s.alive);
+    if (s.last_error) {
+      parts.push(`最近一轮出错：${s.last_error}`);
+      title = '最后一轮自动关注失败了（成功跑完一轮后会清掉这条）。'
+            + '“拉不到任何作品”不算错误：Cookie 失效时 Pixiv 也静默返回空结果，'
+            + '所以那种情况只会表现为“上次成功检查”不再更新。' + (title ? ` ${title}` : '');
+    }
+    if (!s.alive) title = '自动关注的后台线程已不在（不会自动重启），需要重启服务恢复。';
+    el.title = title ?? '';
+    // 出错也标红：线程活着但每轮都失败，正是这个字段要暴露的情况
+    el.classList.toggle('text-danger', !s.alive || !!s.last_error);
     el.textContent = parts.join(' · ');
   } catch { el.textContent = '—'; }
 }

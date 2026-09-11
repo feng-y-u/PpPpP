@@ -144,6 +144,14 @@ _auto_follow_state = {
     'last_count': 0,
     'interval': AUTO_FOLLOW_INTERVAL,
     'auto_download': AUTO_FOLLOW_DOWNLOAD,
+    # 最近一轮的出错信息（审计 S20 遗留）：只在**成功处理完一轮**时清空，所以非空
+    # 即代表"最近一轮就失败了"，而不是"历史上某轮出过问题"。补这个字段的原因与预取
+    # 那套（_prefetch_state['last_error']）相同：last_check 陈旧既可能是"本来没有新
+    # 作品"、也可能是"每轮都在失败"，光看时间戳分不开。注意"拉不到任何作品"**不算**
+    # 出错（Cookie 失效时 Pixiv 也静默返回空结果，写进去就是假告警），所以那种轮次
+    # 既不改这个字段、也不清它。
+    # 这是"键集合固定、只改值"的 dict（见并发约定），新字段必须写在这个字面量里。
+    'last_error': None,
 }
 _auto_follow_stop = threading.Event()
 
