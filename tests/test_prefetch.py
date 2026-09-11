@@ -9,7 +9,7 @@ import app
 import background
 import config
 import fetcher
-from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
+from models import SearchCache, Illust, Collection, CollectionItem, get_session, safe_commit
 
 
 class TestPrefetchOneTag:
@@ -1128,3 +1128,165 @@ class TestPrefetchRoundResilience:
         assert '失败状态回写失败' in caplog.text
         row = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
         assert row.status == 'fetching', '回写失败的残留状态如实保留（由日志暴露）'
+
+
+# ── SearchCache.illust_ids 并发一致性（审计 S10）──
+
+
+class _SpyLock:
+    """记下 `with` 进入次数与"当前持有者是哪个线程"的锁（代理真锁，不改互斥语义）。
+
+    记 owner 而不是用 `Lock.locked()`：后者是所有线程共享的视图，别的线程持锁时
+    也会是 True，断言分不清是谁在锁里。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.entries = 0
+        self.owner: int | None = None
+
+    def __enter__(self):
+        self._lock.acquire()
+        self.entries += 1
+        self.owner = threading.get_ident()
+        return self
+
+    def __exit__(self, *exc):
+        self.owner = None
+        self._lock.release()
+        return False
+
+
+def _search_cache_dirty(db, marker: int) -> bool:
+    """本次会话里是否有一行 SearchCache 被改成了含 marker 的 illust_ids。"""
+    return any(isinstance(obj, SearchCache) and str(marker) in (obj.illust_ids or '')
+               for obj in db.dirty)
+
+
+def test_search_cache_merge_and_remove_serialized(clean_db, monkeypatch):
+    """并发删除引用不得被预取合并的过期快照写回（幽灵引用）。
+
+    编排：把合并的 commit 卡在"已经读到旧 illust_ids、还没提交"的那一刻，另一
+    线程在这段窗口里删掉引用并提交。
+    - 有 `_search_cache_guard`：删除侧要等合并的读改写（含提交）走完，最终状态
+      里不含已删 pid；
+    - 没有锁：合并会把自己那份过期快照写回去，pid 复活（这就是 S10 的丢更新）。
+    """
+    tag, victim, fresh = 'conc', 9201, 9202
+    clean_db.add(SearchCache(tag=tag, illust_ids=json.dumps([victim]), status='done'))
+    clean_db.add(Illust(pixiv_id=victim, title='victim'))
+    safe_commit(clean_db)
+
+    merge_at_commit = threading.Event()
+    removal_done = threading.Event()
+    real_commit = background.safe_commit
+
+    def _slow_merge_commit(db, *args, **kwargs):
+        if _search_cache_dirty(db, fresh) and not merge_at_commit.is_set():
+            merge_at_commit.set()
+            removal_done.wait(0.5)     # 让出窗口：删除侧若没锁就会插进来
+        return real_commit(db, *args, **kwargs)
+
+    monkeypatch.setattr(background, 'safe_commit', _slow_merge_commit)
+
+    pages = []
+
+    def _fake_search(t, **kwargs):
+        pages.append(t)
+        if len(pages) == 1:
+            return [{'pixiv_id': fresh}], False
+        return [], False
+
+    monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+
+    errors: list[BaseException] = []
+
+    def _merge():
+        try:
+            background._prefetch_one_tag(tag)
+        except BaseException as e:      # noqa: BLE001 —— 汇总后统一断言
+            errors.append(e)
+
+    merger = threading.Thread(target=_merge, daemon=True)
+    try:
+        merger.start()
+        assert merge_at_commit.wait(5), '合并没有走到"读到旧值、尚未提交"那一刻'
+
+        with get_session() as db:
+            background._remove_pids_from_search_caches(db, [victim])
+            safe_commit(db)
+        removal_done.set()
+    finally:
+        # 断言失败也必须把线程收回来：它还持着 _search_cache_guard，泄漏出去会污染
+        # 后续用例（这正是本用例第一次写成时踩到的坑）
+        merger.join(10)
+
+    assert not errors, f'合并线程出错：{errors!r}'
+    assert not merger.is_alive()
+    with get_session() as db:
+        ids = json.loads(db.query(SearchCache).filter(SearchCache.tag == tag).first().illust_ids)
+    assert victim not in ids, f'已删引用被合并的过期快照写回（幽灵引用）：{ids}'
+    assert fresh in ids, '本次预取抓到的作品必须在缓存里'
+
+
+def test_search_cache_lock_scope_excludes_network(clean_db, monkeypatch):
+    """锁只罩 illust_ids 的读改写与提交，不罩搜索等网络阶段。"""
+    clean_db.add(Illust(pixiv_id=9301, title='x'))
+    safe_commit(clean_db)
+
+    guard = _SpyLock()
+    monkeypatch.setattr(background, '_search_cache_guard', guard)
+
+    held_during_search: list[bool] = []
+
+    def _fake_search(tag, **kwargs):
+        held_during_search.append(guard.owner == threading.get_ident())
+        if len(held_during_search) == 1:
+            return [{'pixiv_id': 9301}], False
+        return [], False
+
+    monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+
+    held_at_merge_commit: list[bool] = []
+    real_commit = background.safe_commit
+
+    def _spy_commit(db, *args, **kwargs):
+        if _search_cache_dirty(db, 9301):
+            held_at_merge_commit.append(guard.owner == threading.get_ident())
+        return real_commit(db, *args, **kwargs)
+
+    monkeypatch.setattr(background, 'safe_commit', _spy_commit)
+
+    background._prefetch_one_tag('lock_scope')
+
+    assert held_during_search, '搜索没被调用？'
+    assert not any(held_during_search), '网络阶段持锁会把删除请求一起拖住'
+    assert held_at_merge_commit == [True], '合并的读改写（含提交）必须在锁内'
+    assert guard.entries == 1, '只有合并那一段该进锁'
+
+
+def test_remove_pids_from_search_caches_holds_guard(clean_db, monkeypatch):
+    """删除引用侧也要持同一把锁（否则合并侧的互斥是空的）。"""
+    guard = _SpyLock()
+    monkeypatch.setattr(background, '_search_cache_guard', guard)
+    clean_db.add(SearchCache(tag='g', illust_ids='[1, 2]', status='done'))
+    safe_commit(clean_db)
+
+    with get_session() as db:
+        background._remove_pids_from_search_caches(db, [1])
+        safe_commit(db)
+
+    assert guard.entries == 1, '删除引用必须整体在 _search_cache_guard 内'
+    row = clean_db.query(SearchCache).filter(SearchCache.tag == 'g').first()
+    assert json.loads(row.illust_ids) == [2]
+
+
+def test_remove_pids_empty_list_does_not_touch_guard(clean_db, monkeypatch):
+    """空 pid 列表直接返回：不必要地拿锁会平白和预取合并串行化。"""
+    guard = _SpyLock()
+    monkeypatch.setattr(background, '_search_cache_guard', guard)
+
+    with get_session() as db:
+        background._remove_pids_from_search_caches(db, [])
+
+    assert guard.entries == 0

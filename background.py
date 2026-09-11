@@ -148,6 +148,18 @@ def _auto_follow_worker() -> None:
 
 
 # ── 搜索预取后台任务 ──
+# SearchCache.illust_ids 的并发纪律（2026-09-10 审计 S10）：预取线程的累积合并
+# （读 illust_ids → 合并 → 写回）与删除路径（`_remove_pids_from_search_caches`，
+# 由缓存页删除、refresh-reset、容量清理调用）是对同一列的读改写。两边交错会丢
+# 更新 —— 删除刚把作品移出缓存，合并却用自己那份过期快照把它写回去，缓存页从此
+# 引用一个已被删掉的行（幽灵引用，`total` 计数也跟着虚高）。
+# 约定：**这两处对 illust_ids 的读改写都要整体在 `_search_cache_guard` 内**，
+# 合并侧连同那次 commit 一起罩住（若在锁外提交，"删除先提交、合并后提交"的次序
+# 会让删除结果被合并覆盖）。语义不变：合并仍"只增不减"，事务边界不动。
+# 注意锁只罩 json 读改写与提交，不罩搜索/详情等网络阶段（否则预取会拖住删除请求）。
+_search_cache_guard = threading.Lock()
+
+
 def _prefetch_one_tag(tag: str) -> None:
     """预取单个标签：搜索并缓存作品 ID，将 Illust 标记为预取来源。"""
     import app  # 延迟导入读取 app.search_by_tag：tests monkeypatch('app.search_by_tag')，
@@ -190,19 +202,20 @@ def _prefetch_one_tag(tag: str) -> None:
             if not has_more:
                 break
 
-        with get_session() as db:
-            row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
-            if row:
-                # 累积合并：新结果在前，旧作品去重保留在后（条数只增不减，由容量清理兜底）
-                old_ids = json.loads(row.illust_ids) if row.illust_ids else []
-                seen = set(all_ids)
-                merged = list(all_ids) + [pid for pid in old_ids if pid not in seen]
-                row.illust_ids = json.dumps(merged, ensure_ascii=False)
-                row.cached_at = datetime.now(timezone.utc)
-                row.status = 'done'
-                row.total = len(merged)
-                row.error = ''
-                safe_commit(db)
+        with _search_cache_guard:
+            with get_session() as db:
+                row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+                if row:
+                    # 累积合并：新结果在前，旧作品去重保留在后（条数只增不减，由容量清理兜底）
+                    old_ids = json.loads(row.illust_ids) if row.illust_ids else []
+                    seen = set(all_ids)
+                    merged = list(all_ids) + [pid for pid in old_ids if pid not in seen]
+                    row.illust_ids = json.dumps(merged, ensure_ascii=False)
+                    row.cached_at = datetime.now(timezone.utc)
+                    row.status = 'done'
+                    row.total = len(merged)
+                    row.error = ''
+                    safe_commit(db)
     except Exception as e:
         logger.error(f'[prefetch] 标签 {tag} 预取失败: {e}')
         try:
@@ -233,18 +246,24 @@ def _collect_other_tag_pids(db, exclude_tag: str) -> set[int]:
 
 
 def _remove_pids_from_search_caches(db, pids: list[int]) -> None:
-    """从所有 SearchCache 的 illust_ids 中移除指定作品（不 commit）。"""
+    """从所有 SearchCache 的 illust_ids 中移除指定作品（不 commit）。
+
+    与预取的累积合并共用 `_search_cache_guard`（审计 S10）：两边都是对同一列的
+    "读 → 改 → 写"，交错会丢更新。调用方语义不变 —— 本函数仍不 commit，由调用方
+    在自己的事务里提交。
+    """
     pid_set = set(pids)
     if not pid_set:
         return
-    for sc in db.query(SearchCache).all():
-        try:
-            ids = json.loads(sc.illust_ids) if sc.illust_ids else []
-        except (json.JSONDecodeError, TypeError):
-            continue
-        new_ids = [p for p in ids if p not in pid_set]
-        if len(new_ids) != len(ids):
-            sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
+    with _search_cache_guard:
+        for sc in db.query(SearchCache).all():
+            try:
+                ids = json.loads(sc.illust_ids) if sc.illust_ids else []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            new_ids = [p for p in ids if p not in pid_set]
+            if len(new_ids) != len(ids):
+                sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
 
 
 def _is_user_owned(db, pixiv_id: int) -> bool:
