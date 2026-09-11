@@ -102,6 +102,11 @@ IMAGE_CACHE_CLEANUP_INTERVAL = 300.0
 # 下载设置
 DOWNLOAD_MAX_WORKERS = 2   # 全局下载线程池并发数
 PAGE_DOWNLOAD_INTERVAL = 3 # 多页作品页面间下载间隔（秒）
+# /download_file 打包 zip 的内存阈值（字节）：总大小不超过它就用内存缓冲（快、无临时
+# 文件），超过就改落临时文件流式发送。取 200 MB —— 单张原图通常 1~5 MB，一屏作品
+# （多页作品几十张）极少超过，而超限时那份 zip 会与正在跑的下载/缩略图抢同一进程内存
+# （gunicorn -w 1 单进程常驻），代价远大于一次临时文件写盘。需重启生效。
+ZIP_MEMORY_THRESHOLD_BYTES = 200 * 1024 * 1024
 
 # 搜索设置
 MAX_BOOKMARKS_DEFAULT = 0  # 默认最低收藏数

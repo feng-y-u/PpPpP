@@ -4,8 +4,10 @@
 # /downloads（页面）、/api/downloads 路由 + 私有函数 _cancel_download_internal。
 from __future__ import annotations
 
+import logging
 import os
 import re
+import tempfile
 import zipfile
 from io import BytesIO
 
@@ -13,6 +15,7 @@ from flask import Blueprint, Response, jsonify, render_template, request, send_f
 from sqlalchemy import update
 
 from background import _download_illust
+from config import ZIP_MEMORY_THRESHOLD_BYTES
 from helpers import _fetch_original_urls, _get_download_dir
 from middleware import _csrf_required, _get_csrf_token, _get_json_body
 from models import DownloadLog, Illust, get_session, safe_commit
@@ -20,6 +23,8 @@ from runtime import (_download_progress, _queued_downloads,
                      _download_queue_lock, is_queued_download,
                      queued_download_snapshot,
                      download_cancellations, download_executor)
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint('download', __name__)
 
@@ -224,6 +229,102 @@ def download_status_batch() -> Response:
         return jsonify({'statuses': statuses})
 
 
+def _write_zip_entries(zf: zipfile.ZipFile, paths: list[str], safe_title: str) -> int:
+    """把 paths 逐个写进已打开的 zip，返回**实际写入**的条目数。
+
+    每个文件单独 `except OSError: continue`（审计 S15）：`valid_paths` 是校验时刻的
+    快照，此后文件仍可能被删除或替换（清理脚本、用户删目录、重新下载），打包到一半
+    抛 OSError 会让整个下载 500 —— 少一张图远好过整个包失败。
+    """
+    written = 0
+    for i, p in enumerate(paths):
+        try:
+            zf.write(p, f'{safe_title}_p{i}{os.path.splitext(p)[1]}')
+        except OSError as e:
+            logger.warning(f'打包跳过不可读文件 {p}: {e}')
+            continue
+        written += 1
+    return written
+
+
+def _total_bytes(paths: list[str]) -> int:
+    """可用文件总大小（跳过打包瞬间已消失的文件，与 `_write_zip_entries` 同口径）。"""
+    total = 0
+    for p in paths:
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            continue
+    return total
+
+
+def _remove_temp_zip(path: str) -> None:
+    """删除打包用的临时文件；失败只记日志（响应已经发完，不能再报错）。"""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass  # 已经删过：读完/close 两条清理路径都可能触发，必须幂等
+    except OSError as e:
+        logger.warning(f'临时 zip 清理失败（可手工删除）: {path}: {e}')
+
+
+def _close_body_chain(body) -> None:
+    """关闭 `send_file()` 产出的 body 链上第一个可关闭对象（由此关掉底层文件句柄）。
+
+    `FileWrapper.close()` 会连它持有的文件一起关；但 Range 请求的 body 是
+    `_RangeWrapper`，它自己没有 close（靠 `__getattr__` 委托或包着 `.iterable`）——
+    不往下走一层，底层文件句柄就一直开着，Windows 上 `os.remove` 会因文件被占用而
+    失败（WinError 32），临时文件照样漏。链很短：`_RangeWrapper` → `FileWrapper` → file。
+    """
+    obj = body
+    for _ in range(4):
+        if obj is None:
+            return
+        close = getattr(obj, 'close', None)
+        if close is not None:
+            close()
+            return
+        obj = getattr(obj, 'iterable', None) or getattr(obj, 'file', None)
+
+
+class _DeletingBody:
+    """转发 `send_file()` 的 body，并在读完/关闭时删除临时 zip（审计 S15）。
+
+    为什么清理挂在 body 上，而不是 `after_this_request` / `Response.call_on_close`
+    （实测确认，不是推测）：
+      - `send_file()` 产出的响应是 `direct_passthrough`，Werkzeug 的 `get_app_iter()`
+        在该模式下**直接返回 body（文件包装器）本身**，服务器全程不会调用
+        `Response.close()` —— 挂在响应对象上的 close 回调永远不会执行，大包每下一份
+        就漏一份几百 MB 的临时文件。
+      - `after_this_request` 执行得更早：响应体还没发，文件句柄还开着，Windows 上
+        `os.remove` 必然因占用失败。
+    会被服务器 `close()` 的就是这个 body，所以清理只能挂它。两条路径都覆盖：正常读完
+    （`__next__` 撞 StopIteration 时主动清理）与 `close()`（客户端断开 / HEAD / 416 空
+    body）。转发用迭代而不是 `read()`：`FileWrapper` 与 `_RangeWrapper` 都只保证可迭代。
+    """
+
+    def __init__(self, body, tmp_path: str):
+        self._body = body
+        self._iter = iter(body)
+        self._tmp_path = tmp_path
+
+    def __iter__(self) -> '_DeletingBody':
+        return self
+
+    def __next__(self) -> bytes:
+        try:
+            return next(self._iter)
+        except StopIteration:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        try:
+            _close_body_chain(self._body)
+        finally:
+            _remove_temp_zip(self._tmp_path)
+
+
 @bp.route('/download_file/<int:pixiv_id>')
 def download_file(pixiv_id: int) -> Response:
     with get_session() as db:
@@ -248,19 +349,62 @@ def download_file(pixiv_id: int) -> Response:
                 download_name=f'{safe_title}{os.path.splitext(valid_paths[0])[1]}',
             )
 
-        # 多文件打包 zip（ZIP_STORED 不压缩），使用内存缓冲避免临时文件泄漏
-        buf = BytesIO()
-        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
-            for i, p in enumerate(valid_paths):
-                ext = os.path.splitext(p)[1]
-                zf.write(p, f'{safe_title}_p{i}{ext}')
-        buf.seek(0)
-        return send_file(
-            buf,
-            mimetype='application/zip',
-            as_attachment=True,
-            download_name=f'{safe_title}.zip',
-        )
+        # 多文件打包 zip（ZIP_STORED 不压缩）。两种落地方式（审计 S15）：
+        #   小包 → 内存缓冲：一次系统调用就能发完，且不留临时文件；
+        #   大包 → 临时文件：整包拼在内存里会同时持有 zip 与逐张读入的字节，
+        #          在 `-w 1` 单进程下这份峰值会跟正在跑的下载/缩略图抢内存。
+        if _total_bytes(valid_paths) <= ZIP_MEMORY_THRESHOLD_BYTES:
+            buf = BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
+                written = _write_zip_entries(zf, valid_paths, safe_title)
+            if not written:
+                return jsonify({'error': '文件已丢失，请重新下载'}), 404
+            buf.seek(0)
+            return send_file(
+                buf,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=f'{safe_title}.zip',
+            )
+
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False, suffix='.zip', prefix=f'pixiv_{pixiv_id}_')
+        tmp_path = tmp.name
+        try:
+            with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_STORED) as zf:
+                written = _write_zip_entries(zf, valid_paths, safe_title)
+        except BaseException:
+            tmp.close()
+            _remove_temp_zip(tmp_path)
+            raise
+        tmp.close()
+        if not written:
+            _remove_temp_zip(tmp_path)
+            return jsonify({'error': '文件已丢失，请重新下载'}), 404
+
+        try:
+            resp = send_file(
+                tmp_path,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name=f'{safe_title}.zip',
+            )
+        except BaseException:
+            # send_file 自己也会抛：Range 不可满足时它抛 RequestedRangeNotSatisfiable
+            # （由 Flask 转成 416）。这时 body 根本没建起来，清理挂不上 → 当场删再上抛。
+            _remove_temp_zip(tmp_path)
+            raise
+        if resp.status_code not in (200, 206):
+            # 不发送文件内容的响应（如 ETag 命中返回 304）：body 为空，清理挂不上，
+            # 只能当场删；删之前必须先关掉 send_file 自己打开的文件句柄，否则
+            # Windows 上会因占用失败（WinError 32）。206 必须排除在外 —— 它会发送
+            # 内容，且此刻句柄还开着，这里删会失败并让下载拿不到数据。
+            _close_body_chain(resp.response)
+            _remove_temp_zip(tmp_path)
+            return resp
+        # 清理挂在 body 上，不挂在响应对象上（原因见 _DeletingBody 注释）。
+        resp.response = _DeletingBody(resp.response, tmp_path)
+        return resp
 
 
 # ── 下载管理 ──

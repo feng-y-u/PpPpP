@@ -1,13 +1,17 @@
 import base64
+import io
 import json
+import os
 import threading
 import time
+import zipfile
 from unittest.mock import patch
 
 from sqlalchemy import text
 
 import fetcher
 import models
+import routes_download
 from config import ITEMS_PER_PAGE
 
 
@@ -824,6 +828,223 @@ class TestGalleryDeleteOrphans:
         data = resp.get_json()
         assert data['deleted'] == 2 and data['failed'] == 0
         assert not orphan.exists() and not known.exists()
+
+
+class TestDownloadFileZip:
+    """`/download_file` 打包下载（审计 S15：大包不再拼在内存里）。"""
+
+    @staticmethod
+    def _make_illust(clean_db, tmp_path, pid, sizes):
+        files = []
+        for i, size in enumerate(sizes):
+            f = tmp_path / f'{pid}_p{i}.jpg'
+            f.write_bytes(b'x' * size)
+            files.append(str(f))
+        illust = models.Illust(pixiv_id=pid, title='zip-me', download_status='done')
+        illust.local_paths_list = files
+        clean_db.add(illust)
+        clean_db.commit()
+        return files, illust
+
+    @staticmethod
+    def _spy_tempfile(monkeypatch):
+        """记录真正被创建的临时文件路径（默认阈值 200MB，普通用例不会走到）。"""
+        import tempfile as _tempfile
+        created: list[str] = []
+        real = _tempfile.NamedTemporaryFile
+
+        def _factory(*args, **kwargs):
+            handle = real(*args, **kwargs)
+            created.append(handle.name)
+            return handle
+
+        monkeypatch.setattr(routes_download.tempfile, 'NamedTemporaryFile', _factory)
+        return created
+
+    def test_download_file_zip_memory_below_threshold(self, client, clean_db, tmp_path, monkeypatch):
+        """小包仍然走内存缓冲：行为不变，且不产生任何临时文件。"""
+        created = self._spy_tempfile(monkeypatch)
+        self._make_illust(clean_db, tmp_path, 88001, [100, 200, 300])
+
+        resp = client.get('/download_file/88001')
+
+        assert resp.status_code == 200
+        assert resp.mimetype == 'application/zip'
+        assert 'zip-me.zip' in resp.headers['Content-Disposition']
+        with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+            assert sorted(zf.namelist()) == ['zip-me_p0.jpg', 'zip-me_p1.jpg', 'zip-me_p2.jpg']
+            assert zf.read('zip-me_p1.jpg') == b'x' * 200
+        assert created == [], '阈值内不该落临时文件'
+
+    def test_download_file_zip_tempfile_above_threshold(self, client, clean_db, tmp_path,
+                                                        monkeypatch):
+        """超过阈值改落临时文件：包内容一致，且只有一份临时文件。"""
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88002, [100, 200, 300])
+
+        resp = client.get('/download_file/88002')
+
+        assert resp.status_code == 200
+        assert resp.mimetype == 'application/zip'
+        with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+            assert sorted(zf.namelist()) == ['zip-me_p0.jpg', 'zip-me_p1.jpg', 'zip-me_p2.jpg']
+            assert zf.read('zip-me_p2.jpg') == b'x' * 300
+        assert len(created) == 1, f'应当只建一份临时文件：{created}'
+        resp.close()
+
+    def test_download_file_tempfile_removed_after_request(self, client, clean_db, tmp_path,
+                                                          monkeypatch):
+        """响应结束（body 包装器 close）后临时文件必须消失，不留几百 MB 垃圾。"""
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88003, [100, 200])
+
+        resp = client.get('/download_file/88003')
+        assert resp.status_code == 200
+        assert len(created) == 1
+        resp.close()
+
+        assert not os.path.exists(created[0]), '响应关闭后临时文件应被删除'
+
+    def test_download_file_tempfile_removed_after_full_read(self, client, clean_db, tmp_path,
+                                                            monkeypatch):
+        """正常读完整包（没走 close 路径）也必须删掉临时文件。
+
+        清理挂在 body 包装器上，两条路径都要覆盖：读完 EOF 与 close。
+        """
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88007, [100, 200])
+
+        resp = client.get('/download_file/88007')
+        assert len(created) == 1
+        with zipfile.ZipFile(io.BytesIO(resp.get_data())) as zf:
+            assert len(zf.namelist()) == 2
+
+        assert not os.path.exists(created[0]), '读完整包后临时文件应被删除'
+
+    def test_download_file_head_request_cleans_tempfile(self, client, clean_db, tmp_path,
+                                                        monkeypatch):
+        """HEAD 不发 body（根本不会迭代），清理必须靠 close 路径兜住。"""
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88008, [100, 200])
+
+        resp = client.head('/download_file/88008')
+        assert resp.status_code == 200
+        assert len(created) == 1
+        resp.close()
+
+        assert not os.path.exists(created[0]), 'HEAD 请求也不能漏临时文件'
+
+    def test_download_file_unsatisfiable_range_cleans_tempfile(self, client, clean_db,
+                                                               tmp_path, monkeypatch):
+        """Range 不可满足 → send_file 抛异常（416），仍不能漏临时文件。"""
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88009, [100, 200])
+
+        resp = client.get('/download_file/88009',
+                          headers={'Range': 'bytes=999999999-'})
+
+        assert resp.status_code == 416
+        assert len(created) == 1
+        assert not os.path.exists(created[0]), '416 也得清掉临时文件'
+
+    def test_download_file_partial_range_still_works_and_cleans(self, client, clean_db,
+                                                                tmp_path, monkeypatch):
+        """Range 正常时返回 206，body 走 _RangeWrapper —— 包装器不得破坏它。"""
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88010, [100, 200])
+
+        resp = client.get('/download_file/88010', headers={'Range': 'bytes=0-99'})
+
+        assert resp.status_code == 206
+        assert len(resp.get_data()) == 100
+        assert len(created) == 1
+        resp.close()
+        assert not os.path.exists(created[0])
+
+    def test_download_file_no_content_status_cleans_tempfile(self, client, clean_db, tmp_path,
+                                                             monkeypatch):
+        """非内容响应（304 类）：body 为空、清理挂不上，必须当场删且释放句柄。
+
+        304 在真实路径上很难自然触发（每次请求都重建临时文件，ETag 必然不同），所以
+        这里用替身把 send_file 的返回码改成 304，专门盯住这条兜底分支：既不能漏文件，
+        也不能因为句柄还开着而删不掉。
+        """
+        created = self._spy_tempfile(monkeypatch)
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        self._make_illust(clean_db, tmp_path, 88011, [100, 200])
+
+        real_send_file = routes_download.send_file
+
+        def _not_modified(path, **kwargs):
+            resp = real_send_file(path, **kwargs)
+            resp.status_code = 304
+            return resp
+
+        monkeypatch.setattr(routes_download, 'send_file', _not_modified)
+
+        resp = client.get('/download_file/88011')
+
+        assert resp.status_code == 304
+        assert len(created) == 1
+        assert not os.path.exists(created[0]), '无内容响应也必须清掉临时文件'
+
+    def test_download_file_skips_disappeared_file(self, client, clean_db, tmp_path, monkeypatch):
+        """打包途中某个文件消失（TOCTOU）：跳过它，其余照常打包，不 500。"""
+        files, _ = self._make_illust(clean_db, tmp_path, 88004, [100, 100])
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        created = self._spy_tempfile(monkeypatch)
+
+        real_write = zipfile.ZipFile.write
+
+        def _flaky_write(self, filename, arcname=None, **kwargs):
+            if str(filename) == files[0]:
+                raise FileNotFoundError(f'模拟打包途中文件消失: {filename}')
+            return real_write(self, filename, arcname, **kwargs)
+
+        monkeypatch.setattr(zipfile.ZipFile, 'write', _flaky_write)
+
+        resp = client.get('/download_file/88004')
+
+        assert resp.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+            assert zf.namelist() == ['zip-me_p1.jpg'], '消失的那个应被跳过，其余照常'
+        resp.close()
+
+    def test_download_file_all_files_gone_returns_404(self, client, clean_db, tmp_path,
+                                                      monkeypatch):
+        """全部条目都在打包时消失 → 404「文件已丢失」，且临时文件不残留。"""
+        files, _ = self._make_illust(clean_db, tmp_path, 88005, [100, 100])
+        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+        created = self._spy_tempfile(monkeypatch)
+
+        def _always_fail(self, filename, arcname=None, **kwargs):
+            raise FileNotFoundError(f'模拟打包途中文件消失: {filename}')
+
+        monkeypatch.setattr(zipfile.ZipFile, 'write', _always_fail)
+
+        resp = client.get('/download_file/88005')
+
+        assert resp.status_code == 404
+        assert '文件已丢失' in resp.get_json()['error']
+        assert files, '用例前提：文件确实曾经存在'
+        assert len(created) == 1 and not os.path.exists(created[0]), '失败路径也必须清临时文件'
+
+    def test_download_file_single_file_not_zipped(self, client, clean_db, tmp_path):
+        """单文件仍直接返回原图（不打包）——行为不变。"""
+        files, _ = self._make_illust(clean_db, tmp_path, 88006, [64])
+
+        resp = client.get('/download_file/88006')
+
+        assert resp.status_code == 200
+        assert resp.data == b'x' * 64
+        assert resp.mimetype == 'image/jpeg'
+        assert resp.headers['Content-Disposition'].endswith('zip-me.jpg')
 
 
 class TestDetailApiMediumUrls:
