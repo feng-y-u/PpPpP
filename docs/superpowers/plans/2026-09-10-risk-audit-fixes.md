@@ -344,6 +344,11 @@
 - `test_download_file_zip_memory_below_threshold`、`test_download_file_zip_tempfile_above_threshold`（monkeypatch 阈值变小）。
 - `test_download_file_skips_disappeared_file`、`test_download_file_tempfile_removed_after_request`。
 
+**实现偏差（已实现 + 已验证，2026-09-10，提交 `70dded0`）**：清理临时文件**不能**用本方案写的 `after_this_request`，也不能用 `Response.call_on_close`。实测结论：`send_file()` 产出的响应是 `direct_passthrough`，Werkzeug 的 `get_app_iter()` 在该模式下**直接返回 body（文件包装器）本身**，服务器全程不会调用 `Response.close()` —— 所以
+1. `after_this_request` 执行太早（响应体还没发、文件句柄还开着），Windows 上 `os.remove` 必然失败（WinError 32）；
+2. `Response.call_on_close` 的回调**永远不会被执行**（没人调用那个 Response 的 close），每个大包漏一份几百 MB 临时文件。
+实际落地：把清理挂在 body 上（`routes_download._DeletingBody` 转发 `send_file` 的 body），覆盖「读完 EOF」「`close()`（客户端断开 / HEAD / 416 空 body）」两条路径，另加两个兜底：`send_file` 抛异常（Range 不可满足 → 416）当场删、`200/206` 之外的响应（304 类）先关句柄再当场删。**206 必须排除在「无内容」之外** —— 它会发送内容且此刻句柄仍开着，误判会导致删除失败且下载拿不到数据（实现过程中踩到过，已由 `test_download_file_partial_range_still_works_and_cleans` 看住）。测试从计划里的 4 个扩到 11 个（含 HEAD / 416 / 206 / 304 四种响应形态）。
+
 ---
 
 ### S16（P1）settings.json 原子写
