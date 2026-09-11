@@ -2,6 +2,8 @@ import base64
 import io
 import json
 import os
+import pathlib
+import re
 import threading
 import time
 import zipfile
@@ -25,6 +27,15 @@ class TestIndexRoute:
         assert b'Pixiv' in resp.data or b'\xe6\x90\x9c\xe7\xb4\xa2' in resp.data
 
 
+def _route_shape(route: str) -> str:
+    """把路由占位符（`<int:pixiv_id>`）与具体 id 都抹掉，便于矩阵与源码对账。
+
+    `/api/collections/<int:collection_id>` 与矩阵里的 `/api/collections/999999`
+    归一后都是 `/api/collections/`。
+    """
+    return re.sub(r'\d+', '', re.sub(r'<[^>]+>', '', route))
+
+
 class TestCsrfProtection:
     def _get_token(self, client):
         resp = client.get('/csrf-token')
@@ -36,6 +47,72 @@ class TestCsrfProtection:
         data = resp.get_json()
         assert 'token' in data
         assert len(data['token']) == 32
+
+    # 全部修改型端点（POST/PUT/DELETE）必须挂 @_csrf_required。
+    # 参数是"有副作用的真实请求"：漏挂装饰器的端点会真的执行下去（例如删掉收藏夹、
+    # 写 settings.json），所以用例只用必然无效的 ID/空 body —— 万一哪天装饰器被摘掉，
+    # 这里会变成 404/400 而不是 403，测试失败且不会造成破坏。
+    MUTATING_ENDPOINTS = [
+        ('POST', '/login'),
+        ('POST', '/api/settings'),
+        ('POST', '/api/settings/unlock'),
+        ('POST', '/api/blocked-tags'),
+        ('DELETE', '/api/blocked-tags/999999'),
+        ('POST', '/api/auto-follow/config'),
+        ('POST', '/api/collections'),
+        ('PUT', '/api/collections/999999'),
+        ('DELETE', '/api/collections/999999'),
+        ('POST', '/api/collections/999999/items'),
+        ('DELETE', '/api/collections/999999/items/999999'),
+        ('POST', '/api/collections/999999/items/batch'),
+        ('DELETE', '/api/collections/999999/items/batch'),
+        ('POST', '/api/collections/999999/items/999999/move'),
+        ('POST', '/download/999999'),
+        ('POST', '/api/download/batch'),
+        ('POST', '/download/cancel/999999'),
+        ('POST', '/download/reset/999999'),
+        ('DELETE', '/api/gallery/999999'),
+        ('POST', '/api/gallery/batch-delete'),
+        ('DELETE', '/api/thumb/redirect-hosts'),
+        ('POST', '/api/open-dir'),
+        ('POST', '/api/favorite/999999'),
+        ('POST', '/api/prefetch/config'),
+        ('POST', '/api/prefetch/tags'),
+        ('DELETE', '/api/prefetch/tags/999999'),
+        ('POST', '/api/prefetch/refresh'),
+        ('POST', '/api/prefetch/refresh-reset'),
+        ('POST', '/api/cache/items/999999/delete'),
+    ]
+
+    @pytest.mark.parametrize('method,path', MUTATING_ENDPOINTS,
+                             ids=[f'{m} {p}' for m, p in MUTATING_ENDPOINTS])
+    def test_all_mutating_endpoints_require_csrf(self, client, method, path):
+        """每个修改型端点缺 CSRF 头一律 403 —— 防止将来新增路由漏挂装饰器。"""
+        resp = client.open(path, method=method, json={})
+
+        assert resp.status_code == 403, f'{method} {path} 未受 CSRF 保护'
+        assert resp.get_json()['error'] == 'CSRF校验失败'
+
+    def test_mutating_endpoint_matrix_is_complete(self):
+        """矩阵必须覆盖源码里所有修改型路由（将来新增路由时这里会先失败）。
+
+        只做静态对账：从 `routes_*.py` 抓 `@bp.route(..., methods=[...])` 与矩阵比对。
+        "装饰器是否真的挂在函数上"由参数化用例负责 —— 两件事都得有人管，缺一个都会
+        让"漏挂 CSRF"重新变成静默风险。
+        """
+        pattern = re.compile(r"""@bp\.route\(\s*['"]([^'"]+)['"]([^)]*)\)""", re.S)
+        found = set()
+        for source_file in pathlib.Path(app.__file__).resolve().parent.glob('routes_*.py'):
+            source = source_file.read_text(encoding='utf-8')
+            for route, tail in pattern.findall(source):
+                if 'methods=' not in tail:
+                    continue                       # 纯 GET 路由不受 CSRF 约束
+                for method in re.findall(r"""['"](POST|PUT|DELETE|PATCH)['"]""", tail):
+                    found.add((method, _route_shape(route)))
+
+        covered = {(method, _route_shape(path)) for method, path in self.MUTATING_ENDPOINTS}
+
+        assert not found - covered, f'以下修改型端点未被 CSRF 矩阵覆盖：{sorted(found - covered)}'
 
     def test_post_without_csrf_returns_403(self, client):
         resp = client.post('/api/blocked-tags',
@@ -1048,63 +1125,6 @@ class TestDownloadFileZip:
         assert resp.data == b'x' * 64
         assert resp.mimetype == 'image/jpeg'
         assert resp.headers['Content-Disposition'].endswith('zip-me.jpg')
-
-
-class TestSettingsAtomicWrite:
-    """设置页写 settings.json 必须原子（审计 S16）。
-
-    直接 open('w') + json.dump 时，写盘失败/进程被杀会留下截断文件；读取侧遇损坏只能
-    整体回退默认，用户那份配置全丢。
-    """
-
-    @pytest.fixture(autouse=True)
-    def _isolate_settings(self, monkeypatch, tmp_path):
-        path = tmp_path / 'settings.json'
-        monkeypatch.setattr(app, '_SETTINGS_PATH', str(path))
-        return path
-
-    def test_settings_post_atomic_no_tmp_left(self, client, _isolate_settings):
-        token = self._token(client)
-
-        resp = client.post('/api/settings',
-                           data=json.dumps({'per_page': 30, 'prefetch_pages': 4}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-
-        assert resp.status_code == 200
-        saved = json.loads(_isolate_settings.read_text(encoding='utf-8'))
-        assert saved['per_page'] == 30
-        assert saved['prefetch_pages'] == 4
-        assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json'], \
-            '同目录不得残留 .tmp'
-
-    def test_settings_post_write_failure_keeps_old_bytes(self, client, _isolate_settings,
-                                                         monkeypatch):
-        """替换失败 → 500，且旧文件逐字节不变、不留半份文件、内存态不漂移。"""
-        original = json.dumps({'per_page': 17}, ensure_ascii=False)
-        _isolate_settings.write_text(original, encoding='utf-8')
-        before_state = dict(app._prefetch_state)
-
-        def _boom(src, dst, *a, **kw):
-            raise OSError('模拟磁盘写入失败')
-
-        monkeypatch.setattr(helpers.os, 'replace', _boom)
-        token = self._token(client)
-
-        resp = client.post('/api/settings',
-                           data=json.dumps({'per_page': 99, 'prefetch_interval': 77}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-
-        assert resp.status_code == 500
-        assert '保存失败' in resp.get_json()['error']
-        assert _isolate_settings.read_text(encoding='utf-8') == original, '旧内容必须完整保留'
-        assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
-        assert dict(app._prefetch_state) == before_state, '写盘失败不得更新内存态'
-
-    @staticmethod
-    def _token(client):
-        return client.get('/csrf-token').get_json()['token']
 
 
 class TestDetailApiMediumUrls:

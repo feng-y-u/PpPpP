@@ -428,3 +428,173 @@ def test_thumb_concurrent_requests_never_exceed_semaphore(thumb_env, app, monkey
         assert sem.acquire(blocking=False) is True, '有槽位没被归还'
     for _ in range(limit):
         sem.release()
+
+
+# ── 磁盘缓存、失败冷却、原子写降级（审计 S18 补齐）──
+
+def _cache_paths(url: str) -> tuple[str, str]:
+    """复现路由推导缓存文件名的规则（md5(url) + 扩展名 + 同名 .meta）。"""
+    import hashlib
+    key = hashlib.md5(url.encode()).hexdigest()
+    cache_path = os.path.join(routes_gallery.CACHE_DIR, f'{key}.{routes_gallery._extract_ext(url)}')
+    return cache_path, cache_path + '.meta'
+
+
+def test_thumb_cache_hit_serves_from_disk_without_network(thumb_env, client):
+    """命中磁盘缓存：不发网络请求、mtime 不变、带 7 天 max_age。
+
+    mtime 必须不变 —— 命中时刷新 mtime 会改 ETag，让浏览器那 7 天的本地缓存整体失效
+    （`image_cache` 的"最旧写入优先"淘汰也依赖 mtime 不被读操作污染）。
+    """
+    cache_path, meta_path = _cache_paths(THUMB)
+    with open(cache_path, 'wb') as f:
+        f.write(b'cached-jpeg-bytes')
+    with open(meta_path, 'w') as f:
+        f.write('image/png')
+    before = os.stat(cache_path).st_mtime_ns
+
+    resp = client.get(f'/thumb/{_b64(THUMB)}')
+
+    assert resp.status_code == 200
+    assert resp.data == b'cached-jpeg-bytes'
+    assert resp.mimetype == 'image/png', '.meta 里的原始 Content-Type 必须回放'
+    assert 'max-age=604800' in resp.headers['Cache-Control']
+    assert thumb_env['registry'].calls == [], '命中缓存不得再打图床'
+    assert os.stat(cache_path).st_mtime_ns == before, '读缓存不得改 mtime'
+
+
+def test_thumb_cache_hit_without_meta_assumes_jpeg(thumb_env, client):
+    """`.meta` 缺失（旧版本缓存）时按 jpeg 回放，不能因此 500。"""
+    cache_path, _ = _cache_paths(THUMB)
+    with open(cache_path, 'wb') as f:
+        f.write(b'no-meta')
+
+    resp = client.get(f'/thumb/{_b64(THUMB)}')
+
+    assert resp.status_code == 200
+    assert resp.mimetype == 'image/jpeg'
+    assert thumb_env['registry'].calls == []
+
+
+def test_thumb_failure_cooldown_skips_network_until_expiry(thumb_env, client):
+    """失败 URL 在冷却期内直接 502 且不再发请求；冷却过期后恢复尝试。
+
+    这是防"图库刷新时同一批坏图反复打满图床 → 整批 502 → 前端全消失"的关键。
+    注意断言的是**请求数不再增长**而不是"总共 1 次"：`_thumb_request` 对非超时的连接
+    失败会重建连接池重试一次（keep-alive 被对端关掉的快失败场景），所以首次失败本身
+    就是 2 次出站调用。
+    """
+    url = f'{THUMB}?cooldown=1'
+    # registry 里没有该 URL → 替身 session 抛 ConnectionError → 502 并记冷却
+    first = client.get(f'/thumb/{_b64(url)}')
+
+    assert first.status_code == 502
+    calls_after_first = len(thumb_env['registry'].calls)
+    assert calls_after_first >= 1
+    assert runtime._thumb_failed[url] > 0
+
+    second = client.get(f'/thumb/{_b64(url)}')
+
+    assert second.status_code == 502
+    assert len(thumb_env['registry'].calls) == calls_after_first, '冷却期内不得再发起请求'
+
+    runtime._thumb_failed[url] = time.time() - runtime._THUMB_FAIL_COOLDOWN - 1   # 冷却过期
+    third = client.get(f'/thumb/{_b64(url)}')
+
+    assert third.status_code == 502
+    assert len(thumb_env['registry'].calls) > calls_after_first, '冷却过期后必须重新尝试'
+
+
+def test_thumb_success_clears_failure_cooldown(thumb_env, client):
+    """取图成功后要清掉冷却记录：否则一次抖动会让这张图 30 秒内都用不了。"""
+    url = f'{THUMB}?recover=1'
+    assert client.get(f'/thumb/{_b64(url)}').status_code == 502
+    assert url in runtime._thumb_failed
+
+    thumb_env['registry'].add(url)
+    assert client.get(f'/thumb/{_b64(url)}').status_code == 502, '仍在冷却期内'
+
+    runtime._thumb_failed.pop(url, None)          # 模拟冷却到期后的成功
+    assert client.get(f'/thumb/{_b64(url)}').status_code == 200
+    assert url not in runtime._thumb_failed
+
+
+def test_thumb_atomic_write_failure_streams_response_without_caching(thumb_env, client,
+                                                                    monkeypatch):
+    """原子写失败（磁盘满/权限）时要降级为直接转发响应，且不留半份缓存与 .tmp。
+
+    降级的意义：图还是得给用户看，缓存写不进去不该变成 502；但**绝不能**留下一个
+    截断的缓存文件 —— 下次命中会拿它当完整图片返回。
+    """
+    thumb_env['registry'].add(THUMB)
+
+    def _boom(src, dst, *a, **kw):
+        raise OSError('模拟 os.replace 失败')
+
+    monkeypatch.setattr(routes_gallery.os, 'replace', _boom)
+
+    resp = client.get(f'/thumb/{_b64(THUMB)}')
+
+    assert resp.status_code == 200
+    assert resp.data == IMAGE_BYTES, '降级路径必须把原图完整给出去'
+    assert os.listdir(routes_gallery.CACHE_DIR) == [], '不得留下缓存或 .tmp 残留'
+
+
+# ── /api/image 三分支（审计 S18 补齐）──
+
+def _make_done_illust(pixiv_id: int, paths: list[str]):
+    from models import Illust, get_session, safe_commit
+    with get_session() as db:
+        db.add(Illust(pixiv_id=pixiv_id, title='t', download_status='done',
+                      local_paths_list=paths))
+        safe_commit(db)
+    return paths
+
+
+def test_api_image_serves_db_path(client, clean_db, tmp_path, monkeypatch):
+    """DB 命中且文件在盘上：直接回文件（带 7 天 max_age，灯箱不再每张发 304）。"""
+    img = tmp_path / 'page1.jpg'
+    img.write_bytes(b'db-jpeg')
+    _make_done_illust(70001, [str(img)])
+
+    resp = client.get('/api/image/70001/0')
+
+    assert resp.status_code == 200
+    assert resp.data == b'db-jpeg'
+    assert 'max-age=604800' in resp.headers['Cache-Control']
+
+
+def test_api_image_falls_back_to_download_dir(client, clean_db, tmp_path, monkeypatch):
+    """DB 无记录（或状态不对）时从 downloads/<pid>/ 兜底，按页号排序取第 index 张。"""
+    import helpers
+
+    ddir = tmp_path / 'downloads' / '70002'
+    ddir.mkdir(parents=True)
+    (ddir / '70002_p1.jpg').write_bytes(b'page-one')
+    (ddir / '70002_p2.jpg').write_bytes(b'page-two')
+    (ddir / '70002_p10.jpg').write_bytes(b'page-ten')
+    monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
+
+    first = client.get('/api/image/70002/0')
+    third = client.get('/api/image/70002/2')
+
+    assert first.status_code == 200 and first.data == b'page-one'
+    # 页号排序：_p10 必须排在 _p2 之后（字典序会排错）
+    assert third.status_code == 200 and third.data == b'page-ten'
+
+
+def test_api_image_404_paths(client, clean_db, tmp_path, monkeypatch):
+    """三分支的兜底：目录不存在、index 越界、DB 行在但文件被删 —— 一律 404。"""
+    import helpers
+
+    monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
+    assert client.get('/api/image/70003/0').status_code == 404, '目录不存在'
+
+    ddir = tmp_path / 'downloads' / '70004'
+    ddir.mkdir(parents=True)
+    (ddir / '70004_p1.jpg').write_bytes(b'only-page')
+    assert client.get('/api/image/70004/5').status_code == 404, 'index 越界'
+
+    missing = tmp_path / 'gone.jpg'
+    _make_done_illust(70005, [str(missing)])
+    assert client.get('/api/image/70005/0').status_code == 404, 'DB 有记录但文件已删除'

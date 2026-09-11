@@ -764,6 +764,14 @@ def _download_illust(pixiv_id: int) -> None:
     if not lock.acquire(blocking=False):
         return  # 正在下载中，跳过
     try:
+        # 两个 session 必须在任何提前 return 之前置 None：finally 里无条件引用它们。
+        # 位置很关键 —— "排队中被取消"的任务会在下面的取消检查处直接 return，若此时
+        # 还没有 session_obj，finally 首行就抛 UnboundLocalError，后续的
+        # lock.release() / 取消标记与进度清理全部不会执行：该作品的下载锁永远不放，
+        # download_cancellations 永远留着标记，于是这个作品**再也下载不了**（worker
+        # 在 lock.acquire(blocking=False) 处静默跳过），进度条目也永久挂在管理页。
+        session_obj = None
+        anon_session_obj = None
         if pixiv_id in download_cancellations:
             # 任务被取消/重置后才轮到本线程启动（queued 场景）：不再开始下载。
             # 取消标记由 finally 清理。
@@ -771,10 +779,6 @@ def _download_illust(pixiv_id: int) -> None:
                 _queued_downloads.discard(pixiv_id)
             return
         _download_progress[pixiv_id] = {'current': 0, 'total': 0}
-        # 两个 session 都在 try 外先置 None：finally 必须无条件可引用（下面有多条
-        # 提前 return 的路径根本走不到会话构造）
-        session_obj = None
-        anon_session_obj = None
         with get_session() as db:
             illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
             if not illust:

@@ -23,6 +23,7 @@ from fetcher import clear_search_cache
 from helpers import _atomic_write_json
 from middleware import (_csrf_required, _get_csrf_token, _get_json_body,
                         _is_authed, _rate_limit, _safe_next)
+from routes_prefetch import _PREFETCH_SETTINGS_KEYS
 from models import BlockedTag, get_session, safe_commit
 from runtime import _auto_follow_state, _prefetch_state
 
@@ -235,10 +236,15 @@ def api_settings_post() -> Response:
         # settings.json，而读取侧遇到损坏只能整体回退默认 —— 用户那份配置全丢。
         _atomic_write_json(app._SETTINGS_PATH, current)
         # prefetch_* 键与 /api/prefetch/config 保持同构：保存成功后同步内存态
-        #（interval 即时生效，不再需要重启）
+        #（interval 即时生效，不再需要重启）。
+        # 键名必须经 _PREFETCH_SETTINGS_KEYS 映射：内存态用短键（interval/pages/
+        # max_illusts，background 的预取循环读的就是它），settings.json 用长键
+        # （prefetch_*）。此前直接把长键塞进 _prefetch_state，等于写进三个没人读的
+        # 键 —— 设置页保存"立即生效"实际从未生效（审计 S18 补测时发现）。
         _prefetch_state.update({
-            k: current[k] for k in ('prefetch_interval', 'prefetch_pages', 'prefetch_max_illusts')
-            if k in current
+            short: current[long]
+            for short, long in _PREFETCH_SETTINGS_KEYS.items()
+            if long in current
         })
         return jsonify(current)
     except Exception as e:

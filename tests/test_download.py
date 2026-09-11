@@ -967,3 +967,155 @@ def test_download_uses_credentialless_session_outside_allowlist(dl_env, monkeypa
     assert 'Cookie' not in anon_fake.headers
     assert anon_fake.closed and cookie_fake.closed, '两个 session 都要在 finally 里关闭'
     _assert_no_dangling_state(pid)
+
+
+# ── 中途取消（审计 S18 补齐）──
+
+def test_download_cancelled_mid_flight_cleans_up_without_done(dl_env, monkeypatch):
+    """下载途中被取消：删掉半成品文件、状态复位、记 cancelled 且**不得**固化 done。
+
+    取消失败的代价很具体：状态留在 downloading（trigger 被"下载中"挡回）、磁盘留着
+    半套文件（重新下载时页号错位）、or 状态 done 而文件不全（点开 404）。
+    """
+    pid = 81101
+    urls = _urls(pid, 2)
+    with get_session() as db:
+        _make_illust(db, pid, urls)
+    fake = _FakeSession()
+    original_get = fake.get
+
+    def _cancel_after_first_page(url, **kwargs):
+        """第 1 页下完后（第 2 页取图时）用户点了取消。"""
+        if url == urls[1]:
+            download_cancellations.add(pid)
+        return original_get(url, **kwargs)
+
+    fake.get = _cancel_after_first_page
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
+
+    background._download_illust(pid)
+
+    status, paths, actions = _read(pid)
+    assert status is None, '取消后必须复位成未下载，否则重下会被状态挡回'
+    assert paths is None
+    assert 'done' not in actions
+    assert 'cancelled' in actions
+    assert not os.path.isdir(os.path.join(str(dl_env), str(pid))), '取消后不留半成品目录'
+    _assert_no_dangling_state(pid)
+
+
+def test_download_cancelled_before_start_does_nothing(dl_env, monkeypatch):
+    """取消发生在 worker 启动之前（queued 场景）：一行日志都不该写、不碰网络。
+
+    这是"排队中取消"这一最常见取消姿势的回归守卫。旧实现把 `session_obj = None`
+    放在取消检查**之后**，这条提前 return 让 finally 首行抛 UnboundLocalError，
+    于是 lock.release() / 取消标记与进度清理全部跳过 —— 该作品的下载锁永远不放、
+    取消标记永远留着，**再也下载不了**（worker 在 lock.acquire 处静默跳过）。
+    """
+    pid = 81102
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1))
+    fake = _FakeSession()
+    monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
+    download_cancellations.add(pid)        # 任务已入队但还没轮到执行
+    _enqueue(pid)
+
+    background._download_illust(pid)
+
+    status, paths, actions = _read(pid)
+    assert status is None, '取消标记在开头就该拦住整个下载'
+    assert paths is None
+    assert actions == [], '没有开始过就不该有 start/done 日志'
+    assert fake.calls == [], '取消后不得发起任何取图请求'
+    _assert_no_dangling_state(pid)
+
+    # 症状级守卫：取消之后这个作品必须还能正常下载（锁泄漏会让它永久下不动）
+    background._download_illust(pid)
+    status, paths, actions = _read(pid)
+    assert status == 'done' and paths, '取消过的作品必须能重新下载'
+    assert fake.calls == _urls(pid, 1)
+
+
+def test_cancel_route_marks_downloading_and_returns_cancelling(dl_env, clean_db, client):
+    """`POST /download/cancel/<pid>`：下载中 → cancelling + 取消标记 + 退出队列。"""
+    pid = 81103
+    with get_session() as db:
+        _make_illust(db, pid, _urls(pid, 1), status='downloading')
+    _enqueue(pid)
+
+    resp = _post(client, f'/download/cancel/{pid}')
+
+    assert resp.status_code == 200
+    assert resp.get_json()['status'] == 'cancelling'
+    assert pid in download_cancellations, 'worker 靠这个标记在下一个检查点退出'
+    assert not is_queued_download(pid), '取消必须把它移出队列'
+
+
+def test_cancel_route_rejects_idle_and_missing_illust(dl_env, clean_db, client):
+    """未在下载中 → 400；作品不存在 → 404（前端据此区分"不用管"和"刷新列表"）。"""
+    idle_pid = 81104
+    with get_session() as db:
+        _make_illust(db, idle_pid, _urls(idle_pid, 1), status='done')
+
+    idle = _post(client, f'/download/cancel/{idle_pid}')
+    missing = _post(client, '/download/cancel/81199')
+
+    assert idle.status_code == 400
+    assert '未在下载中' in idle.get_json()['error']
+    assert idle_pid not in download_cancellations, '拒绝的取消不得留下标记'
+    assert missing.status_code == 404
+
+
+def test_download_status_routes(dl_env, clean_db, client):
+    """单条状态、批量状态、下载管理页三个只读入口的正常与异常分支。"""
+    done_pid, failed_pid = 81105, 81106
+    with get_session() as db:
+        _make_illust(db, done_pid, _urls(done_pid, 1), status='done')
+        _make_illust(db, failed_pid, _urls(failed_pid, 1), status='failed')
+
+    single = client.get(f'/download_status/{done_pid}')
+    assert single.status_code == 200
+    assert single.get_json()['status'] == 'done'
+    assert client.get('/download_status/81198').status_code == 404
+
+    batch = client.get(f'/api/download/status/batch?ids={done_pid},{failed_pid},81197')
+    assert batch.status_code == 200
+    statuses = batch.get_json()['statuses']
+    assert statuses[str(done_pid)] == 'done'
+    assert statuses[str(failed_pid)] == 'failed'
+    assert statuses['81197'] == 'none', '库里没有的 pid 要给出 none 而不是缺失键'
+
+    assert client.get('/api/download/status/batch').status_code == 400
+    assert client.get('/api/download/status/batch?ids=abc').status_code == 400
+
+    page = client.get('/downloads')
+    assert page.status_code == 200
+    assert 'text/html' in page.headers['Content-Type']
+
+
+def test_api_downloads_reports_queue_and_progress(dl_env, clean_db, client):
+    """`/api/downloads` 聚合：活动/排队/完成/日志四段都必须有数据（下载管理页靠它）。"""
+    active_pid, done_pid = 81107, 81108
+    with get_session() as db:
+        _make_illust(db, active_pid, _urls(active_pid, 2), status='downloading')
+        _make_illust(db, done_pid, _urls(done_pid, 1), status='done')
+        db.add(DownloadLog(pixiv_id=done_pid, action='done', message='下载完成'))
+        safe_commit(db)
+    _enqueue(active_pid)
+    _download_progress[active_pid] = {'current': 1, 'total': 2}
+
+    resp = client.get('/api/downloads')
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [i['pixiv_id'] for i in body['active']] == [active_pid]
+    assert body['active'][0]['progress'] == {'current': 1, 'total': 2}, \
+        '进度取自进程内 _download_progress'
+    assert [i['pixiv_id'] for i in body['queued']] == [active_pid]
+    assert [i['pixiv_id'] for i in body['completed']] == [done_pid]
+    assert any(log['pixiv_id'] == done_pid for log in body['logs'])
+
+
+def _post(client, path, payload=None):
+    token = client.get('/csrf-token').get_json()['token']
+    return client.post(path, json=payload or {}, headers={'X-CSRF-Token': token})
