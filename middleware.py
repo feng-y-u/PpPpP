@@ -112,7 +112,14 @@ def _require_login():
     if _is_authed():
         return None
     path = request.path
-    if path in _AUTH_EXEMPT_PATHS or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
+    # 前缀豁免必须以 '/' 为边界：裸 startswith('/static') 会让 '/static../.git/config'
+    # 这类路径也跳过登录墙（2026-09-21 在真实部署的 nginx 日志里看到扫描器正是这么打的：
+    # 该请求绕过认证墙后落到 Flask 静态路由、因无匹配文件返回 404，故不可利用，但匹配范围
+    # 比必要的宽）。注意 /static 免认证本身是设计使然——CSS/JS 必须能在未登录时加载——
+    # 推论是 static/ 目录下的任何文件都是公开的，别往里面放密钥或配置。
+    if path in _AUTH_EXEMPT_PATHS or any(
+        path == p or path.startswith(p + '/') for p in _AUTH_EXEMPT_PREFIXES
+    ):
         return None
     if path.startswith('/api/') or path == '/search' or request.method != 'GET':
         return jsonify({'error': '未登录', 'error_code': 'AUTH_REQUIRED'}), 401

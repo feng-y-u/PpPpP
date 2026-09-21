@@ -42,6 +42,19 @@ class TestAuthRequired:
     def test_static_exempt(self, client, auth_enabled):
         assert client.get('/static/app.js').status_code == 200
 
+    def test_static_subpath_still_exempt(self, client, auth_enabled):
+        # 边界收紧后，嵌套静态资源（vendor 子目录）必须照旧免认证
+        resp = client.get('/static/vendor/bootstrap-5.3.3/bootstrap.min.css')
+        assert resp.status_code == 200
+
+    def test_static_prefix_requires_path_boundary(self, client, auth_enabled):
+        # 前缀豁免必须以 '/' 为边界。裸 startswith('/static') 会让
+        # '/static../.git/config' 这类路径也跳过登录墙 —— 真实部署的 nginx
+        # 日志里扫描器正是这么打的（该请求当时绕过认证墙落到静态路由返回 404）。
+        resp = client.get('/static../.git/config')
+        assert resp.status_code == 302
+        assert resp.headers['Location'].startswith('/login')
+
     def test_no_password_means_open_access(self, client):
         # ACCESS_PASSWORD 默认空 → 免认证
         assert client.get('/').status_code == 200
