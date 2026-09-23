@@ -362,23 +362,19 @@ function pollSearch(taskId, onDone, onFail, gen) {
 function updateSearchUI() {
   const type = $('#searchType').value;
   const isTag = type === 'tag';
-  $('#tagMode').style.display = isTag ? '' : 'none';
   $('#searchQuery').placeholder = type === 'following' ? '' : isTag ? '多个标签用逗号分隔（中英逗号均可）' : '输入画师UID...';
 
+  // 筛选行是「标签 + 控件」绑成的盒子（.filter-box）：显隐必须切**整个盒子**。
+  // 只切盒内的 label / select / input 会留下一个空边框（2026-09-23 改）。
   const show = type !== 'following';
-  // 关注模式隐藏排序/收藏数下限；R18 过滤三模式通用（关注直接复用搜索的 R18 选项）
-  ['#sortOrder','#minBookmarks'].forEach(id => {
-    const el = $(id);
+  // 关注模式隐藏排序与收藏数下限；R18 过滤三模式通用（关注直接复用搜索的 R18 选项）
+  ['#fbSort', '#fbMinBookmarks'].forEach(sel => {
+    const el = $(sel);
     if (el) el.style.display = show ? '' : 'none';
   });
-  $$('.filters-row label').forEach(l => {
-    if (l.id === 'r18Label') return;   // R18 标签在关注模式下也保留
-    l.style.display = show ? '' : 'none';
-  });
-  // 组合 label 与 tagMode 下拉联动显隐（画师模式不显示游离的「组合」label；
-  // 须放在 .filters-row label 的 forEach 之后，否则该 forEach 会把它重新显示出来）
-  const tagModeLabel = $('#tagModeLabel');
-  if (tagModeLabel) tagModeLabel.style.display = isTag ? '' : 'none';
+  // 组合方式只对标签搜索有意义：画师与关注都不适用，整盒一起收起
+  const tagModeBox = $('#fbTagMode');
+  if (tagModeBox) tagModeBox.style.display = isTag ? '' : 'none';
   // 页签 active 态同步
   $$('#searchTypeTabs .st-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.type === $('#searchType').value);

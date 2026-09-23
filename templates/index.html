@@ -78,47 +78,71 @@
   .st-tab { min-height: 40px; }
 }
 
-/* ── Filters Row ── */
+/* ── Filters Row ──
+   每对「标签 + 它后面的控件」绑成一个盒子（.filter-box）：标签是盒内前缀，控件自身无边框。
+   目的是让它们成为不可分割的一个单位 —— 换行时标签与控件永远在一起，不会再出现
+   「收藏≥」停在上一行末尾、它那个数字输入框（默认值 0）被挤到下一行单独显示的情况。
+   显隐也必须切**整个盒子**（见 page-index.js 的 updateSearchUI）：只切盒内的 label /
+   select / input 会留下一个空边框。 */
 .filters-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0.4rem 0.6rem;
+  gap: 0.45rem 0.5rem;
   margin-top: 0.8rem;
   font-size: 0.78rem;
 }
-.filters-row label { color: var(--text-secondary); margin: 0 0 0 0.3rem; align-self: center; font-size: 0.72rem; }
-.filters-row select, .filters-row input, .filters-row .form-select, .filters-row .form-control {
-  background: var(--bg-elevated) !important;
-  border: 1px solid var(--border-input) !important;
+.filter-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  min-height: 34px;
+  padding: 0 0.3rem 0 0.7rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-input);
+  border-radius: 999px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.filter-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.filter-box label {
+  color: var(--text-secondary);
+  margin: 0;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.filter-box select, .filter-box input, .filter-box .form-select, .filter-box .form-control {
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
   color: var(--text-primary);
   border-radius: 999px;
-  padding: 0.3rem 0.5rem;
+  padding: 0.3rem 0.4rem;
   font-size: 0.78rem;
   width: auto;
-  min-width: 60px;
+  min-width: 0;
   -webkit-appearance: none;
   appearance: none;
   -moz-appearance: textfield;
 }
-.filters-row input[type="number"]::-webkit-inner-spin-button,
-.filters-row input[type="number"]::-webkit-outer-spin-button {
+.filter-box input[type="number"] { width: 3.6rem; text-align: right; }
+.filter-box input[type="number"]::-webkit-inner-spin-button,
+.filter-box input[type="number"]::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
-.filters-row select, .filters-row .form-select {
+.filter-box select, .filter-box .form-select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%238a8a82' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E") !important;
   background-repeat: no-repeat !important;
-  background-position: right 0.4rem center !important;
-  padding-right: 1.3rem !important;
+  background-position: right 0.15rem center !important;
+  padding-right: 1.1rem !important;
 }
-.filters-row select:focus, .filters-row input:focus, .filters-row .form-select:focus, .filters-row .form-control:focus {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 2px var(--accent-subtle) !important;
-  outline: none;
-}
-.filters-row select option, .filters-row .form-select option { background: #fff; color: #2b2b2b; }
+.filter-box select option, .filter-box .form-select option { background: #fff; color: #2b2b2b; }
+.filter-box .r18-notice { color: var(--text-muted); font-size: 0.75rem; padding-right: 0.3rem; cursor: help; }
 
 /* ── Toolbar ── */
 .toolbar {
@@ -313,28 +337,37 @@
       </div>
     </div>
 
-    <!-- Filters -->
+    <!-- Filters：每对「标签 + 控件」是一个盒子（.filter-box），换行时不会被拆开 -->
     <div class="filters-row">
-      <label>排序</label>
-      <select id="sortOrder">
-        <option value="date_d">最新</option>
-        <option value="popular_d">综合</option>
-      </select>
+      <div class="filter-box" id="fbSort">
+        <label for="sortOrder">排序</label>
+        <select id="sortOrder">
+          <option value="date_d">最新</option>
+          <option value="popular_d">综合</option>
+        </select>
+      </div>
 
-      <label id="tagModeLabel">组合</label>
-      <select id="tagMode" title="组合方式">
-        <option value="or">OR</option>
-        <option value="and">AND</option>
-      </select>
+      <div class="filter-box" id="fbTagMode">
+        <label id="tagModeLabel" for="tagMode">组合</label>
+        <select id="tagMode" title="组合方式">
+          <option value="or">OR</option>
+          <option value="and">AND</option>
+        </select>
+      </div>
 
-      <label>收藏≥</label>
-      <input id="minBookmarks" type="number" value="{{ max_bookmarks_default }}" min="0" step="100">
-      <label id="r18Label">R18</label>
-      <select id="r18Mode">
-        <option value="safe" selected>隐藏R18</option>
-        <option value="all">显示全部</option>
-      </select>
-      <span class="r18-notice" title="R18选项是没用的，因为我压根就没有打开账号的显示R18内容设置，嘿嘿">⚠</span>
+      <div class="filter-box" id="fbMinBookmarks">
+        <label for="minBookmarks">收藏≥</label>
+        <input id="minBookmarks" type="number" value="{{ max_bookmarks_default }}" min="0" step="100">
+      </div>
+
+      <div class="filter-box" id="fbR18">
+        <label id="r18Label" for="r18Mode">R18</label>
+        <select id="r18Mode">
+          <option value="safe" selected>隐藏R18</option>
+          <option value="all">显示全部</option>
+        </select>
+        <span class="r18-notice" title="R18选项是没用的，因为我压根就没有打开账号的显示R18内容设置，嘿嘿">⚠</span>
+      </div>
     </div>
   </div>
 </div>
