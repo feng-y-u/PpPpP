@@ -223,10 +223,12 @@ input[type="number"] { -moz-appearance: textfield; }
 }
 .full-page > .container { flex: 1; }/* ── Mobile ── */
 @media (max-width: 640px) {
-  .search-bar { flex-wrap: wrap; }
-  .search-bar .form-control { min-width: 140px; }
+  /* 搜索区不再需要 flex-wrap / 输入框最小宽 / 全宽按钮 —— 这三条是为"输入框与按钮
+     共用同一个带边框的胶囊容器"服务的：容器内放不下时把按钮挤到第二行并拉满宽度，
+     于是手机上看起来是一个「上下拼接的大胶囊」。容器已拆（见 templates/index.html
+     里 .search-bar 的注释），输入框与按钮各自独立、同行排布，这三条随之失效；
+     留着反而会把按钮重新撑满一行。 */
   .search-bar-wrap { padding: 16px 12px; }
-  .btn-search { margin-top: 6px; width: 100%; }
 }
 
 /* ── Mobile 增强（触控目标 ≥44px / 工具栏换行 / 防 iOS 缩放）── */

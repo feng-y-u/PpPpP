@@ -1346,3 +1346,33 @@ class TestSearchCancellation:
                 fetcher._cancel_end()
         assert len(details) == first_batch
         assert attempted == first_batch, '取消的不计 attempted，在途的才计'
+
+
+class TestSplitTags:
+    """标签切分：中文逗号与英文逗号必须等价。
+
+    用户分不清该打哪个逗号（输入法状态不同，打出来就是不同的字符），
+    不该让他记这件事 —— `_split_tags` 是标签搜索唯一的切分入口
+    （`search_by_tag` 调用），故把两种逗号钉在同一个用例里。
+    """
+
+    @pytest.mark.parametrize('raw, expected', [
+        ('初音ミク,オリジナル', ['初音ミク', 'オリジナル']),
+        ('初音ミク，オリジナル', ['初音ミク', 'オリジナル']),                # 中文逗号
+        ('初音ミク，オリジナル, 風景', ['初音ミク', 'オリジナル', '風景']),  # 混用
+        ('  初音ミク ， オリジナル  ', ['初音ミク', 'オリジナル']),          # 逗号两侧空格
+    ])
+    def test_both_comma_forms_split_identically(self, raw, expected):
+        assert fetcher._split_tags(raw) == expected
+
+    def test_single_tag_is_kept_whole(self):
+        # 无逗号时整体作为一个标签：标签本身可能含空格
+        #（如「アイドルマスター シンデレラガールズ」），不能被切碎
+        assert fetcher._split_tags('  アイドルマスター シンデレラガールズ ') == \
+            ['アイドルマスター シンデレラガールズ']
+
+    def test_only_separators_falls_back_to_raw(self):
+        # 既有语义：全是分隔符 → 切出的 parts 为空 → 回退成**归一化后**的原始串
+        #（中文逗号在上一行 replace 里已转成英文逗号），而不是空列表 ——
+        # 返回空列表会让上游拿不到任何关键词。此断言按实测行为固定。
+        assert fetcher._split_tags('，,') == [',,']

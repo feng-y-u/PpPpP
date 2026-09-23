@@ -33,16 +33,30 @@
 }
 
 .search-bar {
-  display: flex; background: var(--bg-elevated);
+  display: flex; align-items: center; gap: 8px;
+}
+/* 输入框与按钮各自独立：不再共用一个带边框的胶囊容器。
+   此前 .search-bar 是「框」（border + radius:999px + padding:4px + overflow:hidden），
+   输入框被设成 border:none 挂在里面，按钮也在里面 —— 输入区与操作区没有边界，
+   按钮视觉权重过高，窄屏还会被 overflow:hidden 裁切。现在 .search-bar 只负责布局，
+   输入框自带边框，成为独立胶囊。 */
+.search-bar .form-control {
+  flex: 1 1 auto; min-width: 0;
+  height: 44px; padding: 0 1.1rem;
+  background: var(--bg-input) !important;
   border: 1px solid var(--border-input); border-radius: 999px;
-  padding: 4px; overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
-.search-bar:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-focus); }
-.search-bar .form-control { border: none; background: transparent !important; border-radius: 999px; }
+.search-bar .form-control:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-focus) !important;
+}
 .search-bar .btn-search {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 44px; padding: 0 1.4rem;
   background: var(--accent); border: none; color: #fff;
-  font-weight: 600; font-size: 0.85rem; padding: 0.55rem 1.5rem;
+  font-weight: 600; font-size: 0.85rem;
   border-radius: 999px; cursor: pointer; transition: background 0.2s;
   white-space: nowrap;
 }
@@ -294,7 +308,7 @@
         <option value="following">关注</option>
       </select>
       <div class="search-bar">
-        <input id="searchQuery" class="form-control" placeholder="多个标签用逗号分隔">
+        <input id="searchQuery" class="form-control" placeholder="多个标签用逗号分隔（中英逗号均可）">
         <button id="searchBtn" class="btn-search">搜索</button>
       </div>
     </div>

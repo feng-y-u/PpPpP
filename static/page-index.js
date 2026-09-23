@@ -363,7 +363,7 @@ function updateSearchUI() {
   const type = $('#searchType').value;
   const isTag = type === 'tag';
   $('#tagMode').style.display = isTag ? '' : 'none';
-  $('#searchQuery').placeholder = type === 'following' ? '' : isTag ? '多个标签用逗号分隔' : '输入画师UID...';
+  $('#searchQuery').placeholder = type === 'following' ? '' : isTag ? '多个标签用逗号分隔（中英逗号均可）' : '输入画师UID...';
 
   const show = type !== 'following';
   // 关注模式隐藏排序/收藏数下限；R18 过滤三模式通用（关注直接复用搜索的 R18 选项）
