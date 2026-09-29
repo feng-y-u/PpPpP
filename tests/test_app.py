@@ -16,8 +16,13 @@ import app
 import fetcher
 import helpers
 import models
+import pixiv_client
 import routes_download
 from config import ITEMS_PER_PAGE
+
+# error / cancelled 等"结果不可信"的终态响应的计数器必须全零（与 results=[] 一致）：
+# accepted 是前端"已找到 N 件"的数据源，留着非零值就会在空网格上显示幽灵数字。
+_ZERO_PROGRESS = {'examined': 0, 'accepted': 0, 'detail_failed': 0}
 
 
 class TestIndexRoute:
@@ -190,19 +195,23 @@ class TestBlockedTags:
         assert resp.status_code == 404
 
 
+def _poll_search_status(client, task_id, timeout=50):
+    """轮询异步搜索任务直到终态（done/partial 200 / error 401·502 / 丢失 404）。"""
+    for _ in range(timeout):
+        r = client.get(f'/api/search/status/{task_id}')
+        if r.status_code == 404:
+            return r
+        data = r.get_json()
+        if data and data.get('status') != 'running':
+            return r
+        time.sleep(0.05)
+    raise AssertionError(f'搜索任务 {task_id} 超时未完成')
+
+
 class TestSearch:
     def _poll(self, client, task_id, timeout=50):
         """轮询异步搜索任务直到终态（done 200 / error 401·502 / 丢失 404）。"""
-        import time
-        for _ in range(timeout):
-            r = client.get(f'/api/search/status/{task_id}')
-            if r.status_code == 404:
-                return r
-            data = r.get_json()
-            if data and data.get('status') != 'running':
-                return r
-            time.sleep(0.05)
-        raise AssertionError(f'搜索任务 {task_id} 超时未完成')
+        return _poll_search_status(client, task_id, timeout)
 
     @patch('app.browse_discovery')
     def test_empty_query_calls_discovery(self, mock_discovery, client):
@@ -312,6 +321,7 @@ class TestSearch:
         data1 = final1.get_json()
         assert data1['status'] == 'cancelled'
         assert data1['results'] == []
+        assert data1['progress'] == _ZERO_PROGRESS
 
         final2 = self._poll(client, task2)
         assert final2.get_json()['status'] == 'done'
@@ -379,6 +389,7 @@ class TestSearch:
         final = self._poll(client, task_id)
         assert final.status_code == 502
         assert final.get_json()['error']
+        assert final.get_json()['progress'] == _ZERO_PROGRESS
 
     def test_task_auth_error_returns_401(self, client):
         from fetcher import PixivAuthError
@@ -387,6 +398,7 @@ class TestSearch:
             task_id = resp.get_json()['task_id']
             final = self._poll(client, task_id)
             assert final.status_code == 401
+            assert final.get_json()['progress'] == _ZERO_PROGRESS
 
     def test_task_not_found_returns_404(self, client):
         resp = client.get('/api/search/status/no-such-task')
@@ -403,6 +415,363 @@ class TestSearch:
         app._cleanup_search_tasks()
         r = client.get(f'/api/search/status/{task_id}')
         assert r.status_code == 404
+
+
+class TestSearchTaskSnapshot:
+    """运行中快照与 `partial` 终态（Task 4）。
+
+    这些用例走**真实** `fetcher.paginated_search`，只补丁具体的搜索函数 —— 于是
+    "publisher 由路由经闭包注入 `search_by_*` / `browse_discovery`" 这条接线
+    （执行勘误第 1 条：publisher **不得**传给 `paginated_search`）也在覆盖范围内。
+    `test_route_wiring_publishes_real_progress_end_to_end` 更进一步：连 `search_by_*`
+    本身都不补丁，只堵住网络 seam，于是路由侧 `progress=` 关键字的名字写错也会被抓住
+    （`MagicMock` 收得下任何关键字，那是本条用例存在的理由）。
+    """
+
+    def test_running_snapshot_then_done_replaces_preview_with_canonical(self, client):
+        """运行中轮询能看到已确认结果与计数；done 时 canonical 页**替换**预览。"""
+        published = threading.Event()
+        released = threading.Event()
+        preview = {'pixiv_id': 101, 'title': 'a', 'id': None, 'created_at': None}
+        canonical = {'pixiv_id': 101, 'title': 'a', 'id': 7,
+                     'created_at': '2026-01-01T00:00:00'}
+
+        def fake_search_by_tag(*args, **kwargs):
+            progress = kwargs['progress']
+            assert callable(progress), 'publisher 必须经 progress 形参注入 search_by_tag'
+            progress({'type': 'examined', 'pixiv_id': 101})
+            progress({'type': 'result', 'result': preview})
+            published.set()
+            assert released.wait(10), '测试未放行 worker'
+            return ([canonical], False)
+
+        try:
+            with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+                resp = client.get('/search?type=tag&query=test')
+                task_id = resp.get_json()['task_id']
+                assert published.wait(5), 'worker 应已发布预览'
+
+                mid = client.get(f'/api/search/status/{task_id}')
+                assert mid.status_code == 200
+                data = mid.get_json()
+                assert data['status'] == 'running'
+                assert [r['pixiv_id'] for r in data['results']] == [101]
+                assert data['results'][0]['id'] is None    # 预览来自未入库的模型
+                assert data['revision'] > 0
+                assert data['complete'] is False
+                assert data['warning'] is None
+                assert data['progress'] == {'examined': 1, 'accepted': 1, 'detail_failed': 0}
+        finally:
+            released.set()
+
+        final = _poll_search_status(client, task_id)
+        assert final.status_code == 200
+        data = final.get_json()
+        assert data['status'] == 'done'
+        assert data['complete'] is True
+        assert data['results'] == [canonical], 'done 必须用 canonical 页替换预览，而不是合并'
+
+    def test_result_events_deduped_and_preview_capped_to_one_page(self, client):
+        """result 事件按 `pixiv_id` 去重、预览只留一页；accepted 照实累计。"""
+        published = threading.Event()
+        released = threading.Event()
+        # 每个 pid 发两次（跨页/跨路径重复），且总数超过一页
+        pids = [1] + [pid for pid in range(2, ITEMS_PER_PAGE + 6) for _ in range(2)]
+
+        def fake_search_by_tag(*args, **kwargs):
+            progress = kwargs['progress']
+            for pid in pids:
+                progress({'type': 'result',
+                          'result': {'pixiv_id': pid, 'title': f't{pid}', 'id': None}})
+            published.set()
+            assert released.wait(10)
+            return ([], False)
+
+        try:
+            with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+                task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+                assert published.wait(5)
+                data = client.get(f'/api/search/status/{task_id}').get_json()
+        finally:
+            released.set()
+
+        assert data['status'] == 'running'
+        assert len(data['results']) == ITEMS_PER_PAGE, '预览最多一页，避免轮询载荷无限增长'
+        assert data['results'][-1]['pixiv_id'] == ITEMS_PER_PAGE
+        # 预览有渲染上限，但 accepted 是"已确认件数"：照实累计、不随渲染上限打折
+        assert data['progress']['accepted'] == ITEMS_PER_PAGE + 5
+
+    def test_rate_limited_finishes_partial_keeping_preview(self, client):
+        """限流截断：HTTP 200 + partial，保留已发布预览、complete=false、带 warning。"""
+        preview = {'pixiv_id': 201, 'title': 'p', 'id': None}
+
+        def fake_search_by_tag(*args, **kwargs):
+            kwargs['progress']({'type': 'result', 'result': preview})
+            raise fetcher.SearchRateLimitedError('详情请求被限流')
+
+        with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+            final = _poll_search_status(client, task_id)
+
+        assert final.status_code == 200, 'partial 是"部分成功"（可重试），不应走 502'
+        data = final.get_json()
+        assert data['status'] == 'partial'
+        assert [r['pixiv_id'] for r in data['results']] == [201]
+        assert data['complete'] is False
+        assert data['warning']
+        assert data['has_more'] is False, 'partial 不伪造 has_more'
+        assert data['cursor'] is None
+
+    def test_partial_keeps_input_cursor(self, client):
+        """翻页中途被限流：游标退回输入值，用户冷却后可重试同一页。"""
+        cursor = fetcher.encode_cursor({
+            'type': 'tag', 'query': 'test', 'sort': 'date_d', 'tag_mode': 'or',
+            'r18_mode': 'safe', 'min_bookmarks': 0,
+            'pixiv_page': 3, 'skip_count': 0, 'created_at': int(time.time()),
+        })
+        with patch('app.search_by_tag', side_effect=fetcher.SearchRateLimitedError('限流')):
+            resp = client.get(f'/search?type=tag&query=test&cursor={cursor}')
+            assert resp.status_code == 200
+            final = _poll_search_status(client, resp.get_json()['task_id'])
+
+        data = final.get_json()
+        assert data['status'] == 'partial'
+        assert data['cursor'] == cursor, '输入游标不得前移'
+        assert data['has_more'] is False
+
+    def test_partial_does_not_echo_discarded_cursor(self, client):
+        """被丢弃的游标（步长不匹配）不得回吐：那个位置本次任务从未翻到。
+
+        路由在 `ps` 不匹配时把 `cursor_data` 置 None 并从第 1 页重搜。若仍把请求携带
+        的原始游标当作 `input_cursor`，partial 终态就会告诉前端"你的翻页位置保住了"，
+        前端据此在**没有搜过的 id 区间**继续翻页 —— 跳件/重复，比丢一页难排查得多。
+        """
+        stale = fetcher.encode_cursor({
+            'type': 'user', 'query': '12345', 'sort': 'date_d', 'tag_mode': 'or',
+            'r18_mode': 'safe', 'min_bookmarks': 0,
+            'pixiv_page': 3, 'skip_count': 0, 'ps': 60,   # 旧步长：必须被丢弃
+            'created_at': int(time.time()),
+        })
+        with patch('app.paginated_search', side_effect=fetcher.SearchRateLimitedError('限流')):
+            resp = client.get(f'/search?type=user&query=12345&cursor={stale}')
+            assert resp.status_code == 200
+            final = _poll_search_status(client, resp.get_json()['task_id'])
+
+        data = final.get_json()
+        assert data['status'] == 'partial'
+        assert data['cursor'] is None, '被丢弃的游标不能回吐（该位置从未被本次任务使用）'
+
+    def test_partial_task_cleaned_up_after_ttl(self, client, monkeypatch):
+        """partial 是终态：过了 TTL 必须和 done/error 一样被清理，否则任务表只增不减。"""
+        with patch('app.search_by_tag', side_effect=fetcher.SearchRateLimitedError('限流')):
+            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+            assert _poll_search_status(client, task_id).get_json()['status'] == 'partial'
+        monkeypatch.setattr('app.SEARCH_TASK_TTL', -1)
+        app._cleanup_search_tasks()
+        assert client.get(f'/api/search/status/{task_id}').status_code == 404
+
+    def test_error_terminal_drops_previews(self, client):
+        """error 终态不得带预览：已发布的预览可能对应随后回滚的行（勘误第 2 条）。"""
+        def fake_search_by_tag(*args, **kwargs):
+            kwargs['progress']({'type': 'result', 'result': {'pixiv_id': 301, 'title': 'x'}})
+            return ([], False)
+
+        def fake_paginated(search_fn, *args, **kwargs):
+            # 先让页内搜索发布一条预览，再让整个任务以错误收尾
+            search_fn(page=1, remaining=ITEMS_PER_PAGE)
+            raise RuntimeError('boom')
+
+        with patch('app.search_by_tag', side_effect=fake_search_by_tag), \
+                patch('app.paginated_search', side_effect=fake_paginated):
+            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+            final = _poll_search_status(client, task_id)
+
+        assert final.status_code == 502
+        data = final.get_json()
+        assert data['results'] == []
+        assert data['complete'] is False
+        assert data['error']
+        # 计数与预览同源：results 清了，accepted 也必须归零，否则前端会在空网格上
+        # 显示"已找到 1 件"（该预览正是被判为不可信才清掉的）
+        assert data['progress'] == _ZERO_PROGRESS, f'实际 progress={data["progress"]}'
+
+    def test_cancelled_terminal_drops_previews(self, client):
+        """被新搜索取代的旧任务不得把预览渲染到新搜索的页面上。"""
+        def fake_search_by_tag(*args, **kwargs):
+            kwargs['progress']({'type': 'result', 'result': {'pixiv_id': 401, 'title': 'x'}})
+            raise fetcher.SearchCancelledError()
+
+        with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+            final = _poll_search_status(client, task_id)
+
+        assert final.status_code == 200
+        data = final.get_json()
+        assert data['status'] == 'cancelled'
+        assert data['results'] == []
+        assert data['progress'] == _ZERO_PROGRESS, \
+            f'取消同样要清计数（幽灵"已找到 N 件"）；实际 progress={data["progress"]}'
+
+    @pytest.mark.parametrize('target,path', [
+        ('search_by_tag', '/search?type=tag&query=test'),
+        ('search_by_user', '/search?type=user&query=12345'),
+        ('browse_discovery', '/search'),
+    ])
+    def test_publisher_goes_to_search_fn_not_paginated_search(self, target, path, client):
+        """publisher 只注入 `search_by_*` / `browse_discovery`。
+
+        `paginated_search` 只看页边界、看不到条目，收下 `progress` 也只能原样丢掉
+        （执行勘误第 1 条：那是"接线通过、测试全绿、端到端零事件"的静默陷阱）。
+        """
+        real_paginated = app.paginated_search
+
+        def spy_paginated(*args, **kwargs):
+            return real_paginated(*args, **kwargs)
+
+        with patch('app.paginated_search', side_effect=spy_paginated) as mock_paginated, \
+                patch(f'app.{target}', return_value=([], False)) as mock_fn:
+            resp = client.get(path)
+            assert _poll_search_status(client, resp.get_json()['task_id']).get_json()['status'] == 'done'
+
+        assert 'progress' not in mock_paginated.call_args.kwargs
+        assert callable(mock_fn.call_args.kwargs['progress'])
+
+    def test_published_preview_is_a_snapshot_owned_by_task(self, client):
+        """任务存的是**副本**，不是调用方持有的那个预览 dict。
+
+        为什么要有这条：预览由 fetcher 用 `to_dict()` 现造后交给 publisher，交付之后
+        调用方（搜索线程/收尾逻辑）仍可能继续改自己那份对象；任务若直接存引用，状态
+        接口就会把这种"事后改动"当成搜索结果报给前端。这里只断言"存的是副本"——
+        浅拷贝即可：嵌套 list 仍共享，fetcher 造完预览就不再动它，故不深究。
+        """
+        published = threading.Event()
+        released = threading.Event()
+        preview = {'pixiv_id': 301, 'title': '原始标题', 'tags': ['tagA'], 'id': None}
+
+        def fake_search_by_tag(*args, **kwargs):
+            kwargs['progress']({'type': 'result', 'result': preview})
+            published.set()
+            assert released.wait(10), '测试未放行 worker'
+            return ([], False)
+
+        try:
+            with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+                task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+                assert published.wait(5), 'worker 应已发布预览'
+
+                # 调用方继续改自己那份 dict：`title` 直接改键值，`tags` 必须**重新赋值**
+                # （浅拷贝下嵌套 list 仍与快照共享，原地 append 会连快照一起改，
+                #   那是另一个层面的事，不在本用例的断言范围内）
+                preview['title'] = '被调用方改过'
+                preview['tags'] = preview['tags'] + ['sentinel']
+
+                data = client.get(f'/api/search/status/{task_id}').get_json()
+        finally:
+            released.set()
+
+        assert data['status'] == 'running'
+        assert [r['pixiv_id'] for r in data['results']] == [301]
+        assert data['results'][0]['title'] == '原始标题', '快照必须与调用方持有的对象解耦'
+        assert 'sentinel' not in data['results'][0]['tags'], 'sentinel 不得出现在预览里'
+
+    def test_route_wiring_publishes_real_progress_end_to_end(self, client, clean_db):
+        """端到端接线：路由 → 真实 `search_by_tag` → 真实 `_process_items` → 真实 publisher。
+
+        为什么不能只靠 `test_publisher_goes_to_search_fn_not_paginated_search`：那条
+        用例把 `search_by_*` 换成 `MagicMock`，只验证"路由传出了一个叫 progress 的关键字"
+        —— 真实搜索函数是否收得下这个形参、事件是否真的走到 publisher、结果是否真的回到
+        响应里，它一概看不见。真实链路里关键字对不上时，`search_by_tag` 抛 `TypeError`
+        并被 `paginated_search` 的宽 `except Exception` 吞掉（变异验证时捕获到的日志：
+        `search_by_tag() got an unexpected keyword argument`），任务照常以 `done` +
+        空结果收尾 —— 用户看到"搜索成功但一件都没有"。本用例把整条链路的**产出**都钉在
+        断言上：真实 examined / result 事件落到快照，响应里是喂进去的那个 pid。
+
+        这里只补丁网络 seam（`fetch_search_illusts` / `_fetch_details_parallel` /
+        `build_pixiv_session`），`app.search_by_tag` 保持真实。
+        """
+        pid = 9101
+
+        def fake_item(pixiv_id: int) -> dict:
+            """列表条目形状（与 `tests/test_fetcher.py::_item` 同款）。"""
+            return {
+                'id': str(pixiv_id), 'title': f't{pixiv_id}', 'userId': 1, 'userName': 'u',
+                'pageCount': 1, 'url': f'https://i.pximg.net/thumb/{pixiv_id}.jpg',
+                'updateDate': '2026-01-01T00:00:00+09:00', 'tags': [{'tag': 'a'}],
+            }
+
+        fake_detail = {
+            'title': f't{pid}', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+            'bookmark_count': 600, 'thumb_url': f'https://x/{pid}.jpg',
+            'upload_date': '2026-01-01T00:00:00+09:00',
+            'original_urls': [f'https://i.pximg.net/{pid}_p0.jpg'], 'tags': ['a'],
+        }
+        batch = fetcher._DetailFetchBatch({pid: fake_detail}, 1)
+
+        def fake_fetch_illusts(session, pixiv_query, **kwargs):
+            # 只第一页有条目：`paginated_search` 会在攒满一页前多问一页，
+            # 空页 + has_more=False 才让它收尾（否则同一 pid 会被重复收集）
+            if kwargs.get('page', 1) == 1:
+                return [fake_item(pid)], 1
+            return [], 1
+
+        # 走**非 defer** 路径（min_bookmarks>0）：详情请求被补丁成常量，
+        # 不会踢后台补全线程，也不会碰真实网络
+        fetcher.clear_search_cache()
+        try:
+            with patch('pixiv_client.fetch_search_illusts', side_effect=fake_fetch_illusts), \
+                    patch('fetcher._fetch_details_parallel', return_value=batch), \
+                    patch('fetcher.build_pixiv_session'):
+                resp = client.get('/search?type=tag&query=e2e-wiring&min_bookmarks=1')
+                assert resp.status_code == 200
+                final = _poll_search_status(client, resp.get_json()['task_id'])
+        finally:
+            fetcher.clear_search_cache()
+
+        assert final.status_code == 200
+        data = final.get_json()
+        assert data['status'] == 'done', f'真实搜索链路应以 done 收尾，实际 {data}'
+        # 进度计数器只能由真实 publisher 累加出来：路由的 progress 形参没接上时为 0
+        #（失败信息里带上整个快照：关键字写错时它的形态正是"done + 空结果 + 零计数"）
+        assert data['progress']['examined'] >= 1, (
+            f'真实 _process_items 的 examined 事件必须落到快照里 —— '
+            f'status={data["status"]} results={data["results"]} progress={data["progress"]}')
+        assert data['progress']['accepted'] >= 1
+        assert [r['pixiv_id'] for r in data['results']] == [pid]
+
+    def test_terminal_branch_failure_is_pinned_to_error(self, client, monkeypatch):
+        """终态分支自身抛异常时，`finally` 兜底必须把任务钉成 error。
+
+        `except` 体里的异常不会被兄弟 `except Exception` 兜住：任务于是停在 `running`
+        且 `finished_at` 已写 —— `_cleanup_search_tasks` 只回收终态，前端会永远轮询一个
+        既不会结束、也不会被清理的任务。
+
+        线程钩子被换成记录器：异常逃出任务线程正是本条用例的前提，顺带避免 pytest 把
+        预期的 traceback 报成 unhandled-thread-exception 警告（那是噪声，不是信号）。
+        """
+        def fake_stats():
+            raise RuntimeError('stats exploded')
+
+        escaped: list[BaseException] = []
+        hooked = threading.Event()
+
+        def hook(args):
+            escaped.append(args.exc_value)
+            hooked.set()
+
+        monkeypatch.setattr(threading, 'excepthook', hook)
+        with patch('app.search_by_tag', side_effect=fetcher.SearchRateLimitedError('限流')), \
+                patch('fetcher.get_last_fetch_stats', side_effect=fake_stats):
+            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+            final = _poll_search_status(client, task_id, timeout=20)
+            assert hooked.wait(5), '终态分支的异常应逃出任务线程（本用例的前提）'
+
+        assert isinstance(escaped[0], RuntimeError)
+        assert final.status_code == 502, '兜底终态是 error（非 auth）'
+        data = final.get_json()
+        assert data['status'] == 'error', '不能停在 running，否则任务永远不会被清理'
+        assert data['complete'] is False
+        assert data['results'] == []
+        assert data['progress'] == _ZERO_PROGRESS
 
 
 class TestRoutes:
