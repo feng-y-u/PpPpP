@@ -29,11 +29,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import math
 import os
 import re
 import threading
 import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -507,6 +511,251 @@ TOTAL_RATE_PER_MINUTE = 60
 _detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
 _fill_limiter = _TokenBucket(FILL_RATE_PER_MINUTE)
 _total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
+
+
+# ── 详情熔断闸（在途上限 + 全局冷却 + 半开探测） ──
+#
+# 为什么需要它：403/429 是"风控已生效"的**全局**信号（实测详情并发 3 即触发 403），
+# 而详情重试是逐条退避（3s/9s）的——多个 worker 各自重试只会把风控喂得更狠：整轮
+# 搜索白烧几十分钟，还留下一批假的"详情失败"。闸把这件事变成进程级事实：开路期间
+# 新请求直接拒绝，冷却到期只放一个探测去验证是否恢复。
+
+# 在途详情 HTTP 上限。限流桶管的是**速率**，管不住"同时挂起几个"——慢响应重叠
+# 本身就是触发 403 的原因之一。这是保守初值，未经实测不得上调。
+_DETAIL_MAX_IN_FLIGHT = 2
+# 连续 403 的判定窗口与"不同作品"个数：单个作品的 R18/权限/地域问题也会回 403。
+_DETAIL_403_WINDOW = 60.0
+_DETAIL_403_DISTINCT_LIMIT = 3
+# 初始冷却（403 触发 / 429 无有效 Retry-After）与指数退避上限（15 分钟）。
+_DETAIL_INITIAL_COOLDOWN = 60.0
+_DETAIL_MAX_COOLDOWN = 900.0
+# 服务器 Retry-After 的**有限**天花板（6 小时）：服务器指示是权威的、不受上面那个
+# 900 秒自派生上限约束，但也必须有个尽头 —— 理由与取舍见 `_open_locked`。
+_DETAIL_MAX_SERVER_COOLDOWN = 6 * 3600.0
+
+
+class PixivRateLimitedError(Exception):
+    """详情请求被全局限流闸拒绝：这条请求不应发出。
+
+    与 `PixivAuthError` 并列但修法相反：认证失效换 Cookie 就好，限流只能等/降速。
+    调用方不得把它降级成 `None`（那等于把"受限"误判成"作品不匹配"），应保留已确认
+    的结果、以可重试的状态收尾。
+    """
+
+
+def _parse_retry_after(value: Any, now: float) -> float | None:
+    """把 `Retry-After` 解析成冷却秒数；无法使用时返回 None，由调用方回退默认冷却。
+
+    支持 HTTP 规范的两种形态：delta-seconds 与 HTTP-date。**本函数必须是全函数**：
+    头部内容完全由外部（Pixiv，或 `PIXIV_BASE_URL` 指向的代理/镜像）决定，解析失败
+    只能是"这个值用不了"，绝不能把异常抛到调用方 —— 那会把一次普通的 429 变成
+    未分类的 `ValueError`，绕过既有的降级路径。
+
+    因此 delta-seconds 按 RFC 7231 只认 ASCII 数字（`1*DIGIT`）：`str.isdigit()` 对
+    上标 `²`、阿拉伯-印度数字 `١٢` 这类 Unicode 字符也为真，交给 `float()` 要么抛
+    `ValueError`，要么被静默当成另一个数（`١٢` → 12 秒），两者都不是服务器写的值。
+    另外拒绝非有限值：`float('9' * 400)` 溢出成 `inf`，那会让冷却变成永久（见
+    `_open_locked` 的钳制）。
+
+    非正数（含 `Retry-After: 0` 与已过去的时间）一律按无效处理 —— 它们等于"不冷却"，
+    真被限流时会让闸形同虚设。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isascii() and text.isdigit():
+        seconds = float(text)
+    else:
+        try:
+            deadline = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if deadline is None:
+            return None
+        if deadline.tzinfo is None:
+            # 规范要求 GMT；缺时区时按 UTC 兜底比当作本地时间更接近意图
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        seconds = deadline.timestamp() - now
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    return seconds
+
+
+class _DetailRequestGate:
+    """详情请求的共享熔断闸：在途上限 + 全局冷却 + 半开探测。
+
+    规则与理由（每条都对应一次实测或踩坑）：
+
+    1. 在途上限 2（`BoundedSemaphore`）。槽位只在真实 HTTP 期间持有，令牌桶等待由
+       调用方在进入本闸**之前**完成——否则排队等令牌的线程会一直占着槽位，实际
+       并发被压到 1，45/分钟的桶反而更用不满。
+    2. HTTP 429 立即开路。服务器已经明确拒绝，再按 3s/9s 逐条重试没有意义。冷却
+       优先取 `Retry-After`（delta-seconds 或 HTTP-date，服务器比我们更清楚要等多久），
+       取不到才回退 60 秒。这里不给 Retry-After 套 900 秒上限：那个上限约束的是
+       我们自己的指数翻倍，不是服务器的明确指示。
+    3. 只有连续 60 秒窗口内 3 个**不同作品**的 403 才开路。只看 403 次数会把
+       "个别作品不可见"误判成全局风控（这类 403 很常见，详见 `_warn_403`）。任何
+       一个非 403 的 HTTP 响应（2xx/401/404/5xx）都说明上游并没有在限流我们，清零
+       连续集合；但这些状态码的**原错误分类不变**，分类由调用方判定，本闸只观察。
+    4. 冷却到期只放**一个**半开探测。全放会立刻回到触发风控的并发，不放则永远无法
+       恢复。探测拿到任何非 403/429 的 HTTP 响应即认为风控解除（复位冷却与失败
+       集合）；探测再次受限说明退避不足，冷却翻倍，封顶 900 秒。
+    5. 状态更新与"读→判定→写"全程同一把锁，锁内不做任何 I/O。否则两个线程会各自
+       读到未计入对方的中间状态——同一个探测名额发两次、403 计数丢一次。
+    """
+
+    def __init__(self, clock=None):
+        """`clock` 是可注入的"当前时间"来源，默认 `time.time`。
+
+        用 `time.time` 而非 `time.monotonic`：`Retry-After` 可能是 HTTP-date，
+        必须与它同一时间基准。注入假时钟后测试不需要真实 sleep。
+        """
+        self._clock = clock or time.time
+        self._lock = threading.Lock()
+        self._sem = threading.BoundedSemaphore(_DETAIL_MAX_IN_FLIGHT)
+        self._open = False
+        self._opened_at = 0.0
+        self._cooldown = _DETAIL_INITIAL_COOLDOWN
+        self._probe_in_flight = False
+        self._probe_pid: int | None = None
+        self._recent_403: list[tuple[float, int]] = []
+
+    @property
+    def is_open(self) -> bool:
+        """熔断闸是否处于开路状态（含冷却到期后的半开探测窗口）。
+
+        半开探测期间仍算开路：那时**只有**那个探测请求可发，其余调用依旧会收到
+        `PixivRateLimitedError`——对调用方而言"闸没关"才是它要的语义。
+        """
+        with self._lock:
+            return self._open
+
+    @contextlib.contextmanager
+    def request_slot(self, pixiv_id: int):
+        """占一个详情在途槽位；闸开路时在**发出请求之前**抛 `PixivRateLimitedError`。
+
+        令牌桶等待由调用方在本 context manager 之前完成（见类 docstring 规则 1）。
+        """
+        admitted_as_probe = False
+        with self._lock:
+            if self._open:
+                now = self._clock()
+                if now - self._opened_at < self._cooldown:
+                    raise PixivRateLimitedError(
+                        f'详情熔断闸开路，剩余冷却 {self._cooldown - (now - self._opened_at):.0f}s'
+                    )
+                if self._probe_in_flight:
+                    raise PixivRateLimitedError('详情熔断闸半开：已有探测在途，不再放行新请求')
+                # 探测名额在锁内预留：两个线程同时等到冷却到期时只能有一个拿到
+                admitted_as_probe = True
+                self._probe_in_flight = True
+                self._probe_pid = pixiv_id
+        self._sem.acquire()
+        try:
+            yield
+        finally:
+            try:
+                if admitted_as_probe:
+                    with self._lock:
+                        # 探测拿到 HTTP 响应时由 observe_response 归还名额；这里兜住
+                        # "根本没拿到响应"的情形（连接错误/超时）——否则名额永远不还，
+                        # 闸会卡在"已半开但无人能探测"的死状态里。
+                        if self._probe_in_flight and self._probe_pid == pixiv_id:
+                            self._probe_in_flight = False
+                            self._probe_pid = None
+            finally:
+                self._sem.release()
+
+    def observe_response(self, pixiv_id: int, status: int, retry_after: Any = None) -> None:
+        """上报一次详情 HTTP 响应的状态码。
+
+        调用点有两条硬约束：
+        1. 在 `raise_for_status()` **之前**（否则先抛异常，判决送不到这里）；
+        2. 仍在 `with gate.request_slot(...)` **内部** —— 判决与它归还的探测名额必须
+           属于同一次持槽。放到 `with` 之后再调用，槽位已还、闸却还开着，成功判决被
+           丢掉且没有任何东西会关闸，直到下一次探测。
+
+        只观察状态码、不改错误分类：401/404/5xx 的原语义仍由调用方判定。
+        探测名额按 pid 归属（接口固定，调用方没有额外令牌可传）：**同一 pid** 的陈旧
+        在途响应（旧探测退出后又被授予的新预约）可能把新预约误清掉，最坏情况下让第二个
+        探测同时进入半开窗口。这里能保证的边界是：总在途数仍由信号量压在 2 以内，冷却
+        只增不减，因此不会越过并发红线 —— 但"半开严格只有一个探测"并非绝对，只是常见
+        情形。
+        """
+        with self._lock:
+            # 时钟必须在锁内读：规则 5 要求"读→判定→写"整体在锁内（request_slot 同）。
+            now = self._clock()
+            if self._probe_in_flight and self._probe_pid == pixiv_id:
+                self._probe_in_flight = False
+                self._probe_pid = None
+                if status in (403, 429):
+                    # 这里只约束**我们自己**推的指数翻倍；服务器给的 Retry-After 由
+                    # _open_locked 的 max() 决定，不受这个上限钳制（见那里的注释）。
+                    cooldown = min(self._cooldown * 2, _DETAIL_MAX_COOLDOWN)
+                    logger.warning(f'详情熔断闸半开探测仍然受限（HTTP {status}），冷却翻倍到 {cooldown:.0f}s')
+                    self._open_locked(now, cooldown)
+                else:
+                    logger.info(f'详情熔断闸半开探测成功（HTTP {status}），熔断复位')
+                    self._close_locked()
+                return
+            if status == 429:
+                cooldown = _parse_retry_after(retry_after, now) or _DETAIL_INITIAL_COOLDOWN
+                self._open_locked(now, cooldown)
+                # 记 `self._cooldown` 而不是服务器原值：钳制（天花板）与"只增不减"之后
+                # 的实际冷却才是排障要看的东西，否则日志会说"开路 86400s"而闸其实
+                # 6 小时后就放探测。
+                logger.warning(f'详情请求收到 HTTP 429，熔断闸开路 {self._cooldown:.0f}s（Retry-After={retry_after!r}）')
+                return
+            if status == 403:
+                self._observe_403_locked(now, pixiv_id)
+                return
+            # 非 403 的 HTTP 响应：上游没有在限流我们，清零连续 403 集合。
+            # 注意这**不**解除已经打开的开路状态：开路是全局事实，只有半开探测才能证明恢复。
+            self._recent_403.clear()
+
+    def _observe_403_locked(self, now: float, pixiv_id: int) -> None:
+        if self._open:
+            # 开路前发出的在途请求陆续返回 403：已经在熔断中，不叠加、也不延长冷却
+            return
+        self._recent_403 = [(t, pid) for t, pid in self._recent_403
+                            if now - t <= _DETAIL_403_WINDOW]
+        if not any(pid == pixiv_id for _, pid in self._recent_403):
+            self._recent_403.append((now, pixiv_id))
+        if len(self._recent_403) >= _DETAIL_403_DISTINCT_LIMIT:
+            logger.warning(
+                f'详情请求 {_DETAIL_403_WINDOW:.0f} 秒内连续 {len(self._recent_403)} 个不同作品返回 403，'
+                f'判定为全局限流/风控，熔断闸开路 {_DETAIL_INITIAL_COOLDOWN:.0f}s'
+            )
+            self._open_locked(now, _DETAIL_INITIAL_COOLDOWN)
+
+    def _open_locked(self, now: float, cooldown: float) -> None:
+        """在锁内开路。冷却只增不减：服务器给的 Retry-After 比当前退避短时不回退。"""
+        # 900 秒上限（_DETAIL_MAX_COOLDOWN）只约束我们自己的指数翻倍（observe_response
+        # 里 self._cooldown * 2），不约束**服务器**给的 Retry-After。
+        # 但服务器的权威性并非无限：畸形/敌意的头部能把冷却推到 `inf`（`'9' * 400`
+        # 这种 400 位数字 `float()` 后就是 inf），而这里 `now - _opened_at < _cooldown`
+        # 一旦恒真，本进程生命周期内就再也不会放行任何探测 —— 详情拉取对搜索、预取与
+        # 后台补全全部死掉，只留一行 WARNING，直到重启。所以用一把**有限**的尺子收口：
+        # 服务器要等 6 小时以上时按 6 小时冷却（比要求更早恢复，但仍有明确尽头），
+        # 而 900 秒那把尺子依旧只管我们自己的翻倍。inf 另在 _parse_retry_after 就被拒。
+        cooldown = min(cooldown, _DETAIL_MAX_SERVER_COOLDOWN)
+        self._cooldown = max(cooldown, self._cooldown if self._open else 0.0)
+        self._open = True
+        self._opened_at = now
+        self._probe_in_flight = False
+        self._probe_pid = None
+        self._recent_403.clear()
+
+    def _close_locked(self) -> None:
+        """在锁内复位：开路状态、连续 403 集合与退避级数一起清零。"""
+        self._open = False
+        self._opened_at = 0.0
+        self._cooldown = _DETAIL_INITIAL_COOLDOWN
+        self._probe_in_flight = False
+        self._probe_pid = None
+        self._recent_403.clear()
 
 
 # ── 详情失败形态与采样 ──
