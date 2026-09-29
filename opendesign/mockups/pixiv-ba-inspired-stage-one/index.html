@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Pixiv Viewer 首批搜索、图库与缓存页面的 Blue Archive 启发式视觉提案；纯静态示意，无官方角色或 Logo。">
+<title>晴空留白 · Pixiv Viewer 三页视觉提案</title>
+<style>
+:root {
+  --sky-page: #f5faff;
+  --sky-wash: #edf8ff;
+  --sky-cyan: #dff3ff;
+  --sky-lavender: #f0effb;
+  --sky-accent: #7bbbd9;
+  --sky-button-text: #1F3E55;
+  --sky-text: #315268;
+  --sky-muted: #4B6678;
+  --sky-line: rgba(153,198,220,.45);
+  --sky-glass: rgba(255,255,255,.66);
+  --sky-control-surface: rgba(255,255,255,.68);
+  --sky-control-surface-soft: rgba(255,255,255,.64);
+  --sky-input-surface: rgba(255,255,255,.8);
+  --sky-control-line: rgba(168,205,223,.52);
+  --sky-chip-line: rgba(175,211,229,.52);
+  --sky-panel-line: rgba(130,184,210,.28);
+  --sky-active: rgba(202,235,249,.68);
+  --sky-surface: #f9fbff;
+  --sky-card: #f6fbff;
+  --radius-control: 8px;
+  --radius-panel: 15px;
+  --radius-card: 18px;
+  --control-hit-area: 44px;
+  --control-face-inset: 4px;
+  --control-font: 10px;
+}
+* { box-sizing:border-box; }
+html,body { margin:0; min-height:100%; }
+body { padding:28px 32px; background:var(--sky-page); color:var(--sky-text); font:15px/1.55 system-ui,'Noto Sans SC',sans-serif; -webkit-font-smoothing:antialiased; }
+.design-preview { width:min(100%,1440px); margin:0 auto; }
+h2 { margin:0 auto 8px; color:var(--sky-text); font-size:22px; line-height:1.3; font-weight:680; }
+.subtitle { margin:0 auto; color:var(--sky-muted); }
+@media(max-width:720px) { body { padding:16px 12px; } h2 { font-size:19px; } }
+  .pl-intro{margin-bottom:1rem}
+  .pl-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;align-items:start}
+  .pl-page{overflow:hidden;border:1px solid var(--sky-panel-line);border-radius:var(--radius-card);background:var(--sky-card);color:var(--sky-text);font:13px/1.5 system-ui,'Noto Sans SC',sans-serif}
+  .pl-nav{min-height:46px;display:flex;align-items:center;justify-content:space-between;gap:6px;padding:0 10px;background:rgba(255,255,255,.7);border-bottom:1px solid rgba(255,255,255,.95);backdrop-filter:blur(11px);-webkit-backdrop-filter:blur(11px)}
+  .pl-brand{display:flex;align-items:center;gap:6px;color:#47758e;font-size:9px;font-weight:700;letter-spacing:.04em;white-space:nowrap}
+  .pl-seal{width:15px;height:15px;border:1px solid #86bfd9;border-radius:50%;position:relative}
+  .pl-seal:after{content:'';position:absolute;inset:4px;border:1px solid rgba(134,191,217,.7);border-radius:50%}
+  .pl-links{display:flex;gap:5px;align-items:center}
+  .pl-links span{min-width:var(--control-hit-area);min-height:var(--control-hit-area);display:inline-flex;align-items:center;justify-content:center;padding:0 4px;color:var(--sky-muted);font-size:9px;white-space:nowrap}
+  .pl-links .active{color:var(--sky-text);font-weight:700;position:relative}
+  .pl-links .active:after{content:'';position:absolute;bottom:5px;left:50%;width:12px;height:2px;border-radius:2px;background:#7ac4e4;transform:translateX(-50%)}
+  .pl-main{min-height:465px;padding:10px 11px 13px;background:linear-gradient(180deg,var(--sky-wash) 0%,var(--sky-page) 37%,var(--sky-surface) 100%)}
+  .pl-ambience{position:relative;min-height:142px;margin:1px 0 9px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:16px;background:linear-gradient(155deg,var(--sky-cyan) 0%,var(--sky-wash) 60%,var(--sky-lavender) 100%)}
+  .pl-ambience:before{content:'';position:absolute;width:115px;height:115px;right:8%;top:-25px;border:1px solid rgba(255,255,255,.75);border-radius:50%;box-shadow:0 0 0 12px rgba(255,255,255,.1)}
+  .pl-ambience:after{content:'';position:absolute;left:0;right:0;bottom:0;height:25px;opacity:.13;background:linear-gradient(0deg,#8dbbd2,#a3cadd)}
+  .pl-cloud{position:absolute;left:10%;top:25px;width:85px;height:24px;border-radius:20px;background:rgba(255,255,255,.65);filter:blur(8px)}
+  .pl-searchbox{position:relative;z-index:1;width:91%;padding:9px 10px;text-align:center;border:1px solid rgba(255,255,255,.88);border-radius:var(--radius-panel);background:var(--sky-glass);backdrop-filter:blur(12px) saturate(130%);-webkit-backdrop-filter:blur(12px) saturate(130%)}
+  .pl-eyebrow{color:var(--sky-muted);font:650 10px system-ui,'Noto Sans SC',sans-serif;letter-spacing:.04em}
+  .pl-title{margin:2px 0;color:#365b73;font-size:16px;font-weight:680}
+  .pl-sub{margin:0 0 6px;color:var(--sky-muted);font-size:9px}
+  .pl-tabs{display:flex;justify-content:center;gap:4px;margin-bottom:5px}
+  .pl-tab{min-height:var(--control-hit-area);position:relative;isolation:isolate;display:inline-flex;align-items:center;padding:0 13px;border-radius:var(--radius-control);color:var(--sky-muted);font-size:var(--control-font)}
+  .pl-tab:before{content:'';position:absolute;z-index:-1;inset:var(--control-face-inset) 0;border-radius:var(--radius-control);background:transparent;pointer-events:none}
+  .pl-tab.active{background:transparent;color:var(--sky-text);font-weight:700}
+  .pl-tab.active:before{background:var(--sky-active)}
+  .pl-searchrow{display:flex;gap:5px}
+  .pl-input{min-height:var(--control-hit-area);position:relative;isolation:isolate;flex:1;min-width:0;display:flex;align-items:center;padding:0 12px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--sky-muted);font-size:var(--control-font);text-align:left}
+  .pl-input:before{content:'';position:absolute;z-index:-1;inset:var(--control-face-inset) 0;border:1px solid var(--sky-line);border-radius:var(--radius-control);background:var(--sky-input-surface);pointer-events:none}
+  .pl-button{min-height:var(--control-hit-area);position:relative;isolation:isolate;display:inline-flex;align-items:center;justify-content:center;padding:0 14px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--sky-button-text);font-size:var(--control-font);font-weight:700;white-space:nowrap}
+  .pl-button:before{content:'';position:absolute;z-index:-1;inset:var(--control-face-inset) 0;border-radius:var(--radius-control);background:var(--sky-accent);pointer-events:none}
+  .pl-tools{display:flex;flex-wrap:wrap;gap:8px;margin:11px 0 13px}
+  .pl-chip{min-height:var(--control-hit-area);position:relative;isolation:isolate;display:inline-flex;align-items:center;padding:0 13px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--sky-muted);font-size:var(--control-font);white-space:nowrap}
+  .pl-chip:before{content:'';position:absolute;z-index:-1;inset:var(--control-face-inset) 0;border:1px solid var(--sky-chip-line);border-radius:var(--radius-control);background:var(--sky-control-surface-soft);pointer-events:none}
+  .pl-pagetitle{margin:10px 0 8px;color:#35556b;font-size:18px;font-weight:700;letter-spacing:.01em}
+  .pl-subheading{margin:-5px 0 10px;color:var(--sky-muted);font-size:9px}
+  .pl-toolbar{display:flex;align-items:center;justify-content:space-between;gap:5px;margin:8px 0;padding:7px 8px;border:1px solid rgba(255,255,255,.8);border-radius:12px;background:rgba(255,255,255,.55);color:var(--sky-muted);font-size:8px;backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px)}
+  .pl-toolbar strong{color:var(--sky-text);font-weight:700}
+  .pl-artgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+  .pl-art{aspect-ratio:1.05/1;position:relative;display:flex;align-items:flex-end;padding:5px;border-radius:10px;background:linear-gradient(145deg,#d9eff8,#e8eafa)}
+  .pl-art:nth-child(2){background:linear-gradient(145deg,#e0eff2,#e7ebfa)}
+  .pl-art:nth-child(3){background:linear-gradient(145deg,#e5eafa,#dbf0f6)}
+  .pl-art:nth-child(4){background:linear-gradient(145deg,#e2eff8,#e8e4f5)}
+  .pl-art span{padding:3px 6px;border-radius:var(--radius-control);background:rgba(255,255,255,.72);color:var(--sky-muted);font:700 8px system-ui,'Noto Sans SC',sans-serif}
+  .pl-arttitle{overflow:hidden;margin:3px 1px 0;color:var(--sky-muted);font-size:7px;text-overflow:ellipsis;white-space:nowrap}
+  .pl-page.gallery .pl-main,.pl-page.cache .pl-main{background:linear-gradient(180deg,var(--sky-wash) 0%,var(--sky-surface) 35%,var(--sky-page) 100%)}
+  .pl-page.gallery .pl-toolbar,.pl-page.cache .pl-toolbar{min-height:var(--control-hit-area)}
+  .pl-sort{min-height:var(--control-hit-area);position:relative;isolation:isolate;display:inline-flex;align-items:center;padding:0 12px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--sky-muted);font-size:var(--control-font);white-space:nowrap}
+  .pl-sort:before{content:'';position:absolute;z-index:-1;inset:var(--control-face-inset) 0;border:1px solid var(--sky-control-line);border-radius:var(--radius-control);background:var(--sky-control-surface);pointer-events:none}
+  .pl-footer{padding:.7rem .9rem .85rem;color:var(--sky-muted);font-size:.77rem}
+  .pl-footer strong{color:var(--sky-text)}
+  @media(max-width:1100px){.pl-board{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main class="design-preview" aria-labelledby="mockup-title">
+<h2 id="mockup-title">阶段一三页布局草图</h2>
+<p class="subtitle pl-intro">沿用你已确认的晴空留白基调。搜索页首屏加入极淡校园/室内氛围衬底；图库、缓存不铺场景图。筛选、排序、搜索类型、输入框和按钮的可见面缩至约36px，透明点击区域保持44px，外形为8px常规圆角矩形；卡片与图片仍保持轻、干净。</p>
+
+<div class="pl-board">
+  <article class="pl-page search">
+    <header class="pl-nav"><div class="pl-brand"><i class="pl-seal"></i><span>作品档案</span></div><nav class="pl-links"><span class="active">搜索</span><span>图库</span><span>缓存</span></nav></header>
+    <div class="pl-main">
+      <section class="pl-ambience"><span class="pl-cloud"></span><div class="pl-searchbox"><div class="pl-eyebrow">插画搜索</div><h3 class="pl-title">探索作品</h3><p class="pl-sub">晴空感只作衬底，搜索和作品更突出。</p><div class="pl-tabs"><span class="pl-tab active">标签</span><span class="pl-tab">画师</span><span class="pl-tab">发现</span></div><div class="pl-searchrow"><div class="pl-input">输入标签或作品关键词</div><span class="pl-button">搜索</span></div></div></section>
+      <div class="pl-tools"><span class="pl-chip">收藏 ≥ 0</span><span class="pl-chip">日期倒序</span><span class="pl-chip">全部标签</span><span class="pl-chip">R-18 安全</span></div>
+      <div class="pl-toolbar"><span><strong>24</strong> 件作品</span><span>排序　·　全部下载</span></div>
+      <div class="pl-artgrid"><div><div class="pl-art"><span>作品图占位 01</span></div><div class="pl-arttitle">蓝色午后 · illustration</div></div><div><div class="pl-art"><span>作品图占位 02</span></div><div class="pl-arttitle">窗边的光 · illustration</div></div><div><div class="pl-art"><span>作品图占位 03</span></div><div class="pl-arttitle">晴空下的日常</div></div><div><div class="pl-art"><span>作品图占位 04</span></div><div class="pl-arttitle">午后时光</div></div></div>
+    </div>
+    <div class="pl-footer"><strong>搜索页</strong>　唯一使用极淡环境衬底。</div>
+  </article>
+
+  <article class="pl-page gallery">
+    <header class="pl-nav"><div class="pl-brand"><i class="pl-seal"></i><span>作品档案</span></div><nav class="pl-links"><span>搜索</span><span class="active">图库</span><span>缓存</span></nav></header>
+    <div class="pl-main">
+      <h3 class="pl-pagetitle">我的图库</h3><p class="pl-subheading">收藏与下载作品，轻松整理。</p>
+      <div class="pl-toolbar"><span>收藏夹：<strong>全部作品</strong></span><span class="pl-sort">排序：下载时间　⌄</span></div>
+      <div class="pl-tools"><span class="pl-chip">标签筛选</span><span class="pl-chip">插画</span><span class="pl-chip">原创</span><span class="pl-chip">+ 添加标签</span></div>
+      <div class="pl-toolbar"><span><strong>124</strong> 件 · 已选择 0</span><span>全选　·　管理</span></div>
+      <div class="pl-artgrid"><div><div class="pl-art"><span>作品图占位 01</span></div><div class="pl-arttitle">蓝色午后 · illustration</div></div><div><div class="pl-art"><span>作品图占位 02</span></div><div class="pl-arttitle">窗边的光 · illustration</div></div><div><div class="pl-art"><span>作品图占位 03</span></div><div class="pl-arttitle">晴空下的日常</div></div><div><div class="pl-art"><span>作品图占位 04</span></div><div class="pl-arttitle">午后时光</div></div></div>
+    </div>
+    <div class="pl-footer"><strong>图库页</strong>　保持原有排序、标签与批量操作，只调整视觉层级。</div>
+  </article>
+
+  <article class="pl-page cache">
+    <header class="pl-nav"><div class="pl-brand"><i class="pl-seal"></i><span>作品档案</span></div><nav class="pl-links"><span>搜索</span><span>图库</span><span class="active">缓存</span></nav></header>
+    <div class="pl-main">
+      <h3 class="pl-pagetitle">预取缓存</h3><p class="pl-subheading">浏览已准备好的作品，随时发现新内容。</p>
+      <div class="pl-toolbar"><span class="pl-sort">标签：全部　⌄</span><span class="pl-sort">收藏 ≥ 0　⌄</span></div>
+      <div class="pl-tools"><span class="pl-chip">最新排序</span><span class="pl-chip">R-18 安全</span><span class="pl-chip">过滤已下载</span><span class="pl-chip">浏览</span><span class="pl-chip">刷新</span></div>
+      <div class="pl-toolbar"><span>缓存状态　·　<strong>最近更新</strong></span><span>共 860 件</span></div>
+      <div class="pl-artgrid"><div><div class="pl-art"><span>作品图占位 01</span></div><div class="pl-arttitle">蓝色午后 · illustration</div></div><div><div class="pl-art"><span>作品图占位 02</span></div><div class="pl-arttitle">窗边的光 · illustration</div></div><div><div class="pl-art"><span>作品图占位 03</span></div><div class="pl-arttitle">晴空下的日常</div></div><div><div class="pl-art"><span>作品图占位 04</span></div><div class="pl-arttitle">午后时光</div></div></div>
+    </div>
+    <div class="pl-footer"><strong>缓存页</strong>　不铺场景背景，筛选信息轻量化。</div>
+  </article>
+</div>
+
+<p class="subtitle" style="margin:1rem 0 0;font-size:.82rem;">这只是页面层级示意：保留现有搜索、收藏、排序、过滤、刷新与批量操作语义，不新增业务功能。</p>
+</main>
+</body>
+</html>

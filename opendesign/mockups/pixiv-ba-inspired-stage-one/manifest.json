@@ -1,0 +1,12 @@
+{
+  "title": "Pixiv Viewer：Blue Archive 启发式三页视觉提案",
+  "description": "阶段一搜索、图库与缓存页面的静态视觉稿。采用晴空留白、搜索页首屏极淡校园氛围、低饱和蓝白/浅青/淡紫、轻玻璃工具层与内容优先；无官方角色或 Logo，不改变业务功能。作品与环境均为明确占位示意。",
+  "design": {
+    "style": "晴空留白 / 校园轻科幻 / 内容优先 / 克制轻玻璃",
+    "font": "system-ui + Noto Sans SC",
+    "accent": "#7BBBD9 浅天蓝",
+    "background": "#F5FAFF 晴空白；搜索页首屏用浅青/淡紫低对比氛围"
+  },
+  "file": "index.html",
+  "status": "ready"
+}
