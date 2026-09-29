@@ -543,6 +543,27 @@ class PixivRateLimitedError(Exception):
     """
 
 
+# 外部文本（响应头部、API message）进日志前的长度上限。这些内容完全由外部（Pixiv，
+# 或 `PIXIV_BASE_URL` 指向的代理/镜像）决定：换行与控制字符能凭空伪造日志行，超长值
+# 能把日志刷爆。上限只约束**日志里怎么显示**，不参与任何判定（冷却计算走
+# `_parse_retry_after`，报错报文另由 `_record_detail_error` 按 200 字符采样）。
+_HEADER_LOG_LIMIT = 40
+
+
+def _log_safe_header(value: Any) -> str:
+    """把外部文本（响应头部或 API message）裁成一行可安全写日志的短文本。
+
+    不可打印字符替换为 `·`（换行即在此被消掉），超长值截断并标注省略了多少字符。
+    """
+    if value is None:
+        return '(无)'
+    text = str(value)
+    cleaned = ''.join(ch if ch.isprintable() else '·' for ch in text)
+    if len(cleaned) > _HEADER_LOG_LIMIT:
+        cleaned = cleaned[:_HEADER_LOG_LIMIT] + f'…(+{len(cleaned) - _HEADER_LOG_LIMIT})'
+    return cleaned
+
+
 def _parse_retry_after(value: Any, now: float) -> float | None:
     """把 `Retry-After` 解析成冷却秒数；无法使用时返回 None，由调用方回退默认冷却。
 
@@ -591,10 +612,19 @@ class _DetailRequestGate:
     1. 在途上限 2（`BoundedSemaphore`）。槽位只在真实 HTTP 期间持有，令牌桶等待由
        调用方在进入本闸**之前**完成——否则排队等令牌的线程会一直占着槽位，实际
        并发被压到 1，45/分钟的桶反而更用不满。
-    2. HTTP 429 立即开路。服务器已经明确拒绝，再按 3s/9s 逐条重试没有意义。冷却
+    2. HTTP 429 立即开路。服务器已经明确拒绝，等待后再逐条重试没有意义。冷却
        优先取 `Retry-After`（delta-seconds 或 HTTP-date，服务器比我们更清楚要等多久），
        取不到才回退 60 秒。这里不给 Retry-After 套 900 秒上限：那个上限约束的是
        我们自己的指数翻倍，不是服务器的明确指示。
+       **默认配置下这条分支收不到 429**：适配层的 `Retry(status_forcelist=[429, ...])`
+       在 urllib3 里就把 429 拦下重试，耗尽后 requests 抛出**不带 `.response` 的**
+       `RetryError`，`fetch_illust_detail` 拿不到响应对象、也就无从在这里上报。
+       于是真实 429 被应用层归入"其他"→ 1s，`Retry-After` 由传输层自己睡掉
+       （睡在闸槽位内 —— 已知遗留，见「重试策略」的 62s 放大说明）。所以默认
+       配置下**真正触发开路的限流信号是 403**；429 分支只在 `PIXIV_BASE_URL` 为
+       `http://`（适配器只 `mount('https://', ...)`，http 走默认适配器
+       `max_retries=0`）或将来改 `status_forcelist` 时才会被走到 —— 那是安全网，
+       不是死代码。
     3. 只有连续 60 秒窗口内 3 个**不同作品**的 403 才开路。只看 403 次数会把
        "个别作品不可见"误判成全局风控（这类 403 很常见，详见 `_warn_403`）。任何
        一个非 403 的 HTTP 响应（2xx/401/404/5xx）都说明上游并没有在限流我们，清零
@@ -706,7 +736,9 @@ class _DetailRequestGate:
                 # 记 `self._cooldown` 而不是服务器原值：钳制（天花板）与"只增不减"之后
                 # 的实际冷却才是排障要看的东西，否则日志会说"开路 86400s"而闸其实
                 # 6 小时后就放探测。
-                logger.warning(f'详情请求收到 HTTP 429，熔断闸开路 {self._cooldown:.0f}s（Retry-After={retry_after!r}）')
+                logger.warning(
+                    f'详情请求收到 HTTP 429，熔断闸开路 {self._cooldown:.0f}s'
+                    f'（Retry-After={_log_safe_header(retry_after)}）')
                 return
             if status == 403:
                 self._observe_403_locked(now, pixiv_id)
@@ -756,6 +788,13 @@ class _DetailRequestGate:
         self._probe_in_flight = False
         self._probe_pid = None
         self._recent_403.clear()
+
+
+# 详情熔断闸的**进程级单例**：搜索、预取与后台补全共用这一条。
+# 为什么必须是单例：限流是账户级的全局事实，"各调用点各自一个闸"等于没有熔断 ——
+# 每个调用点都会认为自己没被限流而继续发请求。有状态，所以补丁/读取一律对
+# `pixiv_client`（见 docs/architecture.md「有状态符号只在 pixiv_client」表）。
+_detail_gate = _DetailRequestGate()
 
 
 # ── 详情失败形态与采样 ──
@@ -815,36 +854,96 @@ _is_permanently_removed_message = is_permanently_removed_message
 
 # ── 请求：一个端点一个函数 ──
 
+def _observe_detail_response(resp: Any, pixiv_id: int) -> None:
+    """把一次**真实 HTTP 响应**的状态码与 `Retry-After` 交给熔断闸。
+
+    必须在 `raise_for_status()` **之前**、且仍在 `gate.request_slot()` 内部调用
+    （见 `_DetailRequestGate.observe_response` 的两条硬约束）。头部只在这里读取：
+    响应头完全由外部决定，解析与钳制全在闸内（`_parse_retry_after`），本函数不得
+    因为畸形头部抛异常 —— 那会把一次普通的 429 变成未分类错误。
+    连接错误/超时不会有响应对象，走不到这里（闸的槽位与探测名额由 context manager
+    的 finally 兜住）。
+    """
+    status = getattr(resp, 'status_code', None)
+    if not isinstance(status, int):
+        return
+    headers = getattr(resp, 'headers', None)
+    retry_after = headers.get('Retry-After') if headers is not None else None
+    _detail_gate.observe_response(pixiv_id, status, retry_after)
+
+
+def _gate_refusal(return_dead: bool, pixiv_id: int, reason: str) -> object:
+    """熔断闸拒绝放行时的统一出口。
+
+    刷新路径（`return_dead=True`）要的是"全局暂时失败"哨兵：它既不能被当成该作品的
+    永久失败写进退避标记，也不能让异常冒泡（冒泡会跳过 `_prefetch_loop` 的容量清理）。
+    其余调用方（搜索 / 后台补全）必须抛出：降级成 `None` 会被 `_process_items` 当成
+    "这件作品详情失败"，限流就这样被静默吞掉、`partial` 语义随之失效。
+    """
+    if return_dead:
+        logger.warning(f'详情请求 {pixiv_id} 被熔断闸拒绝（{reason}），按全局暂时失败处理')
+        return RETRYABLE_GLOBAL_DETAIL
+    raise PixivRateLimitedError(f'详情请求 {pixiv_id} 被熔断闸拒绝：{reason}')
+
+
 def fetch_illust_detail(session: requests.Session, pixiv_id: int,
                         limiter: _TokenBucket | None = None,
                         return_dead: bool = False) -> dict | None | object:
     """拉取单条作品详情（`/ajax/illust/<pid>`），返回规范化字段。
 
     return_dead=True 时区分两类失败：永久死亡（404 / 删除类报错）→ `DEAD_DETAIL`，
-    全局性暂时失败（403/429 重试耗尽、连接错误）→ `RETRYABLE_GLOBAL_DETAIL`；
-    其余调用方（不传该参数）保持收到 None 的旧语义。
+    全局性暂时失败（403/429 重试耗尽、连接错误、被熔断闸拒绝）→ `RETRYABLE_GLOBAL_DETAIL`；
+    其余调用方（不传该参数）保持收到 None 的旧语义，但**被熔断闸拒绝时会抛
+    `PixivRateLimitedError`** —— 那是"上游正在限流、这条请求根本没发出"，与"作品不匹配"
+    是两件事，降级成 None 会让调用方把它当成永久失败。
     404 不再按一般错误重试：资源已不存在，重试是纯浪费。
+
+    每次真实 attempt（含 403 的退避重试；429 默认在传输层就被拦下，见循环内注释）
+    都**重新**取 detail/fill 桶与总桶的令牌，再进熔断闸占槽位。次序是硬约束：令牌桶
+    等待必须在占槽位之前 —— 否则排队等令牌的线程会一直占着在途槽位，实际并发被压到
+    1，45/分钟的桶反而更用不满。
+    响应状态码与 `Retry-After` 在 `raise_for_status()` 之前上报给闸；闸一旦开路，
+    逐条 3/9 秒重试立即作废（开路期间重试只会被拒，空等没有意义）。
     """
     url = endpoint_illust_detail(pixiv_id)
-    (limiter or _detail_limiter).wait()
-    _total_limiter.wait()
+    detail_limiter = limiter or _detail_limiter
     last_status = None
     for attempt in range(DETAIL_MAX_RETRIES + 1):
+        if attempt:
+            if _detail_gate.is_open:
+                # 开路是全局事实，不是这个作品的问题；冷却到期后由新调用去半开探测。
+                return _gate_refusal(return_dead, pixiv_id, '熔断闸开路，不再逐条退避重试')
+            # 增退避只对**到达应用层**的限流有意义：默认配置下那是 403（并发过高时
+            # Pixiv 返回的状态码）。429 在传输层就被 `Retry(status_forcelist=[429, ...])`
+            # 拦下 —— urllib3 重试耗尽后 requests 抛**不带 `.response` 的 `RetryError`**，
+            # 下面只能按 last_status=None 归入"其他"（1s），闸也收不到那个 429。
+            # 元组里留着 429 是给 `PIXIV_BASE_URL=http://` 的镜像（适配器只挂 https://）：
+            # 那时 429 会到达闸并当场开路，下一次 attempt 在闸前就被拒，3s/9s 同样轮不到它。
+            time.sleep((3 * (3 ** (attempt - 1))) if last_status in (403, 429) else 1)
+        detail_limiter.wait()
+        _total_limiter.wait()
         try:
-            resp = session.get(url, timeout=DETAIL_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get('error'):
-                msg = str(data.get('message', ''))
-                if is_auth_error(msg):
-                    raise PixivAuthError(msg)
-                if is_permanently_removed_message(msg):
-                    logger.warning(f'Detail API 永久失败（已删除/非公開）{pixiv_id}: {msg}')
-                    return DEAD_DETAIL if return_dead else None
-                _record_detail_error(msg)
-                logger.warning(f'Detail API error for {pixiv_id}: {msg}')
-                return None
-            return parse_illust_detail(data['body'])
+            with _detail_gate.request_slot(pixiv_id):
+                resp = session.get(url, timeout=DETAIL_TIMEOUT)
+                _observe_detail_response(resp, pixiv_id)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get('error'):
+                    msg = str(data.get('message', ''))
+                    if is_auth_error(msg):
+                        raise PixivAuthError(msg)
+                    if is_permanently_removed_message(msg):
+                        logger.warning(
+                            f'Detail API 永久失败（已删除/非公開）{pixiv_id}: {_log_safe_header(msg)}')
+                        return DEAD_DETAIL if return_dead else None
+                    _record_detail_error(msg)
+                    logger.warning(f'Detail API error for {pixiv_id}: {_log_safe_header(msg)}')
+                    return None
+                return parse_illust_detail(data['body'])
+        except PixivRateLimitedError as e:
+            # 闸在**发出请求之前**拒绝（request_slot 抛出）：这条请求没发出，
+            # 因此不算"这件作品详情失败"。
+            return _gate_refusal(return_dead, pixiv_id, str(e))
         except requests.ConnectionError as e:
             # 连接建立失败（超时 / 拒绝 / DNS / 代理）：重试几乎必然重复失败，
             # 且每次都要空等满 DETAIL_TIMEOUT 的连接超时，3 次就是 30s+ 的
@@ -864,9 +963,6 @@ def fetch_illust_detail(session: requests.Session, pixiv_id: int,
                 logger.warning(f'Detail API 404（作品不存在/已删除）{pixiv_id}')
                 return DEAD_DETAIL if return_dead else None
             logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
-            if attempt < DETAIL_MAX_RETRIES:
-                # 429/403 均为 Pixiv 限流（并发过高时返回 403），递增退避（3s/9s）
-                time.sleep((3 * (3 ** attempt)) if status in (403, 429) else 1)
     # 重试耗尽：限流类失败是全局状态（不是该作品的问题），刷新路径据此熔断
     if return_dead and last_status in (403, 429):
         return RETRYABLE_GLOBAL_DETAIL
@@ -877,8 +973,15 @@ def fetch_original_urls(session: requests.Session, pixiv_id: int) -> list[str]:
     """按需拉详情、只取原图地址（详情页惰性补全用）。
 
     地址合法性不在这里判定：调用方仍走 `helpers.check_image_url` + 白名单分级。
+    被熔断闸拒绝时按"没拉到"返回空列表（不是抛出去）：本函数的契约是列表，调用方
+    （详情页 / 下载入口）本来就把空列表当"暂时取不到原图"降级 —— 抛出去会变成下载
+    入口的 HTTP 500，而"正在被限流"并不是"该作品不能下载"。
     """
-    detail = fetch_illust_detail(session, pixiv_id)
+    try:
+        detail = fetch_illust_detail(session, pixiv_id)
+    except PixivRateLimitedError as e:
+        logger.warning(f'详情请求被熔断闸拒绝，本次不取原图 {pixiv_id}: {e}')
+        return []
     return detail.get('original_urls', []) if detail else []
 
 

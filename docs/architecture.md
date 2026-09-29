@@ -76,6 +76,7 @@ pixiv_client / config / runtime（叶子）→ helpers → middleware → backgr
 |---|---|
 | `COOKIE_PATH`、`_cookie_value`、`_cookie_mtime`、`_load_cookie` | Cookie 缓存与建 session 必须同处一个模块，否则"设置页写盘后同步内存态"与"mtime 变了就重建连接池"会跨模块断裂 |
 | `_total_limiter`、`_detail_limiter`、`_fill_limiter` | 桶的**状态**归适配层；再导出一份会让 `monkeypatch.setattr(fetcher, '_total_limiter', ...)` 静默失效（补丁打了但不生效） |
+| `_detail_gate`（详情熔断闸的进程级单例） | 闸的**状态**（开路 / 冷却 / 半开探测名额）归适配层，且搜索、预取、后台补全必须共用**同一实例**：各持一份等于没有熔断（每个调用点都以为自己没被限流）。测试要注入假时钟就替换这个符号，别改它的内部状态 |
 | `_detail_error_samples`、`PROXY`、`SSL_VERIFY` | 同上：补丁必须打在真正读它的模块上 |
 
 `tests/test_pixiv_contract.py` + `tests/fixtures/pixiv/` 是这套契约的**离线回归网**（端点 URL 形状 /

@@ -5,8 +5,14 @@
 所以这里注入假时钟推进冷却（不做真实的 60 秒等待），只看公开行为
 （`request_slot` / `observe_response` / `is_open`）。
 
-本文件不发任何网络请求、不读 `cookies.txt`：闸尚未接入 `fetch_illust_detail`
-（接入由后续任务完成），这里没有需要临时 Cookie 文件的调用路径。
+本文件不发任何网络请求、也不读 `cookies.txt`：闸自身的用例只调它的公开方法，
+接入层用例（`TestFetchIllustDetailGateIntegration`）用的是按脚本返回响应的 Fake
+Session，两者都不需要临时 Cookie 文件，也不会碰到真实连接池。
+
+**闸是有状态的，所以真实单例只读**：`_isolated_detail_gate` 这条 autouse fixture 给
+每个用例换一条全新的闸，任何会改变闸状态的用例都打在替换实例上。否则某个用例把
+导入期的真实单例开到 60 秒冷却后，后续用例的 `fetch_illust_detail` 会直接收到
+`PixivRateLimitedError` —— 红灯与自身断言毫无关系，顺序一变又"自己好了"。
 
 **为什么每个 `request_slot` 调用都要绕一层工作线程**：`request_slot` 内部的
 `Semaphore.acquire()` **没有超时**，槽位一旦泄漏（例如 `finally` 里的 `release()`
@@ -17,12 +23,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import math
 import sys
 import threading
 from email.utils import formatdate
+from unittest.mock import patch
 
 import pytest
+import requests
 
 import pixiv_client
 
@@ -624,3 +634,281 @@ def test_detail_rate_constants_are_not_raised():
     assert pixiv_client.DETAIL_RATE_PER_MINUTE == 45
     assert pixiv_client.FILL_RATE_PER_MINUTE == 20
     assert pixiv_client.TOTAL_RATE_PER_MINUTE == 60
+
+
+# ── 闸接入 `fetch_illust_detail` 的接线语义 ──
+#
+# 上面全是闸自身的规则；这一节按**调用顺序**验证接线：每次真实 attempt（含 403/429
+# 退避重试）都先取 detail/fill 桶与总桶的令牌，再进闸占槽位，最后才发 HTTP。
+# 另外钉住"闸拒绝"与既有的四类错误分类不互相污染。
+
+# 导入期的真实单例：谁都不许改它的状态（见 `_isolated_detail_gate`）。留成模块常量
+# 就能在**任何执行顺序**下断言它没被污染，而不是只能靠"用例恰好排在前面"。
+_IMPORT_TIME_DETAIL_GATE = pixiv_client._detail_gate
+
+
+@pytest.fixture(autouse=True)
+def _isolated_detail_gate(monkeypatch):
+    """每个用例一条全新的闸，替换 `pixiv_client._detail_gate`。
+
+    闸的状态（开路 / 冷却 / 半开探测名额）是进程级的，用真实单例做用例会让
+    用例之间通过它传递状态。替换成新实例后，`monkeypatch` 收尾把模块属性还原成
+    **导入期那个对象**（它从未被本文件的用例碰过）。
+    """
+    monkeypatch.setattr(pixiv_client, '_detail_gate', pixiv_client._DetailRequestGate())
+
+
+class _NoWaitLimiter:
+    """令牌桶替身：不倒计时；传了 `events` 就记录一次 wait()（用于次序断言）。"""
+
+    def __init__(self, events=None, name='detail'):
+        self._events = events
+        self._name = name
+
+    def wait(self):
+        if self._events is not None:
+            self._events.append(self._name)
+
+
+class _RecordingGate(pixiv_client._DetailRequestGate):
+    """把 `request_slot` 也记进同一张事件表，用来钉"取令牌在前、占槽位在后"。"""
+
+    def __init__(self, events, **kwargs):
+        super().__init__(**kwargs)
+        self._events = events
+
+    @contextlib.contextmanager
+    def request_slot(self, pixiv_id):
+        self._events.append('gate')
+        with super().request_slot(pixiv_id):
+            yield
+
+
+class _FakeResponse:
+    """最小的响应替身：只要状态码 / 头部 / json / raise_for_status 四个面。"""
+
+    def __init__(self, status=200, headers=None, payload=None):
+        self.status_code = status
+        self.headers = dict(headers or {})
+        self._payload = payload if payload is not None else {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f'HTTP {self.status_code}', response=self)
+
+    def json(self):
+        return self._payload
+
+
+class _ScriptedSession:
+    """按脚本返回响应；脚本用尽后再被调用即断言失败（"不该发出的请求"）。"""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        if not self._responses:
+            raise AssertionError(f'不该发出第 {self.calls} 次 HTTP 请求')
+        item = self._responses.pop(0)
+        if isinstance(item, _FakeResponse):
+            return item
+        if isinstance(item, dict):
+            return _FakeResponse(**item)
+        return _FakeResponse(status=item)
+
+
+def _scripted_429(retry_after=None):
+    headers = {} if retry_after is None else {'Retry-After': retry_after}
+    return {'status': 429, 'headers': headers}
+
+
+class TestFetchIllustDetailGateIntegration:
+    def test_every_attempt_takes_tokens_before_gate(self, monkeypatch):
+        """含退避重试在内的每次真实 attempt 都走「detail 桶 → 总桶 → 闸」这个次序。"""
+        events = []
+        gate = _RecordingGate(events)
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter(events, 'total'))
+        attempts = pixiv_client.DETAIL_MAX_RETRIES + 1
+        session = _ScriptedSession([403] * attempts)
+
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            result = pixiv_client.fetch_illust_detail(
+                session, 511, limiter=_NoWaitLimiter(events, 'detail'))
+
+        assert result is None, '403 重试耗尽的旧语义不变（非 return_dead 返回 None）'
+        assert session.calls == attempts, '403 仍按 3s/9s 退避重试'
+        assert mock_sleep.call_count == attempts - 1
+        assert events == ['detail', 'total', 'gate'] * attempts, \
+            '每次 attempt 都必须先取两级令牌、再占槽位（否则排队等令牌会占着在途槽位）'
+        assert not gate.is_open, '同一作品重复 403 不算全局风控'
+
+    def test_401_raises_auth_error_and_leaves_gate_closed(self, monkeypatch):
+        gate = pixiv_client._DetailRequestGate(clock=FakeClock())
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        session = _ScriptedSession([401, 401, 401])
+
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            with pytest.raises(pixiv_client.PixivAuthError):
+                pixiv_client.fetch_illust_detail(session, 521, limiter=_NoWaitLimiter())
+
+        assert session.calls == 1
+        mock_sleep.assert_not_called()
+        assert not gate.is_open, '认证失效不是限流信号，不得开路'
+
+    def test_404_keeps_permanent_semantics_without_retry(self, monkeypatch):
+        gate = pixiv_client._DetailRequestGate(clock=FakeClock())
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        session = _ScriptedSession([404, 404])
+
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            assert pixiv_client.fetch_illust_detail(
+                session, 531, limiter=_NoWaitLimiter()) is None
+            assert pixiv_client.fetch_illust_detail(
+                session, 531, limiter=_NoWaitLimiter(),
+                return_dead=True) is pixiv_client.DEAD_DETAIL
+
+        assert session.calls == 2
+        mock_sleep.assert_not_called()
+        assert not gate.is_open
+
+    def test_connection_error_fails_fast_and_releases_slot(self, monkeypatch):
+        """连接错误立即返回且**归还槽位**：泄漏会让闸卡在信号量上，之后再也放行不了。"""
+        gate = pixiv_client._DetailRequestGate(clock=FakeClock())
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+
+        class _ConnectFailSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                raise requests.ConnectionError('connect timeout')
+
+        session = _ConnectFailSession()
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            assert pixiv_client.fetch_illust_detail(
+                session, 541, limiter=_NoWaitLimiter()) is None
+
+        assert session.calls == 1
+        mock_sleep.assert_not_called()
+        assert not gate.is_open
+        _assert_slot_admitted(gate, 542)
+
+    def test_observed_429_opens_gate_and_suppresses_further_attempts(self, monkeypatch):
+        """429 响应立即开路：本条的 3/9 秒重试一并作废，且下一次调用连 HTTP 都不发。"""
+        clock = FakeClock()
+        gate = pixiv_client._DetailRequestGate(clock=clock)
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        session = _ScriptedSession([_scripted_429(), _scripted_429()])
+
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            with pytest.raises(pixiv_client.PixivRateLimitedError):
+                pixiv_client.fetch_illust_detail(session, 551, limiter=_NoWaitLimiter())
+
+        assert session.calls == 1, '429 已开路，不得再发逐条 3/9 秒限流重试'
+        mock_sleep.assert_not_called()
+        assert gate.is_open
+
+        with pytest.raises(pixiv_client.PixivRateLimitedError):
+            pixiv_client.fetch_illust_detail(session, 552, limiter=_NoWaitLimiter())
+        assert session.calls == 1, '开路期间的下一次调用必须在发出 HTTP 之前被拒'
+
+    def test_three_distinct_403_open_gate_and_next_call_refused_before_http(self, monkeypatch):
+        clock = FakeClock()
+        gate = pixiv_client._DetailRequestGate(clock=clock)
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        session = _ScriptedSession([403] * 8)
+
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            assert pixiv_client.fetch_illust_detail(
+                session, 561, limiter=_NoWaitLimiter()) is None
+            assert pixiv_client.fetch_illust_detail(
+                session, 562, limiter=_NoWaitLimiter()) is None
+            assert not gate.is_open, '2 个不同作品的 403 还不足以判定全局风控'
+            # 第 3 个不同作品的第一发 403 打开闸；它的退避重试当场被拒
+            with pytest.raises(pixiv_client.PixivRateLimitedError):
+                pixiv_client.fetch_illust_detail(session, 563, limiter=_NoWaitLimiter())
+
+        assert session.calls == 7, '3+3 次重试 + 第 3 个作品的第一发 403'
+        # 开路的第 3 个作品**一次退避都不该睡**（2+2+0）：`is_open` 短路若被去掉，
+        # 这次被拒的重试会先白睡 3 秒（还白取两级令牌），而 session.calls 仍是 7
+        # —— 只看 calls 抓不到这个回归。
+        assert mock_sleep.call_count == 4, '开路后不得再为被拒的 attempt 睡觉'
+        assert gate.is_open
+
+        calls_before = session.calls
+        with pytest.raises(pixiv_client.PixivRateLimitedError):
+            pixiv_client.fetch_illust_detail(session, 564, limiter=_NoWaitLimiter())
+        assert session.calls == calls_before, '开路后的下一次调用必须在发出 HTTP 之前被拒'
+
+    def test_open_gate_maps_to_retryable_global_for_refresh_path(self, monkeypatch):
+        """刷新路径（return_dead=True）拿到的必须是全局暂时失败哨兵，而不是单作品失败。"""
+        gate = pixiv_client._DetailRequestGate(clock=FakeClock())
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        _open_via_three_distinct_403(gate)
+
+        session = _ScriptedSession([])
+        with patch('pixiv_client.time.sleep') as mock_sleep:
+            result = pixiv_client.fetch_illust_detail(
+                session, 571, limiter=_NoWaitLimiter(), return_dead=True)
+
+        assert result is pixiv_client.RETRYABLE_GLOBAL_DETAIL
+        assert result is not pixiv_client.DEAD_DETAIL, '限流不是"该作品已删除"，不得写退避标记'
+        assert session.calls == 0
+        mock_sleep.assert_not_called()
+
+    def test_fetch_original_urls_returns_empty_when_gate_refused(self, monkeypatch):
+        """详情页/下载入口的惰性取原图保持"拿不到就空列表"的降级语义（不许 500）。"""
+        gate = pixiv_client._DetailRequestGate(clock=FakeClock())
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        _open_via_three_distinct_403(gate)
+
+        session = _ScriptedSession([])
+        assert pixiv_client.fetch_original_urls(session, 581) == []
+        assert session.calls == 0
+
+    def test_hostile_retry_after_is_truncated_in_log(self, monkeypatch, caplog):
+        """外部 Retry-After 只能以截断后的形态进日志：换行能伪造日志行，超长能刷屏。"""
+        gate = pixiv_client._DetailRequestGate(clock=FakeClock())
+        monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+        monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
+        hostile = 'A' * 500 + '\n伪造日志行'
+        session = _ScriptedSession([_scripted_429(retry_after=hostile)])
+
+        with patch('pixiv_client.time.sleep'):
+            with caplog.at_level(logging.WARNING, logger='pixiv_client'):
+                with pytest.raises(pixiv_client.PixivRateLimitedError):
+                    pixiv_client.fetch_illust_detail(session, 591, limiter=_NoWaitLimiter())
+
+        messages = [r.getMessage() for r in caplog.records if r.name == 'pixiv_client']
+        lines = [m for m in messages if 'Retry-After' in m]
+        assert lines, '429 必须留下带 Retry-After 的告警'
+        line = lines[-1]
+        assert '\n' not in line, '外部头部不得换行伪造日志'
+        assert 'A' * 41 not in line, '外部头部必须截断'
+        assert '开路 60s' in line, '生效冷却仍要出现在日志里'
+
+
+def test_import_time_detail_gate_is_never_left_open():
+    """真实单例（进程级共享的那条）必须一直是关的：用例只能打在替换实例上。"""
+    assert isinstance(_IMPORT_TIME_DETAIL_GATE, pixiv_client._DetailRequestGate)
+    assert not _IMPORT_TIME_DETAIL_GATE.is_open, \
+        '有状态的闸被某个用例改成开路，会污染同文件/其它文件的详情用例'
+
+
+def test_detail_gate_is_not_reexported_by_fetcher():
+    """闸只在 `pixiv_client` 命名空间：再导出一份会让补丁打在 `fetcher` 上静默失效。"""
+    import fetcher
+
+    assert not hasattr(fetcher, '_detail_gate')
+    assert fetcher._get_illust_detail is pixiv_client.fetch_illust_detail

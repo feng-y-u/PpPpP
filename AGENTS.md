@@ -148,7 +148,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **缩略图代理 `/thumb/<base64_url>`**：入口仅允许 `https://i.pximg.net/` 白名单，磁盘缓存 7 天 + 失败 URL 冷却，防刷新时打爆图床。**重定向不自动跟随**（`allow_redirects=False`）：3xx 时按凭据分级跟随**一次** —— 目标在 `config.IMAGE_HOST_ALLOWLIST` 内用带凭据连接池；白名单外的公网 https 用无凭据连接池（要求 `Content-Type: image/*`）并记入发现表（`GET/DELETE /api/thumb/redirect-hosts`，落盘 `instance/thumb_redirect_hosts.json`，`THUMB_REDIRECT_DISCOVERY=false` 可关闭跨域跟随）。非法目标（非 https / 内网 / 云元数据 / userinfo / 非 443）与嵌套重定向、缺 `Location` 一律 502 且**不发第二次请求**。发现表**不会**自动变成白名单（白名单只决定"是否携带凭据"）—— 确认是官方 CDN 后手工加进 `config.IMAGE_HOST_ALLOWLIST` 并重启。
 - **热点路径必须复用连接池**：`/thumb` 与 `_fetch_details_parallel` 走 `pixiv_client.get_pooled_session()`（线程内复用 Session），**不要在这些循环里调 `build_pixiv_session()`**。原因见文末「连接复用」。
 - **详情 API 三级令牌桶**：`DETAIL_RATE_PER_MINUTE=45`（前台搜索）、`FILL_RATE_PER_MINUTE=20`（后台补全）、`TOTAL_RATE_PER_MINUTE=60`（总闸）。
-- **详情拉取的重试是分类的**：连接错误立即放弃、限流（403/429）退避重试 —— 详见文末「重试策略」，不要在两处同时放开。
+- **详情拉取的重试是分类的**：连接错误立即放弃、限流退避重试（真正触发退避的是 403 —— 429 被传输层拦下，见文末「重试策略」）—— 不要在两处同时放开。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址。
 - **预取缓存**：手动在设置页配置预取标签，后台线程按 `prefetch_interval` 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）预取，写入 `Illust`（`prefetch_source=1`）+ `SearchCache`。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果由独立 `/cache` 页浏览（`GET /api/cache/items`，库内过滤排序分页）。预取作品入库满 1 天刷新一次"最终收藏数"，< 10 且未下载未收藏的删除；超出 `prefetch_max_illusts`（默认 10000）按"已刷新优先、收藏数低优先"三层淘汰（详见下条）。
 - **最终收藏数刷新有持久化失败状态机**（`illusts.refresh_failed_at`，迁移 v4）：暂时性失败写时间戳、退避 `PREFETCH_REFRESH_BACKOFF`（24h）期内不再入选——**这是防"永久失败的死作品每轮占满 100 个名额"的关键，不要退回"失败即静默 continue"**；404 / 删除类报错返回 `fetcher.DEAD_DETAIL`，未下载未收藏的当场删除（已下载/已收藏标记完成保留）；限流/连接错误返回 `fetcher.RETRYABLE_GLOBAL_DETAIL`，**不记在作品头上**，连续 `PREFETCH_REFRESH_ABORT_STREAK`（3）条即中止本轮；认证失效（`PixivAuthError`）/ Cookie 缺失只中止本轮、不写标记、**不冒泡**（冒泡会让 `_prefetch_loop` 跳过容量清理、上限失效）；失败满 `PREFETCH_REFRESH_FORCE_DONE`（14 天）强制标记完成，交容量清理淘汰。**保护判定统一走 `background._is_user_owned()`**（收藏夹 + 用户操作类 `DownloadLog`，含失败/取消待重试；缓存清理自己写的 `action='prefetch_deleted'` 不算保护）——用户点过下载的作品不当缓存垃圾。**入库永不停**：`_prefetch_loop` 每轮都入库，容量靠三层淘汰压住（不靠暂停入库——已否决的方案）。**容量清理三层**（`_prefetch_capacity_cleanup`，层内收藏数低优先、并列更早上传优先，保护判定统一走 `background._is_user_owned()` + 下载中/已下载）：① 已最终刷新（信号可信）→ ② 未刷新但刷新失败过或入库超过 `PREFETCH_EVICT_UNREFRESHED_AFTER`（3 天）→ ③ 其余未刷新兜底（**保证上限永远压得住**，tier2/3 用入库快照收藏数，新作品超限时优先被删、下轮可能重新入库）。每轮刷新批量 `PREFETCH_REFRESH_BATCH`（300，用满已有 20/分钟桶预算，不碰 403 红线）。观测与手动干预：`GET /api/prefetch/status` 除运行态外还返回 `refresh`（上一轮结构化统计：processed/ok/deleted_low/deleted_dead/kept_dead/failed_transient/failed_global/force_done/aborted/at）、`pending_refresh`（未完成刷新数）、`failed_backoff`（退避中数量）、`detail_errors`（未命中删除关键词的详情报错样本 message→次数，用于核对关键词清单），设置页「搜索预取」卡片展示；`POST /api/prefetch/refresh-reset`（`{tag}` 或 `{pixiv_id}`，必须指定范围）清空刷新完成/失败标记把作品放回队列，用于 Cookie 权限修复后救回被强制完成/永久退避的作品，下一轮预取生效。
@@ -262,8 +262,12 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 | 错误 | 行为 | 理由 |
 |---|---|---|
 | 连接类（`requests.ConnectionError`：超时/拒绝/DNS/代理） | **立即返回 `None`，不重试** | 几乎必然重复失败，重试只是空等满 `DETAIL_TIMEOUT` |
-| 限流（`403` / `429`） | 递增退避 3s / 9s 后重试 | 暂时性，等待后可能恢复 |
-| 其他（`5xx`、读取超时等） | 退避 1s 后重试 | 可能瞬时抖动 |
+| 限流 `403`（并发过高时 Pixiv 返回的状态码） | 递增退避 3s / 9s 后重试 | 暂时性，等待后可能恢复 |
+| 其他（`5xx`、读取超时，**以及真实 429**） | 退避 1s 后重试 | 可能瞬时抖动 |
+
+**真实 429 到不了应用层，所以 3s/9s 实际只由 403 触发**：适配层 `Retry(total=1, connect=0, status_forcelist=[429, 500, 502, 503], backoff_factor=0.5)` 在 urllib3 里就把 429 拦下重试一次，耗尽后 requests 抛 `RetryError` —— 它**不带 `.response`**，`fetch_illust_detail` 拿不到状态码，只能归入"其他"→ **1s**；`observe_response(429)` 因此根本不会被调用（闸不会因 429 开路），而 `Retry-After` 由传输层自己睡（睡在闸槽位内 —— 已知遗留，见下面的 62s 说明）。`return_dead=True` 的刷新路径更差：`last_status` 停在 `None`，最终返回 `None` 而不是"全局暂时失败"哨兵，于是被记成该作品的 `refresh_failed_at`。**默认配置下真正的限流信号是 403**（不在 `status_forcelist` 里，响应原样返回 → 到达闸 → 3s/9s 退避）。
+
+429 那条路不是死代码：适配器只 `mount('https://', ...)`，`PIXIV_BASE_URL` 为 `http://` 的镜像走默认适配器（`max_retries=0`），429 响应原样回来并**直接开路**（此时 3s/9s 也轮不到它 —— 闸已开路，下一次 attempt 在闸前就被拒）；将来改 `status_forcelist` 同样会切回这条路。要动这条链先看 `tests/test_fetcher.py::test_session_does_not_retry_connect_errors`，传输层三项配置已在那里钉住。
 
 同时 `build_pixiv_session()` 的 urllib3 适配层设了 `Retry(total=1, connect=0, ...)`：429/5xx 与读取错误在传输层重试一次，但**连接错误不重试**。
 

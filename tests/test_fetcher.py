@@ -95,6 +95,17 @@ def _cookie_file(tmp_path, monkeypatch):
     return cookie
 
 
+@pytest.fixture(autouse=True)
+def _fresh_detail_gate(monkeypatch):
+    """每个用例一条全新的详情熔断闸——闸是有状态的，开路状态会**跨用例泄漏**。
+
+    `fetch_illust_detail` 读的是 `pixiv_client` 的模块级单例：某个用例把它开到 60 秒
+    冷却后，后续用例的详情调用会直接收到 `PixivRateLimitedError`，红灯与自身断言无关、
+    顺序一变又"自己好了"。要造"闸已开路"的场景用 `_open_detail_gate()` 自行替换实例。
+    """
+    monkeypatch.setattr(pixiv_client, '_detail_gate', pixiv_client._DetailRequestGate())
+
+
 class TestProcessItemsBookmarkFill:
     @patch('fetcher._kick_background_fill')
     @patch('fetcher._fetch_details_parallel')
@@ -1099,7 +1110,10 @@ class TestDetailRetryPolicy:
         calls, mock_sleep, result = self._run(monkeypatch, self._http_error(429))
         assert result is None
         assert calls == fetcher.DETAIL_MAX_RETRIES + 1
-        assert mock_sleep.call_count == fetcher.DETAIL_MAX_RETRIES
+        # 只数**退避**睡眠：每次重试都要重取令牌，而旁路桶（6000/分钟）自己也会
+        # sleep 0.01s —— 混在一起数会把"重取令牌"错判成"多退避了一次"。
+        backoffs = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
+        assert backoffs == [3, 9], '403/429 的退避是不可变的 3s/9s'
 
     def test_401_raises_auth_error_immediately(self, monkeypatch):
         """认证失效重试无意义，必须直接上报 PixivAuthError。"""
@@ -1217,14 +1231,59 @@ class TestDetailRetryPolicy:
         self._run_static(monkeypatch, dead, return_dead=True)
         assert fetcher.get_detail_error_samples() == {}
 
+    def test_hostile_error_message_is_truncated_in_log(self, monkeypatch, caplog):
+        """外部 message 只能以截断后的形态进日志：换行能伪造日志行，超长能刷屏。
+
+        两条报错日志（判死 / 未识别）与 429 的 `Retry-After` 同源风险，走同一个
+        `_log_safe_header`。
+        """
+        hostile = 'A' * 500 + '\n伪造日志行'
+        monkeypatch.setattr(pixiv_client, '_detail_error_samples', {})
+        with caplog.at_level(logging.WARNING, logger='pixiv_client'):
+            self._run_static(
+                monkeypatch,
+                self._json_resp({'error': True, 'message': '作品已被删除' + hostile}),
+                return_dead=True)
+            self._run_static(
+                monkeypatch,
+                self._json_resp({'error': True, 'message': '謎のエラー' + hostile}),
+                return_dead=True)
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.name == 'pixiv_client'
+                 and ('Detail API 永久失败' in r.getMessage()
+                      or 'Detail API error for' in r.getMessage())]
+        assert len(lines) == 2, '两条报错日志都要覆盖'
+        for line in lines:
+            assert '\n' not in line, '外部报文不得换行伪造日志'
+            assert 'A' * 41 not in line, '外部报文必须截断'
+        assert all('123' in line for line in lines), 'pixiv_id 仍要保留'
+
     def test_session_does_not_retry_connect_errors(self, monkeypatch):
-        """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。"""
+        """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。
+
+        后三条断言把传输层配置**钉死**：它们不是复述实现，而是决定 429 走哪条路的
+        分水岭。429 在 `status_forcelist` 里 → urllib3 先重试一次，耗尽后 requests 抛
+        **不带 `.response` 的 `RetryError`**，`fetch_illust_detail` 拿不到状态码，
+        只能归入"其他"→ 1s，熔断闸的 `observe_response(429)` 也收不到它；真正的
+        限流信号是 403（不在 forcelist，响应原样返回）。`respect_retry_after_header`
+        决定这段时间由传输层睡（睡在闸槽位内）还是由应用层退避。适配器只
+        `mount('https://', ...)`：`PIXIV_BASE_URL` 为 `http://` 的镜像走默认适配器
+        （`max_retries=0`、不重试），429 响应原样回来并**到达闸** —— 闸的 429 分支
+        因此才不是死代码。改动这三项里任何一项都会改变上述路径，故在此显式固化。
+        """
         monkeypatch.setattr(pixiv_client, '_load_cookie', lambda: None)
         monkeypatch.setattr(pixiv_client, '_cookie_value', 'test')
         session = pixiv_client.build_pixiv_session()
-        retry = session.get_adapter('https://www.pixiv.net').max_retries
+        https_adapter = session.get_adapter('https://www.pixiv.net')
+        retry = https_adapter.max_retries
         assert retry.connect == 0
         assert retry.total == 1
+        assert retry.status_forcelist == [429, 500, 502, 503]
+        assert retry.respect_retry_after_header is True
+        http_adapter = session.get_adapter('http://www.pixiv.net')
+        assert http_adapter is not https_adapter, '适配器只应挂在 https:// 上'
+        assert http_adapter.max_retries.total == 0, 'http:// 镜像不重试，429 会到达闸'
 
 
 class TestPooledSession:
@@ -1904,3 +1963,183 @@ class TestSplitTags:
         #（中文逗号在上一行 replace 里已转成英文逗号），而不是空列表 ——
         # 返回空列表会让上游拿不到任何关键词。此断言按实测行为固定。
         assert fetcher._split_tags('，,') == [',,']
+
+
+# ── 熔断闸接进详情路径后的两条跨模块语义 ──
+
+
+def _open_detail_gate(monkeypatch, pids=(901, 902, 903)):
+    """把 `pixiv_client` 的模块级闸换成新实例并**按真实调用顺序**开路。
+
+    用替换实例（而不是导入期的真实单例）：闸是有状态的，把它开在真实单例上会污染
+    同文件/其它文件的详情用例（`_fresh_detail_gate` 已经预置了一条新闸，这里再换一条
+    只是为了拿到它的引用）。
+    """
+    gate = pixiv_client._DetailRequestGate()
+    monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+    for pid in pids:
+        with gate.request_slot(pid):
+            gate.observe_response(pid, 403)
+    assert gate.is_open, '用例前置条件：闸必须已开路'
+    return gate
+
+
+def _bypass_detail_limiters(monkeypatch):
+    """旁路三级令牌桶：离线用例只关心接线，不该为真实限速付等待时间。"""
+    monkeypatch.setattr(pixiv_client, '_detail_limiter', pixiv_client._TokenBucket(6000))
+    monkeypatch.setattr(pixiv_client, '_fill_limiter', pixiv_client._TokenBucket(6000))
+    monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
+
+
+class TestDetailGateDoesNotEscapeToRoutes:
+    """闸拒绝必须被 `_fetch_details_parallel` 收成 `rate_limited`，绝不冒泡。
+
+    一旦 `PixivRateLimitedError` 逃到 `routes_search`，那里的宽 `except Exception`
+    会把它变成 HTTP 502 `error` —— 可重试的限流被静默降级成"搜索失败"，
+    `partial` 态（保留已确认结果、以可重试状态收尾）直接失效。
+    """
+
+    def test_open_gate_surfaces_as_rate_limited_without_http(self, monkeypatch):
+        _bypass_detail_limiters(monkeypatch)
+        _open_detail_gate(monkeypatch)
+
+        class _NoHttpSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError('闸开路期间不得发出任何详情 HTTP 请求')
+
+        session = _NoHttpSession()
+        # 这条路径用的是线程内连接池，换成"一用就炸"的哨兵来证明 HTTP 没发出
+        monkeypatch.setattr(fetcher, 'get_pooled_session', lambda *a, **k: session)
+
+        batch = fetcher._fetch_details_parallel([11, 12, 13])   # 关键：不抛
+
+        assert session.calls == 0
+        assert batch.rate_limited is True
+        assert batch.attempted == 0, '被闸拒绝的请求没发出，不计 attempted'
+        assert batch.details == {}, '被拒不算"这件作品详情失败"'
+
+
+class TestPrefetchTagWedgeOnGateOpen:
+    """闸开路时预取轮次算失败，但标签必须可重试、容量清理照跑、已入库作品不丢。
+
+    决策（见 plans/2026-09-29-search-throughput-execution-notes.md「Task 2 必读」）：
+    `_prefetch_one_tag` 的宽 `except Exception` 会把 `SearchRateLimitedError` 变成
+    "该标签本轮失败" —— 这是**预期语义**：标签记 `error`、下轮重试，已入库作品
+    下轮从库里命中 existing 记录，不会丢也不会重拉。
+    """
+
+    def test_tag_recovers_next_round_and_cleanup_still_runs(self, clean_db, monkeypatch,
+                                                             _cookie_file):
+        import app
+        import background
+        from models import SearchCache
+
+        # 上一轮已入库的作品 + 已缓存的标签列表（本轮失败不得把它们清掉）
+        clean_db.add(Illust(pixiv_id=7, title='cached', bookmark_count=600))
+        clean_db.add(SearchCache(tag='t', illust_ids='[7]', status='done'))
+        clean_db.commit()
+
+        class _CountingSession:
+            """任何详情请求都回 404：既证明"该发的发了"，也证明"不该发的没发"。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                resp = requests.Response()
+                resp.status_code = 404
+                return resp
+
+        session = _CountingSession()
+        # 详情走线程内连接池，它读的是 pixiv_client 的全局 build_pixiv_session
+        monkeypatch.setattr(pixiv_client, 'build_pixiv_session', lambda: session)
+        # search_by_tag 用的是 fetcher 自己 from-import 的绑定（再导出一份），两处都要换
+        monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
+        _bypass_detail_limiters(monkeypatch)
+        monkeypatch.setattr(fetcher, '_kick_background_fill', lambda pids: None)
+        # 两轮的上游列表完全相同：7 已入库、8 从未入库（闸开路那轮没写成）
+        monkeypatch.setattr(pixiv_client, 'fetch_search_illusts',
+                            lambda session, query, **kwargs: ([_item(7), _item(8)], 2))
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
+        cleaned = []
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
+
+        gate = _open_detail_gate(monkeypatch)
+        app._prefetch_loop()
+        clean_db.expire_all()   # 预取用自己的事务提交，过期后重读才是库里的真实值
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert gate.is_open
+        assert row.status == 'error', '本轮算失败，但状态必须可重试（不是 fetching 残留）'
+        assert row.illust_ids == '[7]', '本轮失败不得清掉已入库作品的缓存列表'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 7).count() == 1
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 8).count() == 0
+        assert cleaned == [1], '单标签失败不得跳过容量清理'
+        assert session.calls == 0, '闸开路时连一发详情请求都不该发出'
+
+        # 第二轮：闸换成全新实例（等价于冷却到期/重启后恢复）→ 同一标签继续预取
+        monkeypatch.setattr(pixiv_client, '_detail_gate', pixiv_client._DetailRequestGate())
+        app._prefetch_loop()
+        clean_db.expire_all()
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert row.status == 'done', '标签不得被永久卡死'
+        assert json.loads(row.illust_ids) == [7], '已入库作品被重新推导为 existing，不重复'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 7).count() == 1
+        assert cleaned == [1, 1], '第二轮同样要跑到容量清理'
+        assert session.calls == 1, \
+            '第二轮只该为未入库的 8 发一次详情；已入库的 7 从库里命中，不重拉'
+
+
+class TestRefreshPathMapsGateRefusalToGlobalFailure:
+    """`return_dead=True` 的最终收藏数刷新必须把闸拒绝当成**全局**暂时失败。
+
+    这是接闸后最容易踩坏的一条：按单作品写 `refresh_failed_at` 会把整个刷新队列刷上
+    24h 退避（Pixiv 恢复后还要多等一天），让异常冒泡又会跳过 `_prefetch_loop` 的
+    容量清理、`prefetch_max_illusts` 上限随之失效。
+    """
+
+    def test_open_gate_aborts_refresh_without_per_work_backoff(self, clean_db, monkeypatch):
+        import app
+        import background
+
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        for pid in (61, 62, 63):
+            clean_db.add(Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,
+                                bookmark_count=0, created_at=old))
+        clean_db.commit()
+
+        class _NoHttpSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError('闸开路期间不得发出详情 HTTP 请求')
+
+            def close(self):
+                pass
+
+        session = _NoHttpSession()
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: session)
+        _bypass_detail_limiters(monkeypatch)
+        _open_detail_gate(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()   # 关键：不抛
+        clean_db.expire_all()
+
+        stats = app._prefetch_state['refresh_stats']
+        assert stats['processed'] == 3
+        assert stats['failed_global'] == 3, '闸拒绝必须记成全局性失败'
+        assert stats['aborted'] == 'rate_limit', \
+            f'连续 {background.PREFETCH_REFRESH_ABORT_STREAK} 条全局失败即中止本轮'
+        assert session.calls == 0
+        for pid in (61, 62, 63):
+            illust = clean_db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            assert illust.refresh_failed_at is None, '全局限流不得写成该作品的退避'
+            assert illust.prefetch_refresh_at is None, '作品仍留在刷新队列里（下轮再试）'
