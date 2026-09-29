@@ -33,6 +33,14 @@
 3. **不要用 `examined` 渲染完成比例。** `examined` 在任何详情完成之前就整批发出，
    "N/N examined" 会瞬间到 100% 而 accepted 仍为 0 —— 它只能当活动计数器，
    与"已找到 K 件"并列显示。
+4. **`revision` 每次事件都会自增**（不只 `result`），这是 routes_search 的刻意选择：
+   计数器变化也要对前端可见。后果是 `examined` 突发时"revision 未增长就不重渲染"
+   的守卫会触发一次实际无内容变化的重渲染。**渲染判据应以 progress / preview 集合
+   为准，别只看 revision。** 好消息是 `revision` 前进 ⟺ 快照有变化（重复的 result
+   在被去重处提前返回，不会自增）。
+5. **`progress.accepted` 不封顶**，可以大于 `len(results)`（preview 被
+   `ITEMS_PER_PAGE` 截断）。"已找到 N 件"用 `accepted`，但渲染网格必须用 `results`，
+   不能假定两者一致。
 
 ## Task 2 必读（预取调用方的限流语义）
 
