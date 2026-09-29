@@ -41,6 +41,14 @@
 5. **`progress.accepted` 不封顶**，可以大于 `len(results)`（preview 被
    `ITEMS_PER_PAGE` 截断）。"已找到 N 件"用 `accepted`，但渲染网格必须用 `results`，
    不能假定两者一致。
+6. **Task 5 落地前不要把 Task 4 单独部署。** 未改动的 `static/page-index.js` 会把
+   `partial` 响应当 `onDone(data)` 处理 —— 预览会被当成 canonical 页提交、`warning`
+   被丢弃、`has_more=false` 写进分页状态。Task 5 必须显式分流 `partial`
+   （`onProgress` + 单独的 `onPartial`，不能落进 `finishSearch`），
+   并在 502/401/error 路径清空预览。
+7. 终态响应的 `progress` 计数器必须与 `results` 一致：`error` / `cancelled` 已清空
+   `results`，就**不能**再回一个非零 `accepted`（那些行可能已回滚）。Task 5 的
+   "已找到 N 件"会在空网格上显示幽灵数字。
 
 ## Task 2 必读（预取调用方的限流语义）
 
@@ -50,6 +58,11 @@
 
 Task 2 必须补一条测试证明：熔断打开时预取轮次失败**不会**让该标签被永久卡死，
 且 `_prefetch_loop` 继续跑（含容量清理）。
+
+另外再钉一条路径：**`PixivRateLimitedError` 绝不能越过 `_fetch_details_parallel` 逃到路由层**。
+该函数内部已把它捕获并翻成 `batch.rate_limited`；一旦哪天它逃到 `routes_search`，
+宽 `except Exception` 会把它变成 HTTP 502 `error` —— 把"可重试的限流"静默降级成"失败"，
+`partial` 语义直接失效。Task 2 接入闸门后需有测试覆盖这条链路。
 
 ## 已确定的实现判据（供 Task 6 / Task 7 复用）
 
