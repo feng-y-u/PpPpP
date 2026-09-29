@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 541 用例约 20s，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 601 用例约 20s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -50,7 +50,8 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `helpers.py` | 纯工具函数与库内查询：下载目录扫描、URL/展示工具、`query_cached_tag`、收藏夹位置计算、文件删除 |
 | `middleware.py` | 认证 / CSRF / 限流 / 安全头；app 级钩子（`before_app_request` / `after_app_request`）随 `middleware_bp` 注册 |
 | `background.py` | 后台线程与下载引擎：自动关注、预取循环、下载执行器、`start_background_threads()`（幂等）、`_reset_stuck_*` |
-| `fetcher.py` | Pixiv API 封装：Cookie 认证、搜索、作品详情、令牌桶限流、后台详情补全 |
+| `pixiv_client.py` | **Pixiv 适配层**：Ajax 端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析；不碰 DB、不认识 `Illust` |
+| `fetcher.py` | Pixiv **业务层**：屏蔽/R18/收藏数过滤、搜索缓存、游标分页、取消与详情预算、入库、后台详情补全；Ajax 细节全部委托 `pixiv_client`（并把其符号再导出给历史调用方与测试补丁 seam） |
 | `routes_search.py` | `/search`、搜索任务状态、缓存浏览 `/api/cache/*`、`/api/following` |
 | `routes_gallery.py` | 图库、详情页、图片服务、缩略图代理 `/thumb/<b64>`、收藏 API、`/api/open-dir` |
 | `routes_download.py` | 下载触发/状态/取消/批量、下载管理页 |
@@ -59,7 +60,7 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `routes_settings.py` | 登录、设置读写、屏蔽标签、自动关注控制 |
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `lightbox.js` + `style.css` + `vendor/bootstrap-5.3.3/` |
-| `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`check_tls.py`（只读 TLS 拦截诊断，退出码 0/1/2）、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
+| `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`check_tls.py`（只读 TLS 拦截诊断，退出码 0/1/2）、`pixiv_capture.py`（抓取并**脱敏** Pixiv 响应样本，刷新契约测试 fixtures）、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
 | `migrations/` | `runner.py`（按 `PRAGMA user_version` 版本化执行，**升级前自动备份**）+ `versions.py` |
 | `pixiv-api-http-main/` | 内置第三方 Node.js Pixiv API 参考实现，**仅作接口格式对照，不参与运行** |
 | `docs/` | `architecture.md`（模块地图 + 测试补丁契约，改动前必读）、`maintenance.md`（运维手册）、`superpowers/{plans,specs}/`（近期变更设计文档） |
@@ -130,7 +131,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ### 认证
 
-- **Cookie 认证**：手动创建 `cookies.txt`，存放 `PHPSESSID=xxxxx` 或纯 token。Linux 上优先读 `/etc/pixiv-viewer/cookies.txt`。过期会静默返回空结果。**设置页写的就是 `config.COOKIE_PATH`（经 `app.COOKIE_PATH` 再导出，与 fetcher 读的同一个值）**：两处必须同源 —— 曾经路由自己按 `__file__` 推项目根，于是存在 `/etc` 文件的部署里"写了一个没人读的文件"，重启后旧 Cookie 复辟、连接池的 mtime 失效戳也盯错了文件。该路径不可写时设置页返回 500 并给出实际路径（不再假装成功）；部署时若把 Cookie 放在 `/etc/pixiv-viewer/`，要注意写入是**同目录 tmp + 原子替换**（`helpers._atomic_write_text`）：服务进程需要**目录可写**（创建 `cookies.txt.tmp` 并 rename），只给文件写权限会 500。为什么必须原子：读侧 `fetcher._load_cookie()` 在其它线程读同一路径，`open(...,'w')` 先截断再写，读到空串时会把**空值连同 mtime 一起缓存住**，那条线程/连接池就一直用空 Cookie（症状："设置页保存成功但搜索仍 401，重启才恢复"，旧实现已被并发用例复现）。
+- **Cookie 认证**：手动创建 `cookies.txt`，存放 `PHPSESSID=xxxxx` 或纯 token。Linux 上优先读 `/etc/pixiv-viewer/cookies.txt`。过期会静默返回空结果。**设置页写的就是 `config.COOKIE_PATH`（经 `app.COOKIE_PATH` 再导出，与适配层 `pixiv_client.COOKIE_PATH` 读的同一个值）**：两处必须同源 —— 曾经路由自己按 `__file__` 推项目根，于是存在 `/etc` 文件的部署里"写了一个没人读的文件"，重启后旧 Cookie 复辟、连接池的 mtime 失效戳也盯错了文件。该路径不可写时设置页返回 500 并给出实际路径（不再假装成功）；部署时若把 Cookie 放在 `/etc/pixiv-viewer/`，要注意写入是**同目录 tmp + 原子替换**（`helpers._atomic_write_text`）：服务进程需要**目录可写**（创建 `cookies.txt.tmp` 并 rename），只给文件写权限会 500。为什么必须原子：读侧 `pixiv_client._load_cookie()` 在其它线程读同一路径，`open(...,'w')` 先截断再写，读到空串时会把**空值连同 mtime 一起缓存住**，那条线程/连接池就一直用空 Cookie（症状："设置页保存成功但搜索仍 401，重启才恢复"，旧实现已被并发用例复现）。
 - **全局访问密码**：`ACCESS_PASSWORD` 非空时启用全站登录墙 —— `before_app_request` 拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 免认证**。`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒。登录态存 session（`authed`），7 天有效。
 - **`COOKIE_SECURE` 默认 true**：本地 HTTP 调试必须设 `COOKIE_SECURE=false`（环境变量或 `.env`），否则登录态不回传。
 - **旧 `SETTINGS_PASSWORD` 流程仍保留**：已全局登录则直通设置页，否则走设置解锁页。
@@ -142,9 +143,10 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **`popular_d` 排序需 Pixiv Premium**，非 Premium 静默返回空结果。`/search` 默认排序 `date_d`，空查询回退 `browse_discovery()` 时也用它。
 - **搜索是异步的**：`GET /search` 立即返回 `task_id`，后台线程拉取，前端轮询 `/api/search/status/<task_id>`。任务存于 `_search_tasks`，访问 status 时顺带清理过期任务；游标含时间戳，**24 小时过期**。空页去重与死游标作废由前端处理。
 - **提交新搜索会取消所有在途搜索任务**（`_submit_search_task` 置位旧任务的 `cancel_event`，单人应用同时只该有一个搜索在跑，旧任务继续拉详情只会烧令牌桶拖慢新搜索）。fetcher 侧取消机制：`SearchCancelledError` + `_cancel_begin/_cancel_end/_cancelled`（与详情预算同款 `threading.local`，预取/后台补全线程不受影响），检查点在 `paginated_search` 翻页前后与 `_fetch_details_parallel` 每个 worker 发请求前；**在途请求照常处理完并入库**（下次搜索命中 `existing_map` 免重拉），未发起的直接跳过。任务终态：`done` / `error` / `cancelled`（cancelled 返回 200）。前端用搜索代数（`searchGeneration`）让旧任务的轮询静默失效。
-- **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。所有 Pixiv 请求**必须经 `fetcher.build_pixiv_session()`** 构造 session，禁止裸建 `requests.Session()`。
+- **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。所有 Pixiv 请求**必须经 `pixiv_client.build_pixiv_session()`**（`fetcher` 仍再导出同名函数，老调用方无需改）构造 session，禁止裸建 `requests.Session()`。
+- **Pixiv 接口只认 `pixiv_client.py` 这一处**：Ajax 路径、查询参数名、`error`/`message`/`body` 信封、payload 字段名（`illustTitle`/`userId`/`updateDate`/`metaPages`/`isLastPage`…）全部只在适配层出现；业务层（`fetcher`）只用规范字段（`bookmark_count`/`original_urls`/`thumb_url`…）。**改 Pixiv 接口 → 只改 `pixiv_client`**；路由/后台/helpers 一律不拼 URL、不认响应字段。新增/变更字段时先看 `tests/test_pixiv_contract.py`（脱敏样本 + 离线契约测试，样本在 `tests/fixtures/pixiv/`，用 `scripts/pixiv_capture.py` 刷新）。⚠️ 适配层的有状态符号（`_cookie_value`/`_cookie_mtime`/`_total_limiter`/`_detail_error_samples`）**只在 `pixiv_client` 命名空间**，测试补丁要打在它身上 —— 打在 `fetcher` 上会静默失效。
 - **缩略图代理 `/thumb/<base64_url>`**：入口仅允许 `https://i.pximg.net/` 白名单，磁盘缓存 7 天 + 失败 URL 冷却，防刷新时打爆图床。**重定向不自动跟随**（`allow_redirects=False`）：3xx 时按凭据分级跟随**一次** —— 目标在 `config.IMAGE_HOST_ALLOWLIST` 内用带凭据连接池；白名单外的公网 https 用无凭据连接池（要求 `Content-Type: image/*`）并记入发现表（`GET/DELETE /api/thumb/redirect-hosts`，落盘 `instance/thumb_redirect_hosts.json`，`THUMB_REDIRECT_DISCOVERY=false` 可关闭跨域跟随）。非法目标（非 https / 内网 / 云元数据 / userinfo / 非 443）与嵌套重定向、缺 `Location` 一律 502 且**不发第二次请求**。发现表**不会**自动变成白名单（白名单只决定"是否携带凭据"）—— 确认是官方 CDN 后手工加进 `config.IMAGE_HOST_ALLOWLIST` 并重启。
-- **热点路径必须复用连接池**：`/thumb` 与 `_fetch_details_parallel` 走 `fetcher.get_pooled_session()`（线程内复用 Session），**不要在这些循环里调 `build_pixiv_session()`**。原因见文末「连接复用」。
+- **热点路径必须复用连接池**：`/thumb` 与 `_fetch_details_parallel` 走 `pixiv_client.get_pooled_session()`（线程内复用 Session），**不要在这些循环里调 `build_pixiv_session()`**。原因见文末「连接复用」。
 - **详情 API 三级令牌桶**：`DETAIL_RATE_PER_MINUTE=45`（前台搜索）、`FILL_RATE_PER_MINUTE=20`（后台补全）、`TOTAL_RATE_PER_MINUTE=60`（总闸）。
 - **详情拉取的重试是分类的**：连接错误立即放弃、限流（403/429）退避重试 —— 详见文末「重试策略」，不要在两处同时放开。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址。
@@ -173,7 +175,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 ### 下载
 
 - **SSL 校验默认开启**（`SSL_VERIFY = True`）。仅当代理**确实在做 TLS 拦截**（自签根证书解密流量）时才设 `SSL_VERIFY=false`；先跑只读诊断 `python scripts/check_tls.py` 判定（退出码 0 可安全开启校验 / 1 疑似拦截或缺 CA / 2 无法判定），处置见 `docs/maintenance.md`「9. TLS 校验与代理」。
-- **图片地址硬校验 + 凭据分级**（`helpers.check_image_url` + `config.IMAGE_HOST_ALLOWLIST`）：下载与 `/thumb` 重定向共用同一判定 —— 非 https / 内网与云元数据地址 / 带 userinfo / 非 443 端口一律拒绝且**不发起请求**；白名单（`i.pximg.net`）内用带凭据会话，白名单外的公网 https 改用 `fetcher.build_credentialless_session()`（无 Cookie 头、空 cookie jar）继续取图。根因是 `build_pixiv_session()` 的 Cookie 挂在**会话级** header 上，requests 会把它发给任意主机。
+- **图片地址硬校验 + 凭据分级**（`helpers.check_image_url` + `config.IMAGE_HOST_ALLOWLIST`）：下载与 `/thumb` 重定向共用同一判定 —— 非 https / 内网与云元数据地址 / 带 userinfo / 非 443 端口一律拒绝且**不发起请求**；白名单（`i.pximg.net`）内用带凭据会话，白名单外的公网 https 改用 `pixiv_client.build_credentialless_session()`（无 Cookie 头、空 cookie jar）继续取图。根因是 `build_pixiv_session()` 的 Cookie 挂在**会话级** header 上，requests 会把它发给任意主机。
 - 下载引擎在 `background.py`：`_download_illust` 用 `download_locks` 去重、支持取消、按 `PAGE_DOWNLOAD_INTERVAL` 在页间间隔；**无 `original_urls` 时不固化为 `done`**，而是置空以便重试。
 - **`_download_illust` 里 `session_obj = None` / `anon_session_obj = None` 必须在"取消标记检查"之前**：那里有一条提前 `return`，而 `finally` 无条件引用这两个变量（关闭连接池）。放后面会让"排队中被取消"的任务在 `finally` 首行抛 `UnboundLocalError`，其后的 `lock.release()` / 取消标记与进度清理**全部跳过** → 该作品的下载锁永远不放、取消标记永远留着，之后每次都静默跳过（用户看到"已加入下载队列"却永远不动）。已有回归用例 `test_download_cancelled_before_start_does_nothing`（含"取消后仍能重新下载"的症状级断言）。
 - 自动关注发现的新作品先 `commit` 再提交下载任务（否则 `_download_illust` 查不到行会静默跳过）。
@@ -190,12 +192,12 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
-- **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(fetcher, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
+- **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
 
 ### 最重要的约定：app 命名空间是测试补丁 seam
@@ -236,7 +238,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
   2. **单次搜索的详情总预算**：`paginated_search(..., detail_budget=N)`。因为 `early_stop` 只数"通过过滤"的条数，筛选严格时一页可能一条都不通过，会一直翻页扫满 `_MAX_SCAN_PAGES`。预算用 `threading.local` 存（搜索任务跑在自己的线程里，天然隔离），只给作者搜索启用，其余路径默认 0（不限）。
   3. **响应缓存**：`search_by_user` 用独立的 `_USER_SEARCH_CACHE_TTL`（600s），远长于标签搜索的 30s —— 后者成本是 1 次 HTTP，前者一页要发整页详情请求，30 秒会在用户看完这一屏之前就失效。代价是新鲜度，所以**缓存键必须带上 `_blocked_fingerprint(blocked)`**，否则改完屏蔽标签要等十分钟才见效；预算中途耗尽的残缺结果与拉不到作品列表的情况都**不写入**缓存。
 
-  **放宽令牌桶是错的**：45/60 每分钟是为绕开 403 实测定的（`fetcher.py` 顶部注释：并发 3 即触发 403）。`_TokenBucket.wait()` 持锁 sleep，`FETCH_DETAIL_WORKERS` 提再高也不会更快（实测单次详情 1.333s）。要提速只能从"少发请求"入手。
+  **放宽令牌桶是错的**：45/60 每分钟是为绕开 403 实测定的（`pixiv_client.py` 限流常量处的注释：并发 3 即触发 403）。`_TokenBucket.wait()` 持锁 sleep，`FETCH_DETAIL_WORKERS` 提再高也不会更快（实测单次详情 1.333s）。要提速只能从"少发请求"入手。
 
 规模变大后才需要看的：
 
@@ -249,13 +251,13 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 实测（本地 HTTP 服务器，无 TLS）：30 次请求 —— 每请求新建 Session = **30 条 TCP 连接**；复用一个 Session = **1 条**。真实环境每条连接还要额外付 1~2 个 RTT 的 TLS 握手，图片越小这笔开销占比越高（图库首屏、灯箱、搜索批量拉详情都踩在这里）。
 
-- 用 `fetcher.get_pooled_session()`：按线程缓存 Session，同线程跨请求复用连接；Cookie 文件 mtime 变化时自动重建。
+- 用 `pixiv_client.get_pooled_session()`（`fetcher` 亦再导出）：按线程缓存 Session，同线程跨请求复用连接；Cookie 文件 mtime 变化时自动重建。
 - 不跨线程共享（`threading.local`），因为 `requests.Session` 不保证线程安全。
-- 复用连接被对端单方面关闭时，调 `fetcher.reset_pooled_session()` 丢弃重建。`/thumb` 已内置"快失败重试一次"逻辑（超时类不重试，避免又变成 10s+ 的等待）。
+- 复用连接被对端单方面关闭时，调 `pixiv_client.reset_pooled_session()`（`fetcher` 亦再导出）丢弃重建。`/thumb` 已内置"快失败重试一次"逻辑（超时类不重试，避免又变成 10s+ 的等待）。
 
 ### 重试策略：连接错误 fail fast，限流才退避
 
-`_get_illust_detail` 的重试分三类，语义不同，**不要无脑加重试次数**：
+`pixiv_client.fetch_illust_detail`（`fetcher._get_illust_detail` 是它的历史别名）的重试分三类，语义不同，**不要无脑加重试次数**：
 
 | 错误 | 行为 | 理由 |
 |---|---|---|

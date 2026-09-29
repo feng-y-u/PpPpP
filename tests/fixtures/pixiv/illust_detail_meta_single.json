@@ -1,0 +1,42 @@
+{
+  "error": false,
+  "message": "",
+  "body": {
+    "illustId": "100000002",
+    "illustTitle": "【サンプル】見本イラスト（単ページ）",
+    "illustComment": "",
+    "id": "100000002",
+    "title": "【サンプル】見本イラスト（単ページ）",
+    "illustType": 0,
+    "createDate": "2026-02-01T00:00:00+09:00",
+    "uploadDate": "2026-02-02T12:00:00+09:00",
+    "userId": "9000002",
+    "userName": "見本絵師B",
+    "userAccount": "sample_artist_b",
+    "width": 900,
+    "height": 1200,
+    "pageCount": 1,
+    "bookmarkCount": 12,
+    "viewCount": 345,
+    "xRestrict": 1,
+    "urls": {
+      "mini": "https://i.pximg.net/c/48x48/img-master/img/2026/02/01/00/00/00/100000002_p0_square1200.jpg",
+      "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/02/01/00/00/00/100000002_p0_square1200.jpg",
+      "small": "https://i.pximg.net/c/540x540_70/img-master/img/2026/02/01/00/00/00/100000002_p0_master1200.jpg",
+      "regular": "https://i.pximg.net/img-master/img/2026/02/01/00/00/00/100000002_p0_master1200.jpg",
+      "original": "https://i.pximg.net/img-original/img/2026/02/01/00/00/00/100000002_p0.jpg"
+    },
+    "tags": {
+      "authorId": "9000002",
+      "isLocked": false,
+      "tags": [
+        { "tag": "R-18", "translation": { "en": "R-18" } },
+        { "tag": "サンプル" }
+      ]
+    },
+    "metaPages": [],
+    "metaSinglePage": {
+      "originalImageUrl": "https://i.pximg.net/img-original/img/2026/02/01/00/00/00/100000002_p0.jpg"
+    }
+  }
+}

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import fetcher
 import helpers
+import pixiv_client
 import runtime
 from sqlalchemy import or_, text, update
 
@@ -394,7 +395,8 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
             for pid in pids:
                 stats['processed'] += 1
                 detail = fetcher._get_illust_detail(
-                    session, pid, limiter=fetcher._fill_limiter, return_dead=True)
+                    # 低速桶归适配层所有：补丁/读取一律对 pixiv_client（见其模块 docstring）
+                    session, pid, limiter=pixiv_client._fill_limiter, return_dead=True)
                 if detail is fetcher.RETRYABLE_GLOBAL_DETAIL:
                     # 限流（403/429）或连接错误是账户级/环境级状态，不是该作品的
                     # 问题：不写退避标记（否则 Cookie/网络恢复后还要白等 24h），

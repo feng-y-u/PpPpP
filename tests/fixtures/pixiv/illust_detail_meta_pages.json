@@ -1,0 +1,72 @@
+{
+  "error": false,
+  "message": "",
+  "body": {
+    "illustId": "100000001",
+    "illustTitle": "【サンプル】見本イラスト（複数ページ）",
+    "illustComment": "サンプル用のダミー説明文",
+    "id": "100000001",
+    "title": "【サンプル】見本イラスト（複数ページ）",
+    "description": "サンプル用のダミー説明文",
+    "illustType": 0,
+    "createDate": "2026-01-01T00:00:00+09:00",
+    "uploadDate": "2026-01-02T03:04:05+09:00",
+    "userId": "9000001",
+    "userName": "見本絵師A",
+    "userAccount": "sample_artist_a",
+    "width": 1200,
+    "height": 1600,
+    "pageCount": 3,
+    "bookmarkCount": 4321,
+    "likeCount": 210,
+    "viewCount": 98765,
+    "xRestrict": 0,
+    "sl": 2,
+    "urls": {
+      "mini": "https://i.pximg.net/c/48x48/img-master/img/2026/01/01/00/00/00/100000001_p0_square1200.jpg",
+      "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p0_square1200.jpg",
+      "small": "https://i.pximg.net/c/540x540_70/img-master/img/2026/01/01/00/00/00/100000001_p0_master1200.jpg",
+      "regular": "https://i.pximg.net/img-master/img/2026/01/01/00/00/00/100000001_p0_master1200.jpg",
+      "original": "https://i.pximg.net/img-original/img/2026/01/01/00/00/00/100000001_p0.jpg"
+    },
+    "tags": {
+      "authorId": "9000001",
+      "isLocked": false,
+      "tags": [
+        { "tag": "サンプル", "translation": { "en": "sample" }, "romaji": "sanpuru" },
+        { "tag": "オリジナル", "translation": { "en": "original" } }
+      ]
+    },
+    "metaPages": [
+      {
+        "imageUrls": {
+          "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p0_square1200.jpg",
+          "small": "https://i.pximg.net/c/540x540_70/img-master/img/2026/01/01/00/00/00/100000001_p0_master1200.jpg"
+        },
+        "urls": {
+          "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p0_square1200.jpg",
+          "original": "https://i.pximg.net/img-original/img/2026/01/01/00/00/00/100000001_p0.jpg"
+        }
+      },
+      {
+        "imageUrls": {
+          "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p1_square1200.jpg"
+        },
+        "urls": {
+          "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p1_square1200.jpg",
+          "original": "https://i.pximg.net/img-original/img/2026/01/01/00/00/00/100000001_p1.jpg"
+        }
+      },
+      {
+        "imageUrls": {
+          "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p2_square1200.jpg"
+        },
+        "urls": {
+          "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000001_p2_square1200.jpg",
+          "original": "https://i.pximg.net/img-original/img/2026/01/01/00/00/00/100000001_p2.jpg"
+        }
+      }
+    ],
+    "metaSinglePage": {}
+  }
+}

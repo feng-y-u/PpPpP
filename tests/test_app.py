@@ -435,11 +435,13 @@ class TestDbIsolation:
 
 class TestSessionFactory:
     def _build(self, monkeypatch, proxy=''):
-        import fetcher
-        monkeypatch.setattr(fetcher, 'PROXY', proxy)
-        monkeypatch.setattr(fetcher, '_load_cookie', lambda: None)
-        monkeypatch.setattr(fetcher, '_cookie_value', 'test')
-        return fetcher.build_pixiv_session()
+        # Session 构建在适配层：代理配置、Cookie 缓存等状态归 pixiv_client 所有，
+        # 补丁必须打在它身上（fetcher 只再导出函数，见 pixiv_client 模块 docstring）。
+        import pixiv_client
+        monkeypatch.setattr(pixiv_client, 'PROXY', proxy)
+        monkeypatch.setattr(pixiv_client, '_load_cookie', lambda: None)
+        monkeypatch.setattr(pixiv_client, '_cookie_value', 'test')
+        return pixiv_client.build_pixiv_session()
 
     def test_proxy_applied(self, monkeypatch):
         s = self._build(monkeypatch, proxy='http://127.0.0.1:7890')

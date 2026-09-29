@@ -11,6 +11,7 @@ import pytest
 import requests
 
 import fetcher
+import pixiv_client
 from config import ITEMS_PER_PAGE, PER_PAGE
 from models import BlockedTag, Illust
 
@@ -56,7 +57,7 @@ def _cookie_file(tmp_path, monkeypatch):
     """
     cookie = tmp_path / 'cookies.txt'
     cookie.write_text('PHPSESSID=test-token\n', encoding='utf-8')
-    monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(cookie))
+    monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', str(cookie))
     return cookie
 
 
@@ -410,7 +411,7 @@ class TestHttpErrorClassification:
         session = self._failing_session(status)
         monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
         # 旁路令牌桶：只测分类语义，不受全局限速器残留状态影响
-        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         return session
 
     # ── search_by_tag ──
@@ -425,7 +426,7 @@ class TestHttpErrorClassification:
     def test_search_tag_403_returns_empty_not_auth_error(self, monkeypatch, caplog):
         """403 按失败形态返回空结果，并且留下可检索的告警。"""
         session = self._patched(monkeypatch, 403)
-        with caplog.at_level(logging.WARNING, logger='fetcher'):
+        with caplog.at_level(logging.WARNING, logger='pixiv_client'):
             result = fetcher.search_by_tag('s13-403')
 
         assert result == ([], False)
@@ -448,13 +449,13 @@ class TestHttpErrorClassification:
 
     def test_user_profile_403_returns_empty(self, monkeypatch):
         session = self._failing_session(403)
-        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         assert fetcher._get_user_profile_ids(session, 's13-user-403') == []
         assert session.calls == 1
 
     def test_user_profile_401_raises_auth_error(self, monkeypatch):
         session = self._failing_session(401)
-        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         with pytest.raises(fetcher.PixivAuthError):
             fetcher._get_user_profile_ids(session, 's13-user-401')
 
@@ -475,8 +476,8 @@ class TestHttpErrorClassification:
     def test_detail_403_still_retries_and_never_auth_error(self, monkeypatch):
         """回归：详情 API 的 403 = 限流，走退避重试（S13 不动这条语义）。"""
         session = self._failing_session(403)
-        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
-        with patch('fetcher.time.sleep'):
+        monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
+        with patch('pixiv_client.time.sleep'):
             result = fetcher._get_illust_detail(
                 session, 123, limiter=fetcher._TokenBucket(6000))
 
@@ -721,9 +722,9 @@ class TestDetailRetryPolicy:
 
     def _run(self, monkeypatch, exc, return_dead=False):
         # 旁路令牌桶，让用例只测重试语义、不受全局限速器残留状态影响
-        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         session = self._FakeSession(exc)
-        with patch('fetcher.time.sleep') as mock_sleep:
+        with patch('pixiv_client.time.sleep') as mock_sleep:
             try:
                 result = fetcher._get_illust_detail(
                     session, 123, limiter=fetcher._TokenBucket(6000),
@@ -782,9 +783,9 @@ class TestDetailRetryPolicy:
         return resp
 
     def _run_static(self, monkeypatch, resp, return_dead=False):
-        monkeypatch.setattr(fetcher, '_total_limiter', fetcher._TokenBucket(6000))
+        monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         session = self._StaticSession(resp)
-        with patch('fetcher.time.sleep') as mock_sleep:
+        with patch('pixiv_client.time.sleep') as mock_sleep:
             result = fetcher._get_illust_detail(
                 session, 123, limiter=fetcher._TokenBucket(6000),
                 return_dead=return_dead)
@@ -844,13 +845,13 @@ class TestDetailRetryPolicy:
     # ── 未识别报错采样（供设置页核对删除关键词清单）──
 
     def test_unmatched_error_message_recorded(self, monkeypatch):
-        monkeypatch.setattr(fetcher, '_detail_error_samples', {})
+        monkeypatch.setattr(pixiv_client, '_detail_error_samples', {})
         resp = self._json_resp({'error': True, 'message': '謎のエラー'})
         self._run_static(monkeypatch, resp, return_dead=True)
         assert fetcher.get_detail_error_samples() == {'謎のエラー': 1}
 
     def test_unmatched_error_message_counted_once_per_message(self, monkeypatch):
-        monkeypatch.setattr(fetcher, '_detail_error_samples', {})
+        monkeypatch.setattr(pixiv_client, '_detail_error_samples', {})
         resp = self._json_resp({'error': True, 'message': '謎のエラー'})
         self._run_static(monkeypatch, resp, return_dead=True)
         self._run_static(monkeypatch, resp, return_dead=True)
@@ -858,16 +859,16 @@ class TestDetailRetryPolicy:
 
     def test_permanent_and_auth_messages_not_sampled(self, monkeypatch):
         """已判死/认证类报文不进样本（前者已处理，后者另有上报路径）。"""
-        monkeypatch.setattr(fetcher, '_detail_error_samples', {})
+        monkeypatch.setattr(pixiv_client, '_detail_error_samples', {})
         dead = self._json_resp({'error': True, 'message': '作品已被删除'})
         self._run_static(monkeypatch, dead, return_dead=True)
         assert fetcher.get_detail_error_samples() == {}
 
     def test_session_does_not_retry_connect_errors(self, monkeypatch):
         """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。"""
-        monkeypatch.setattr(fetcher, '_load_cookie', lambda: None)
-        monkeypatch.setattr(fetcher, '_cookie_value', 'test')
-        session = fetcher.build_pixiv_session()
+        monkeypatch.setattr(pixiv_client, '_load_cookie', lambda: None)
+        monkeypatch.setattr(pixiv_client, '_cookie_value', 'test')
+        session = pixiv_client.build_pixiv_session()
         retry = session.get_adapter('https://www.pixiv.net').max_retries
         assert retry.connect == 0
         assert retry.total == 1
@@ -885,22 +886,22 @@ class TestPooledSession:
     def _isolate_cookie(self, monkeypatch, tmp_path):
         cookie = tmp_path / 'cookies.txt'
         cookie.write_text('PHPSESSID=test-cookie\n')
-        monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(cookie))
-        monkeypatch.setattr(fetcher, '_cookie_mtime', 0)
-        monkeypatch.setattr(fetcher, '_cookie_value', '')
-        fetcher.reset_pooled_session()
+        monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', str(cookie))
+        monkeypatch.setattr(pixiv_client, '_cookie_mtime', 0)
+        monkeypatch.setattr(pixiv_client, '_cookie_value', '')
+        pixiv_client.reset_pooled_session()
         yield
-        fetcher.reset_pooled_session()
+        pixiv_client.reset_pooled_session()
 
     def test_same_thread_reuses_session(self):
         """同线程跨请求复用同一个 Session，即复用同一条 keep-alive 连接。"""
-        assert fetcher.get_pooled_session() is fetcher.get_pooled_session()
+        assert pixiv_client.get_pooled_session() is pixiv_client.get_pooled_session()
 
     def test_different_threads_get_own_session(self):
         """不跨线程共享：requests.Session 不保证线程安全。"""
-        main_session = fetcher.get_pooled_session()
+        main_session = pixiv_client.get_pooled_session()
         box = []
-        t = threading.Thread(target=lambda: box.append(fetcher.get_pooled_session()))
+        t = threading.Thread(target=lambda: box.append(pixiv_client.get_pooled_session()))
         t.start()
         t.join()
         assert box, '子线程应拿到自己的 session'
@@ -909,15 +910,15 @@ class TestPooledSession:
 
     def test_cookie_change_rebuilds_session(self):
         """设置页改写 cookies.txt 后必须立即生效，不能沿用旧连接的旧 Cookie。"""
-        first = fetcher.get_pooled_session()
-        os.utime(fetcher.COOKIE_PATH, (time.time() + 60, time.time() + 60))
-        assert fetcher.get_pooled_session() is not first
+        first = pixiv_client.get_pooled_session()
+        os.utime(pixiv_client.COOKIE_PATH, (time.time() + 60, time.time() + 60))
+        assert pixiv_client.get_pooled_session() is not first
 
     def test_reset_drops_pool(self):
         """复用连接被对端关闭后，reset 必须让下次取到全新的 Session。"""
-        first = fetcher.get_pooled_session()
-        fetcher.reset_pooled_session()
-        assert fetcher.get_pooled_session() is not first
+        first = pixiv_client.get_pooled_session()
+        pixiv_client.reset_pooled_session()
+        assert pixiv_client.get_pooled_session() is not first
 
 
 class TestCredentiallessSession:
@@ -931,19 +932,19 @@ class TestCredentiallessSession:
     def _isolate_cookie(self, monkeypatch, tmp_path):
         cookie = tmp_path / 'cookies.txt'
         cookie.write_text('PHPSESSID=test-cookie\n')
-        monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(cookie))
-        monkeypatch.setattr(fetcher, '_cookie_mtime', 0)
-        monkeypatch.setattr(fetcher, '_cookie_value', '')
+        monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', str(cookie))
+        monkeypatch.setattr(pixiv_client, '_cookie_mtime', 0)
+        monkeypatch.setattr(pixiv_client, '_cookie_value', '')
 
     def test_build_session_carries_cookie(self):
-        s = fetcher.build_pixiv_session()
+        s = pixiv_client.build_pixiv_session()
         try:
             assert 'PHPSESSID=test-cookie' in s.headers.get('Cookie', '')
         finally:
             s.close()
 
     def test_credentialless_session_has_no_cookie_at_all(self):
-        s = fetcher.build_credentialless_session()
+        s = pixiv_client.build_credentialless_session()
         try:
             assert 'Cookie' not in s.headers, '会话级 Cookie 头必须摘掉（否则会发给任意主机）'
             assert s.cookies.get_dict() == {}, '域级 Cookie 也要清掉，做到名副其实'
@@ -952,15 +953,15 @@ class TestCredentiallessSession:
 
     def test_session_verify_follows_config(self, monkeypatch):
         """SSL_VERIFY 必须在建 session 时就生效（默认 True 才有意义）。"""
-        monkeypatch.setattr(fetcher, 'SSL_VERIFY', False)
-        s = fetcher.build_pixiv_session()
+        monkeypatch.setattr(pixiv_client, 'SSL_VERIFY', False)
+        s = pixiv_client.build_pixiv_session()
         try:
             assert s.verify is False
         finally:
             s.close()
 
-        monkeypatch.setattr(fetcher, 'SSL_VERIFY', True)
-        s = fetcher.build_pixiv_session()
+        monkeypatch.setattr(pixiv_client, 'SSL_VERIFY', True)
+        s = pixiv_client.build_pixiv_session()
         try:
             assert s.verify is True
         finally:

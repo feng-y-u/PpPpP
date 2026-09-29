@@ -1,0 +1,47 @@
+{
+  "error": false,
+  "message": "",
+  "body": {
+    "illust": {
+      "data": [
+        {
+          "id": "100000101",
+          "title": "【サンプル】検索結果 1",
+          "description": "",
+          "illustType": 0,
+          "createDate": "2026-01-01T00:00:00+09:00",
+          "updateDate": "2026-01-03T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/100000101_p0_square1200.jpg",
+          "tags": ["サンプル", "オリジナル"],
+          "userId": "9000101",
+          "userName": "見本絵師D",
+          "width": 1200,
+          "height": 1600,
+          "pageCount": 2,
+          "xRestrict": 0,
+          "isBookmarkable": true,
+          "profileImageUrl": "https://i.pximg.net/user-profile/img/sample.jpg"
+        },
+        {
+          "id": "100000102",
+          "title": "【サンプル】検索結果 2",
+          "description": "",
+          "illustType": 0,
+          "createDate": "2026-01-02T00:00:00+09:00",
+          "updateDate": "2026-01-04T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/02/00/00/00/100000102_p0_square1200.jpg",
+          "tags": ["R-18", "サンプル"],
+          "userId": "9000102",
+          "userName": "見本絵師E",
+          "width": 800,
+          "height": 800,
+          "pageCount": 1,
+          "xRestrict": 1,
+          "isBookmarkable": true
+        }
+      ],
+      "total": 1234
+    },
+    "relatedTags": ["サンプル", "オリジナル"]
+  }
+}

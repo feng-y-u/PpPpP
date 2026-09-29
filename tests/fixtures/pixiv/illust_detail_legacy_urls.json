@@ -1,0 +1,30 @@
+{
+  "error": false,
+  "message": "",
+  "body": {
+    "illustId": "100000003",
+    "illustTitle": "【サンプル】見本イラスト（旧形态：metaPages 欠落）",
+    "illustComment": "",
+    "id": "100000003",
+    "title": "【サンプル】見本イラスト（旧形态：metaPages 欠落）",
+    "illustType": 0,
+    "createDate": "2026-03-01T00:00:00+09:00",
+    "uploadDate": "2026-03-02T00:00:00+09:00",
+    "userId": "9000003",
+    "userName": "見本絵師C",
+    "pageCount": 3,
+    "bookmarkCount": 7,
+    "xRestrict": 0,
+    "urls": {
+      "mini": "https://i.pximg.net/c/48x48/img-master/img/2026/03/01/00/00/00/100000003_p0_square1200.jpg",
+      "thumb": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/03/01/00/00/00/100000003_p0_square1200.jpg",
+      "small": "https://i.pximg.net/c/540x540_70/img-master/img/2026/03/01/00/00/00/100000003_p0_master1200.jpg",
+      "regular": "https://i.pximg.net/img-master/img/2026/03/01/00/00/00/100000003_p0_master1200.jpg",
+      "original": "https://i.pximg.net/img-original/img/2026/03/01/00/00/00/100000003_p0.jpg"
+    },
+    "tags": {
+      "authorId": "9000003",
+      "tags": [ { "tag": "サンプル" } ]
+    }
+  }
+}

@@ -161,7 +161,7 @@ class TestAtomicWriteJson:
 class TestAtomicWriteText:
     """纯文本的原子写（审计 S19 遗留：设置页写 cookies.txt）。
 
-    与 JSON 版同一套纪律，但读侧完全不同：`fetcher._load_cookie()` 在其它线程读同一
+    与 JSON 版同一套纪律，但读侧完全不同：`pixiv_client._load_cookie()` 在其它线程读同一
     路径，读到空串还会**把空值连同 mtime 一起缓存住**。所以这里除了"失败不动旧文件"，
     还多两条契约：不创建父目录（目录写错要明确失败）、Windows 共享冲突有界重试。
     """

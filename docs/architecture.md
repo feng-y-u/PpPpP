@@ -12,7 +12,8 @@
 | `helpers.py` | 纯工具函数与库内查询 | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`、`_delete_illust_files`、`_next_collection_position`、`_compute_move_position` |
 | `middleware.py` | 认证/CSRF/限流/安全头；app 级钩子随 `middleware_bp` 注册即全局生效 | `_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_csrf_required`、`_require_login`（`before_app_request`）、`_security_headers`（`after_app_request`）、`_safe_next`、`_is_authed` |
 | `background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh`/`_is_user_owned` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
-| `fetcher.py` | Pixiv API 封装 | Cookie/OAuth 认证、`search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、作品详情、`clear_search_cache`、`get_detail_error_samples`、`_insert_new_illusts`（冲突容忍入库） |
+| `pixiv_client.py` | **Pixiv 适配层**（Ajax 传输 + 协议）：端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析 | `endpoint_*`（5 个端点，**Ajax 路径字符串的唯一来源**）、`envelope_error`、`handle_list_request_error`、`parse_tags`/`extract_original_urls`/`item_pixiv_id`/`item_bookmark_count`/`parse_illust_summary`/`parse_illust_detail`、`fetch_illust_detail`/`fetch_original_urls`/`fetch_search_illusts`/`fetch_discovery_artworks`/`fetch_user_profile_ids`/`fetch_following_latest`、`build_pixiv_session`/`build_credentialless_session`/`get_pooled_session`/`reset_pooled_session`/`set_cookie_cache`、`_TokenBucket` 与三个桶、`PixivAuthError`、`DEAD_DETAIL`/`RETRYABLE_GLOBAL_DETAIL`、`get_detail_error_samples`、`R18_TAGS`、`build_search_query` |
+| `fetcher.py` | Pixiv **业务层**：过滤/缓存/分页/入库；Ajax 细节全部委托适配层 | `search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、`_process_items`、`_insert_new_illusts`（冲突容忍入库）、`clear_search_cache`、`_fetch_details_parallel`（并发与 early_stop）、`_kick_background_fill`；并**再导出**适配层符号（见「测试契约」） |
 | `models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/Collection/CollectionItem/SearchCache |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` import 时覆盖 | `DOWNLOAD_DIR`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE`、`ITEMS_PER_PAGE` 等；**import 时执行全部副作用**（读 `.env`/settings.json、生成密钥） |
 | `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `/search`、`/api/search/status/<task_id>`、`/api/cache/*`、`/api/following`；`_submit_search_task`/`_cleanup_search_tasks` |
@@ -27,10 +28,10 @@
 依赖单向、无循环 import：
 
 ```
-helpers / runtime（叶子）→ middleware → background → routes_* → app.py（组装）
+pixiv_client / config / runtime（叶子）→ helpers → middleware → background → routes_* → app.py（组装）
 ```
 
-- `helpers`/`runtime` 只依赖 config/models/fetcher 与标准库（叶子模块）。
+- `pixiv_client` 只依赖 config 与 requests（传输与协议）；`helpers`/`runtime` 只依赖 config/models/pixiv_client 与标准库（叶子模块）—— **helpers 不再依赖 fetcher**（它取原图地址走 `pixiv_client.fetch_original_urls`，不再反向依赖业务层）。
 - `middleware` 读取 runtime 状态（限流存储）。
 - `background` 依赖 helpers/runtime/models/fetcher。
 - 各 `routes_*` 依赖 middleware/helpers/runtime/background/models，**模块间不互相导入**。
@@ -63,6 +64,22 @@ helpers / runtime（叶子）→ middleware → background → routes_* → app.
 | `ACCESS_PASSWORD`、`SETTINGS_PASSWORD` | test_auth.py |
 | `_safe_next` | test_auth.py 直接调用 |
 | `query_cached_tag` | test_search_cache.py 直接调用 |
+
+**适配层（`pixiv_client`）是第二组 seam**：`fetcher` 用 from-import 把适配层符号再导出，因此
+`@patch('fetcher.build_pixiv_session')` / `patch('fetcher._get_illust_detail')` /
+`patch('fetcher._kick_background_fill')` / `patch('fetcher._fetch_details_parallel')` 仍然有效
+（`_fetch_details_parallel` 按模块级名查找 `_get_illust_detail`，补丁可见）。
+
+但**有状态符号只在 `pixiv_client` 命名空间**，不得再从 `fetcher` 再导出：
+
+| 只在 `pixiv_client` | 为什么 |
+|---|---|
+| `COOKIE_PATH`、`_cookie_value`、`_cookie_mtime`、`_load_cookie` | Cookie 缓存与建 session 必须同处一个模块，否则"设置页写盘后同步内存态"与"mtime 变了就重建连接池"会跨模块断裂 |
+| `_total_limiter`、`_detail_limiter`、`_fill_limiter` | 桶的**状态**归适配层；再导出一份会让 `monkeypatch.setattr(fetcher, '_total_limiter', ...)` 静默失效（补丁打了但不生效） |
+| `_detail_error_samples`、`PROXY`、`SSL_VERIFY` | 同上：补丁必须打在真正读它的模块上 |
+
+`tests/test_pixiv_contract.py` + `tests/fixtures/pixiv/` 是这套契约的**离线回归网**（端点 URL 形状 /
+信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类）；样本用 `scripts/pixiv_capture.py` 脱敏刷新。
 
 **新增对 `app.<符号>` 的读取规则**：路由/后台模块若需读取**可能被测试 monkeypatch 的 app 命名空间符号**，必须在函数体内 `import app` 延迟导入并限定 `app.<符号>`（先例：routes_search.py:34/99、routes_prefetch.py:42/151、routes_settings.py:44/127/144/162/188），并在该行注释 `# 延迟导入…tests monkeypatch('app.<符号>')`。禁止在模块顶部 `from app import <符号>`（会造成循环 import，且看不到测试补丁）。
 

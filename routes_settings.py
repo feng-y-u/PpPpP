@@ -18,7 +18,7 @@ from flask import (Blueprint, Response, jsonify, redirect, render_template,
                    request, session)
 
 import config as config_module
-import fetcher
+import pixiv_client
 from fetcher import clear_search_cache
 from background import get_background_health
 from helpers import _atomic_write_json, _atomic_write_text
@@ -224,19 +224,19 @@ def api_settings_post() -> Response:
     body = _get_json_body()
     current = _load_settings()
 
-    # Cookie 字段特殊处理：写入 fetcher 实际读取的那个文件，并立即更新内存状态
+    # Cookie 字段特殊处理：写入适配层实际读取的那个文件，并立即同步进程内缓存
     cookie_val = body.pop('cookie', '').strip()
     if cookie_val:
         # 剔除换行/控制字符，防止向 cookies.txt 注入多行破坏鉴权
         clean_val = re.sub(r'[\r\n\t\x00-\x1f\x7f]', '', cookie_val).strip()
         if not clean_val:
             return jsonify({'error': 'Cookie 内容无效'}), 400
-        # 落点必须是 fetcher 读的那个文件（config.COOKIE_PATH；Linux 上存在
-        # /etc/pixiv-viewer/cookies.txt 时就是它）。此前硬编码项目根目录，在那种部署里
-        # 等于"写一个没人读的文件"：进程内靠直接赋值 _cookie_value 显得生效，重启后旧
-        # Cookie 复辟；而且 get_pooled_session 的失效戳盯的是 COOKIE_PATH，新 Cookie
-        # 连当期都不会对已缓存的连接池生效。路径不可写时明确失败（错误信息带路径），
-        # 不再静默写到一个无害文件然后假装成功。
+        # 落点必须是 `pixiv_client.COOKIE_PATH` 读的那个文件（= config.COOKIE_PATH；
+        # Linux 上存在 /etc/pixiv-viewer/cookies.txt 时就是它）。此前硬编码项目根目录，
+        # 在那种部署里等于"写一个没人读的文件"：进程内靠直接赋值缓存显得生效，
+        # 重启后旧 Cookie 复辟；而且 get_pooled_session 的失效戳盯的是 COOKIE_PATH，
+        # 新 Cookie 连当期都不会对已缓存的连接池生效。路径不可写时明确失败
+        #（错误信息带路径），不再静默写到一个无害文件然后假装成功。
         cookie_path = app.COOKIE_PATH
         try:
             # 原子写：读侧在其它线程读同一路径（--threads 8），先截断再写会让它读到
@@ -244,8 +244,9 @@ def api_settings_post() -> Response:
             _atomic_write_text(cookie_path, f'PHPSESSID={clean_val}\n')
         except OSError as e:
             return jsonify({'error': f'cookies.txt 写入失败（{cookie_path}）: {e}'}), 500
-        fetcher._cookie_value = clean_val
-        fetcher._cookie_mtime = os.path.getmtime(cookie_path)
+        # Cookie 缓存归适配层所有（见 pixiv_client.set_cookie_cache）；mtime 必须取自
+        # **刚写入的那个路径**，否则与连接池失效戳不是同一把尺子。
+        pixiv_client.set_cookie_cache(clean_val, os.path.getmtime(cookie_path))
         logger.info('cookies.txt 已通过设置页更新: %s', cookie_path)
 
     # 仅合并已知的配置键

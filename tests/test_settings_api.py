@@ -9,7 +9,7 @@ import os
 import pytest
 
 import app
-import fetcher
+import pixiv_client
 import helpers
 import routes_settings
 
@@ -22,7 +22,7 @@ def _isolate_settings(monkeypatch, tmp_path):
     return path
 
 
-# patch 前的 COOKIE_PATH 绑定（app / fetcher 两侧），由下面这个 autouse 夹具在改之前记录。
+# patch 前的 COOKIE_PATH 绑定（app / pixiv_client 两侧），由下面这个 autouse 夹具在改之前记录。
 _ORIGINAL_COOKIE_PATHS: dict = {}
 
 
@@ -30,8 +30,8 @@ _ORIGINAL_COOKIE_PATHS: dict = {}
 def _isolate_cookies_txt(monkeypatch, tmp_path):
     """把 Cookie 落点重定向到临时文件，并**兜底断言没碰仓库真实文件**。
 
-    落点就是 `app.COOKIE_PATH`（config.COOKIE_PATH 的再导出，fetcher 读的同一个值），
-    所以直接 patch 它即可；同时把 `fetcher.COOKIE_PATH` 指向同一文件，读写两端才在
+    落点就是 `app.COOKIE_PATH`（config.COOKIE_PATH 的再导出，适配层读的同一个值），
+    所以直接 patch 它即可；同时把 `pixiv_client.COOKIE_PATH` 指向同一文件，读写两端才在
     一起（生产里它们本来就是同一个值）。
     仓库根目录下可能存在真实的 cookies.txt（.gitignore 里，但开发者机器上通常有），
     所以这里既要重定向，也要在收尾时证明它逐字节没变。
@@ -45,15 +45,15 @@ def _isolate_cookies_txt(monkeypatch, tmp_path):
     target = tmp_path / 'cookies.txt'
     # patch 前的真实绑定，供 test_cookie_path_is_the_config_value 校验"两处同源"
     _ORIGINAL_COOKIE_PATHS['app'] = app.COOKIE_PATH
-    _ORIGINAL_COOKIE_PATHS['fetcher'] = fetcher.COOKIE_PATH
+    _ORIGINAL_COOKIE_PATHS['pixiv_client'] = pixiv_client.COOKIE_PATH
     monkeypatch.setattr(app, 'COOKIE_PATH', str(target))
-    monkeypatch.setattr(fetcher, 'COOKIE_PATH', str(target))
-    original_cookie_value = fetcher._cookie_value
-    original_cookie_mtime = fetcher._cookie_mtime
+    monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', str(target))
+    original_cookie_value = pixiv_client._cookie_value
+    original_cookie_mtime = pixiv_client._cookie_mtime
     yield target
 
-    fetcher._cookie_value = original_cookie_value
-    fetcher._cookie_mtime = original_cookie_mtime
+    pixiv_client._cookie_value = original_cookie_value
+    pixiv_client._cookie_mtime = original_cookie_mtime
     # 先**无条件还原**仓库根的真实 cookies.txt 再报告违规：该文件在 .gitignore 里，
     # 一旦被测试写坏就再没有任何副本可恢复（旧版"只断言不还原"的夹具真在证伪跑动中
     # 把它覆盖成了测试 token，只能人工重新贴 Cookie）。
@@ -213,7 +213,7 @@ class TestSettingsCookie:
 
         assert resp.status_code == 200
         assert _isolate_cookies_txt.read_text(encoding='utf-8') == 'PHPSESSID=abc123def456\n'
-        assert fetcher._cookie_value == 'abc123def456'
+        assert pixiv_client._cookie_value == 'abc123def456'
 
     def test_control_chars_cannot_inject_extra_lines(self, client, _isolate_cookies_txt):
         """换行/回车/NUL 必须被剔除：否则可写入第二行伪造其它 Cookie。"""
@@ -225,7 +225,7 @@ class TestSettingsCookie:
         assert written.count('\n') == 1, '只能有一行（末尾换行）'
         assert '\r' not in written and '\t' not in written and '\x00' not in written
         assert written.startswith('PHPSESSID=abcINJECTED=1')
-        assert fetcher._cookie_value == 'abcINJECTED=1'
+        assert pixiv_client._cookie_value == 'abcINJECTED=1'
 
     def test_cookie_of_only_control_chars_is_rejected(self, client, _isolate_cookies_txt):
         """剔除后为空说明用户根本没填有效内容 → 400，且不碰文件。"""
@@ -258,13 +258,13 @@ class TestSettingsCookie:
         assert 'cookies.txt 写入失败' in resp.get_json()['error']
         assert str(_isolate_cookies_txt) in resp.get_json()['error'], '错误信息要给出实际落点'
         assert not _isolate_settings.exists()
-        assert fetcher._cookie_value != 'will-fail'
+        assert pixiv_client._cookie_value != 'will-fail'
 
-    def test_cookie_lands_where_the_fetcher_reads_it(self, client, _isolate_cookies_txt):
-        """写盘落点必须是 fetcher 读的那个文件，而不是"项目根下的同名文件"。
+    def test_cookie_lands_where_the_adapter_reads_it(self, client, _isolate_cookies_txt):
+        """写盘落点必须是适配层读的那个文件，而不是"项目根下的同名文件"。
 
         审计 §20.2 的 Medium 发现：路由此前硬编码项目根目录（`__file__` 推导），而
-        fetcher 读 `config.COOKIE_PATH`（Linux 上存在 `/etc/pixiv-viewer/cookies.txt`
+        适配层读 `config.COOKIE_PATH`（Linux 上存在 `/etc/pixiv-viewer/cookies.txt`
         时就是它）。那种部署里设置页等于在写一个没人读的文件 —— 进程内靠直接赋值
         `_cookie_value` 看着生效，**重启后旧 Cookie 复辟**。
 
@@ -276,26 +276,26 @@ class TestSettingsCookie:
         assert resp.status_code == 200
         assert _isolate_cookies_txt.read_text(encoding='utf-8') == 'PHPSESSID=roundtrip-token\n'
 
-        # 读侧真链路：抹掉内存态强制回读磁盘（跑的是 fetcher 自己的读取逻辑）
-        fetcher._cookie_value = ''
-        fetcher._cookie_mtime = 0.0
-        fetcher._load_cookie()
-        assert fetcher._cookie_value == 'roundtrip-token', '设置页写的 Cookie 必须能被读回来'
+        # 读侧真链路：抹掉内存态强制回读磁盘（跑的是适配层自己的读取逻辑）
+        pixiv_client._cookie_value = ''
+        pixiv_client._cookie_mtime = 0.0
+        pixiv_client._load_cookie()
+        assert pixiv_client._cookie_value == 'roundtrip-token', '设置页写的 Cookie 必须能被读回来'
 
     def test_cookie_path_is_the_config_value(self):
         """落点就是 config.COOKIE_PATH（经 app 命名空间再导出），不是第二份路径推导。"""
         import config
 
         assert _ORIGINAL_COOKIE_PATHS['app'] == config.COOKIE_PATH
-        assert _ORIGINAL_COOKIE_PATHS['fetcher'] == config.COOKIE_PATH
+        assert _ORIGINAL_COOKIE_PATHS['pixiv_client'] == config.COOKIE_PATH
 
     def test_cookie_write_is_an_atomic_swap(self, client, _isolate_cookies_txt, monkeypatch):
         """写 Cookie 必须是"同目录 tmp → os.replace"，**不能先把目标文件截断再写**。
 
-        为什么这在这里是必需品而不是洁癖：`fetcher._load_cookie()` 在其它线程里读同一
+        为什么这在这里是必需品而不是洁癖：`pixiv_client._load_cookie()` 在其它线程里读同一
         路径（生产是 `gunicorn -w 1 --threads 8`），而 `open(path, 'w')` 会**先截断**。
         读侧读到空串时会把 `_cookie_value` 置空并**连同 mtime 一起缓存**（见
-        `fetcher._load_cookie`），之后除非文件 mtime 再变，那条线程/那个连接池会一直
+        `pixiv_client._load_cookie`），之后除非文件 mtime 再变，那条线程/那个连接池会一直
         用空 Cookie —— 症状就是"设置页明明保存成功了，搜索仍 401/空结果，重启才好"。
 
         本用例在 `os.replace` 被调用的**那一刻**取证：目标文件必须仍是完整的旧值
@@ -368,7 +368,7 @@ class TestSettingsCookie:
         只在 POSIX 上断言。生产是 Linux（systemd + gunicorn），Windows 只是开发机。
 
         读侧刻意 sleep 2ms 而不是死循环空转：真实读侧是请求线程在 mtime 变化时 open
-        一次（`fetcher._load_cookie`），不是自旋。自旋会把 Windows 的共享冲突放大成
+        一次（`pixiv_client._load_cookie`），不是自旋。自旋会把 Windows 的共享冲突放大成
         "目标文件永远开着"，那是测试造出来的现象、不是产品现象。2ms 的轮询仍然比写侧
         的截断窗口快几个数量级 —— 旧实现上照样能复现读到空串（2026-09-11 实测 120 轮
         内必现）。
@@ -386,9 +386,9 @@ class TestSettingsCookie:
         def reader():
             while not stop.is_set():
                 try:
-                    fetcher._cookie_mtime = 0.0
-                    fetcher._load_cookie()
-                    seen_values.append(fetcher._cookie_value)
+                    pixiv_client._cookie_mtime = 0.0
+                    pixiv_client._load_cookie()
+                    seen_values.append(pixiv_client._cookie_value)
                 except PermissionError as exc:
                     read_errors.append(exc)   # 仅 Windows 的共享冲突，见 docstring
                 except Exception as exc:
@@ -418,9 +418,9 @@ class TestSettingsCookie:
             '写侧必须先写 tmp 再原子替换')
 
         # 收尾一致性：磁盘上是最后一次写进去的值，且能被读回来
-        fetcher._cookie_mtime = 0.0
-        fetcher._load_cookie()
-        assert fetcher._cookie_value == f'new-token-{rounds - 1}'
+        pixiv_client._cookie_mtime = 0.0
+        pixiv_client._load_cookie()
+        assert pixiv_client._cookie_value == f'new-token-{rounds - 1}'
 
     @pytest.mark.skipif(os.name != 'posix', reason='POSIX 权限位（Windows 的 chmod 语义不同）')
     def test_cookie_write_preserves_existing_file_mode(self, client, _isolate_cookies_txt):

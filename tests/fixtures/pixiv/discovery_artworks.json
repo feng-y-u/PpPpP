@@ -1,0 +1,53 @@
+{
+  "error": false,
+  "message": "",
+  "body": {
+    "thumbnails": {
+      "illust": [
+        {
+          "id": "100000201",
+          "title": "【サンプル】发现页 1",
+          "illustType": 0,
+          "createDate": "2026-04-01T00:00:00+09:00",
+          "updateDate": "2026-04-02T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/04/01/00/00/00/100000201_p0_square1200.jpg",
+          "tags": ["サンプル", "風景"],
+          "userId": "9000201",
+          "userName": "見本絵師F",
+          "width": 1400,
+          "height": 900,
+          "pageCount": 1,
+          "xRestrict": 0,
+          "type": "illust"
+        },
+        {
+          "id": "100000202",
+          "title": "【サンプル】发现页 2（漫画，须被过滤）",
+          "illustType": 1,
+          "createDate": "2026-04-02T00:00:00+09:00",
+          "updateDate": "2026-04-03T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/04/02/00/00/00/100000202_p0_square1200.jpg",
+          "tags": ["サンプル", "漫画"],
+          "userId": "9000202",
+          "userName": "見本絵師G",
+          "pageCount": 1,
+          "type": "manga"
+        },
+        {
+          "id": "100000203",
+          "title": "【サンプル】发现页 3",
+          "illustType": 0,
+          "createDate": "2026-04-03T00:00:00+09:00",
+          "updateDate": "2026-04-04T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/04/03/00/00/00/100000203_p0_square1200.jpg",
+          "tags": [{ "tag": "サンプル" }, { "tag": "オリジナル" }],
+          "userId": "9000203",
+          "userName": "見本絵師H",
+          "pageCount": 4
+        }
+      ]
+    },
+    "total": 4800,
+    "nextUrl": "/ajax/discovery/artworks?mode=all&p=2&limit=60&order=popular_d"
+  }
+}

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import re
 import time
 import hmac
 import json
@@ -12,53 +10,45 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import urllib3
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from config import (
-    COOKIE_PATH, PIXIV_BASE_URL, SEARCH_PAGES, PER_PAGE, ITEMS_PER_PAGE,
-    DETAIL_TIMEOUT, DETAIL_MAX_RETRIES, FETCH_DETAIL_WORKERS,
-    PROXY, SSL_VERIFY, CURSOR_SECRET,
+    SEARCH_PAGES, PER_PAGE, ITEMS_PER_PAGE,
+    DETAIL_MAX_RETRIES,  # 测试断言 `fetcher.DETAIL_MAX_RETRIES`；值本身由配置单点定义
+    FETCH_DETAIL_WORKERS, CURSOR_SECRET,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import Illust, BlockedTag, get_session, get_favorite_pids, safe_commit
 
+import pixiv_client
+# ── 适配层再导出（历史调用方 + 测试补丁 seam）──
+# Pixiv 的 Ajax 路径/查询参数/响应字段/认证/限流全部归 `pixiv_client`（分层契约见
+# 该模块顶部 docstring）。这里再导出，是为了让 `fetcher.X` 的老调用方
+# （routes_* / background / helpers / tests）不必同时改两处。
+#
+# ⚠️ 有状态符号（`_cookie_value` / `_cookie_mtime` / `_total_limiter` / `_fill_limiter` /
+# `_detail_error_samples` / `PROXY` / `SSL_VERIFY`）刻意**不**在这里再导出：它们归适配层
+# 所有，读取与补丁都必须直接对 `pixiv_client`。再导出一份只会制造"补丁打了却没生效"的
+# 静默失效（`_TokenBucket` 是无状态类，再导出供测试构造限速器，见 test_fetcher.py）。
+from pixiv_client import (
+    PixivAuthError,
+    R18_TAGS,
+    DEAD_DETAIL, RETRYABLE_GLOBAL_DETAIL,
+    _TokenBucket,
+    build_pixiv_session, build_credentialless_session,
+    get_pooled_session, reset_pooled_session,
+    get_detail_error_samples,
+    split_tags as _split_tags,
+    parse_tags as _parse_tags,
+    item_pixiv_id, item_bookmark_count, parse_illust_summary,
+)
+
+# 适配层入口的历史私有名：background/tests 仍按老名字调用与打补丁。
+# `_fetch_details_parallel` 里的 `_get_illust_detail(...)` 是模块级查找，补丁可见。
+_get_illust_detail = pixiv_client.fetch_illust_detail
+
 logger = logging.getLogger(__name__)
-
-_cookie_mtime = 0
-_cookie_value = ''
-_pixiv_hostname = urlparse(PIXIV_BASE_URL).hostname or 'www.pixiv.net'
-
-
-class PixivAuthError(Exception):
-    """认证失败：Cookie 过期或无效。"""
-
-
-def _is_auth_error(msg: str) -> bool:
-    for kw in ('認証', 'auth', 'login', 'ログイン', 'session', 'expired'):
-        if kw.lower() in msg.lower():
-            return True
-    return False
-
-
-def _warn_403(api: str) -> None:
-    """记一条 403 的分类告警（审计 S13）。
-
-    Pixiv 对**并发/频率过高**也回 403（本模块顶部注释：详情并发 3 实测即触发），
-    所以 403 不能当作"Cookie 失效"上报：
-      - 预取路径收到 `PixivAuthError` 会中止整轮（含容量清理），而换个节奏重试
-        其实就能成功；
-      - 前端会提示用户重新登录，而重登修不好限流。
-    这里按既有失败形态返回空结果（列表 `([], False)`、profile `[]`），并留下这条
-    可检索的告警 —— 同一个 403 是"限流"还是"真被风控"只能靠频率与时机判断。
-    """
-    logger.warning(f'{api} API 返回 HTTP 403，疑似限流/风控（非认证失效），按失败返回空结果')
 
 
 def encode_cursor(data: dict) -> str:
@@ -286,136 +276,15 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
     return batch, next_cursor, has_more
 
 
-def _load_cookie() -> None:
-    global _cookie_mtime, _cookie_value
-    if not os.path.exists(COOKIE_PATH):
-        raise FileNotFoundError(f'Cookie file not found: {COOKIE_PATH}')
-    mtime = os.path.getmtime(COOKIE_PATH)
-    if mtime != _cookie_mtime:
-        with open(COOKIE_PATH) as f:
-            raw = f.read().strip()
-        if raw.startswith('PHPSESSID='):
-            _cookie_value = raw.split('=', 1)[1]
-        else:
-            _cookie_value = raw
-        _cookie_mtime = mtime
-
-
-def build_pixiv_session() -> requests.Session:
-    """构造访问 Pixiv 的 requests.Session（UA/Referer/Cookie/PROXY/SSL_VERIFY/重试 齐全）。
-
-    所有指向 Pixiv 的请求（搜索、详情、下载、缩略图代理）必须经由此工厂，
-    禁止裸建 requests.Session()（2026-07-25 审查 P0-2）。
-    """
-    s = requests.Session()
-    s.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': f'{PIXIV_BASE_URL}/',
-        'Accept-Language': 'ja,zh-CN;q=0.9,zh;q=0.8,en;q=0.7',
-    })
-
-    _load_cookie()
-    s.headers.update({'Cookie': f'PHPSESSID={_cookie_value}'})
-    s.cookies.set('PHPSESSID', _cookie_value, domain=_pixiv_hostname)
-
-    s.verify = SSL_VERIFY
-
-    if PROXY:
-        s.proxies = {'https': PROXY, 'http': PROXY}
-
-    adapter = HTTPAdapter()
-    # connect=0：连接建立失败（超时/拒绝/DNS/代理）不在 urllib3 层重试。连接类
-    # 错误几乎必然重复失败，重试只会线性放大等待——应用层另有 DETAIL_MAX_RETRIES
-    # 次重试，两层叠加会把 10s 连接超时放大成 62s。429/5xx 与读取错误仍重试一次。
-    retry = Retry(total=1, connect=0, backoff_factor=0.5,
-                  status_forcelist=[429, 500, 502, 503])
-    adapter.max_retries = retry
-    s.mount('https://', adapter)
-    return s
-
-
-def build_credentialless_session() -> requests.Session:
-    """构造**不带 Pixiv 凭据**的 session（白名单外的图片主机用）。
-
-    `build_pixiv_session()` 挂的是**会话级** `Cookie` 头（`s.headers.update`），
-    requests 会把它发给任意主机 —— 紧随其后的 `s.cookies.set(..., domain=...)`
-    才是主机作用域的。所以访问非 Pixiv 域名时必须显式摘掉这个头，否则等于把
-    PHPSESSID 交给第三方：对方拿它就能以你的账号身份调用 Pixiv API。
-    """
-    s = build_pixiv_session()
-    s.headers.pop('Cookie', None)
-    # 域级 Cookie 也清掉：RequestsCookieJar 里的 PHPSESSID 是 host-only/带域的，
-    # 留着它就不是"无凭据会话"，将来任何同域/子域跳转都可能把它带出去。
-    s.cookies.clear()
-    return s
-
-
-# ── 线程内连接池（图片代理 / 并发详情共用）──
-# 调用方曾对每张图、每个作品都 build_pixiv_session() 再 close()，于是每次请求
-# 都要重做 TCP + TLS 握手（实测 30 次请求 = 30 条连接，复用后 = 1 条；本地无
-# TLS 就已快 3 倍，真实环境还要叠加每次 1~2 个 RTT 的 TLS 握手）。批量加载
-# 图片或并发拉详情时，握手开销可能超过响应体本身，是图库/灯箱/搜索变慢的主因。
+# ── Cookie / Session / 连接池 / 标签切分 ──
+# 实现已迁至 `pixiv_client`（认证与传输的归属地）：`_load_cookie`、
+# `build_pixiv_session`、`build_credentialless_session`、`get_pooled_session`、
+# `reset_pooled_session` 由本模块顶部再导出；`_split_tags` 是适配层 `split_tags`
+# 的别名（Pixiv 检索词的拼装见 `pixiv_client.build_search_query`）。
 #
-# 按线程缓存而非全局共享：requests.Session 不保证线程安全，但同线程内跨请求
-# 复用连接池完全安全，且已覆盖 gunicorn sync worker 的主线程与线程池 executor
-# 的各工作线程（每个线程一条连接，跨请求复用）。
-_thread_local = threading.local()
-
-
-def _cookie_file_stamp() -> float | None:
-    """Cookie 文件 mtime；文件缺失时返回 None（行为同旧代码：由 _load_cookie 抛出）。"""
-    try:
-        return os.path.getmtime(COOKIE_PATH)
-    except OSError:
-        return None
-
-
-def get_pooled_session(with_cookie: bool = True) -> requests.Session:
-    """取本线程复用的 Pixiv session。Cookie 文件内容变化时自动重建。
-
-    `with_cookie=False` 取的是**无凭据**变体（白名单外的图片主机专用）：两条
-    连接池按线程各自缓存、互不影响。
-    """
-    slot = 'session' if with_cookie else 'anon_session'
-    stamp_slot = 'stamp' if with_cookie else 'anon_stamp'
-    stamp = _cookie_file_stamp()
-    session = getattr(_thread_local, slot, None)
-    if session is not None and getattr(_thread_local, stamp_slot, None) == stamp:
-        return session
-    if session is not None:
-        try:
-            session.close()
-        except Exception:
-            pass
-    # build_pixiv_session() 内部的 _load_cookie() 会刷新 _cookie_mtime/_cookie_value
-    session = build_pixiv_session() if with_cookie else build_credentialless_session()
-    setattr(_thread_local, slot, session)
-    setattr(_thread_local, stamp_slot, stamp)
-    return session
-
-
-def reset_pooled_session() -> None:
-    """丢弃本线程的连接池（凭据与无凭据两个都丢）。
-
-    复用的 keep-alive 连接被对端关闭后需要重建；两条池都丢是因为触发场景
-    （连接异常）无法区分坏的连接属于哪条池。
-    """
-    for slot, stamp_slot in (('session', 'stamp'), ('anon_session', 'anon_stamp')):
-        session = getattr(_thread_local, slot, None)
-        if session is None:
-            continue
-        try:
-            session.close()
-        except Exception:
-            pass
-        setattr(_thread_local, slot, None)
-        setattr(_thread_local, stamp_slot, None)
-
-
-def _split_tags(keyword: str) -> list[str]:
-    raw = keyword.replace('，', ',').strip()
-    parts = [t.strip() for t in raw.split(',') if t.strip()]
-    return parts if parts else [raw]
+# 为什么整块搬走而不是"留在业务层也无所谓"：Cookie 缓存（`_cookie_value` /
+# `_cookie_mtime`）与连接池失效戳必须与建 session 的代码同处一个模块，否则
+# 设置页写盘后同步内存态、以及"mtime 变了就重建连接"这条链会跨模块断裂。
 
 
 def _get_blocked_tags(db: Any) -> set[str]:
@@ -446,133 +315,17 @@ def _is_blocked(tags: list[str], blocked: set[str]) -> bool:
     return bool(set(tags) & blocked)
 
 
-R18_TAGS = {"R-18", "R-18G"}
+# `R18_TAGS` / `parse_tags` / `extract_original_urls` 已迁至 `pixiv_client`
+# （R18 词表是 Pixiv 标签词汇，tags 的多种历史形态与详情页原图地址的三条优先级
+# 路径都是协议细节）。`_parse_tags` 是适配层 `parse_tags` 的别名。
 
 
 def _is_r18(tags: list[str]) -> bool:
     return bool(set(tags) & R18_TAGS)
 
-
-def _parse_tags(tags_data: Any) -> list[str]:
-    if not tags_data:
-        return []
-    if isinstance(tags_data, list):
-        if len(tags_data) == 0:
-            return []
-        if isinstance(tags_data[0], str):
-            return tags_data
-        if isinstance(tags_data[0], dict):
-            return [t.get('tag', '') for t in tags_data if t.get('tag')]
-    if isinstance(tags_data, dict):
-        inner = tags_data.get('tags', [])
-        if isinstance(inner, list) and len(inner) > 0 and isinstance(inner[0], dict):
-            return [t.get('tag', '') for t in inner if t.get('tag')]
-    return []
-
-
-def _extract_original_urls(detail_body: dict) -> list[str]:
-    urls = []
-    meta_pages = detail_body.get('metaPages')
-    if meta_pages and len(meta_pages) > 0:
-        for page in meta_pages:
-            u = page.get('urls', {}).get('original', '')
-            if u:
-                urls.append(u)
-        return urls
-    meta_single = detail_body.get('metaSinglePage')
-    if meta_single and meta_single.get('originalImageUrl'):
-        urls.append(meta_single['originalImageUrl'])
-        return urls
-    original = detail_body.get('urls', {}).get('original', '')
-    if not original:
-        return urls
-    page_count = detail_body.get('pageCount', 1)
-    if page_count <= 1:
-        urls.append(original)
-        return urls
-    for i in range(page_count):
-        page_url = re.sub(r'_p0(\.[a-zA-Z]+)(\?|$)', f'_p{i}\\1\\2', original)
-        urls.append(page_url)
-    return urls
-
-
-class _TokenBucket:
-    """全局请求限速器：所有并发 worker 共享，从根上防止触发 Pixiv 403/429 限流。
-
-    rate_per_minute: 每分钟允许的请求数。限速器保证任意时刻全局请求间隔
-    不小于 60/rate 秒，多 worker 并发时整体速率仍被压住。
-    """
-
-    def __init__(self, rate_per_minute: float):
-        self._lock = threading.Lock()
-        self._interval = 60.0 / rate_per_minute
-        self._last = 0.0
-
-    def wait(self) -> None:
-        with self._lock:
-            now = time.time()
-            delay = self._last + self._interval - now
-            if delay > 0:
-                time.sleep(delay)
-            self._last = time.time()
-
-
-# Pixiv 详情 API 限流保守速率（并发 3 时实测仍会 403，必须全局限速）。
-# 前台同步拉取（搜索过滤）独占高速桶；后台补全走独立低速桶，避免抢占搜索带宽。
-# 两个桶之上再设总速率闸，防止双桶并发时峰值超限重新触发 403。
-DETAIL_RATE_PER_MINUTE = 45
-FILL_RATE_PER_MINUTE = 20
-TOTAL_RATE_PER_MINUTE = 60
-_detail_limiter = _TokenBucket(DETAIL_RATE_PER_MINUTE)
-_fill_limiter = _TokenBucket(FILL_RATE_PER_MINUTE)
-_total_limiter = _TokenBucket(TOTAL_RATE_PER_MINUTE)
-
-# 详情"永久死亡"哨兵：作品已删除/非公開/不存在，重试无意义。
-# 仅 _prefetch_refresh_bookmarks 经 return_dead=True 请求它；其余调用方
-# （搜索/后台补全）不传该参数，保持收到 None 的旧语义。
-DEAD_DETAIL = object()
-
-# 详情"全局性暂时失败"哨兵：Pixiv 限流（403/429 重试耗尽）或连接错误。
-# 这类失败不是单个作品的问题，刷新路径不能把它记成该作品的退避——否则
-# 限流期间会把整队列刷上 24h 退避、且每条白烧 3s+9s 退避时间。刷新侧
-# 应据此中止本轮（见 background.PREFETCH_REFRESH_ABORT_STREAK）。
-RETRYABLE_GLOBAL_DETAIL = object()
-
-# 删除类报错关键词（保守集合）：命中即永久死亡。R18 权限类 message
-# （如「年龄确认」）不在其中，按暂时性失败退避重试 —— 换好 Cookie 后可恢复，
-# 绝不误删。可按服务器日志（'Detail API error for ...'）实测报文微调。
-_PERMANENT_REMOVE_KEYWORDS = frozenset((
-    '削除', '删除', '被删除', '不存在', '非公開', '非公开',
-    'not found', 'not exist',
-))
-
-
-def _is_permanently_removed_message(msg: str) -> bool:
-    low = msg.lower()
-    return any(k.lower() in low for k in _PERMANENT_REMOVE_KEYWORDS)
-
-
-# 未识别详情报错采样：记录**没命中**删除关键词的 error:true 报文（message → 次数）。
-# 用途：不必 SSH 翻日志就能在设置页看到 Pixiv 的真实措辞，据此补充关键词清单。
-# 进程内、重启即清；上限 _DETAIL_ERROR_SAMPLE_LIMIT 种，避免无界增长。
-_DETAIL_ERROR_SAMPLE_LIMIT = 20
-_detail_error_samples: dict[str, int] = {}
-_detail_error_lock = threading.Lock()
-
-
-def _record_detail_error(msg: str) -> None:
-    key = (msg or '').strip()[:200] or '(空 message)'
-    with _detail_error_lock:
-        if key in _detail_error_samples:
-            _detail_error_samples[key] += 1
-        elif len(_detail_error_samples) < _DETAIL_ERROR_SAMPLE_LIMIT:
-            _detail_error_samples[key] = 1
-
-
-def get_detail_error_samples() -> dict[str, int]:
-    """未识别报错样本（message → 次数），供 /api/prefetch/status 展示。"""
-    with _detail_error_lock:
-        return dict(_detail_error_samples)
+# 详情失败形态（`DEAD_DETAIL` / `RETRYABLE_GLOBAL_DETAIL`）、删除类报文关键词表与
+# 未识别报文采样，全部随详情请求迁至 `pixiv_client` —— 它们是"这次请求的失败形态"，
+# 不是业务概念。哨兵与 `get_detail_error_samples` 由本模块顶部再导出。
 
 # 最近一次搜索的详情拉取统计（供前端展示"为什么慢"）
 _last_fetch_stats: dict = {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0}
@@ -582,74 +335,9 @@ def get_last_fetch_stats() -> dict:
     return dict(_last_fetch_stats)
 
 
-def _get_illust_detail(session: requests.Session, pixiv_id: int,
-                       limiter: _TokenBucket | None = None,
-                       return_dead: bool = False) -> dict | None | object:
-    """拉取单条作品详情。
-
-    return_dead=True 时区分两类失败：永久死亡（404 / 删除类报错）→ `DEAD_DETAIL`，
-    全局性暂时失败（403/429 重试耗尽、连接错误）→ `RETRYABLE_GLOBAL_DETAIL`；
-    其余调用方（不传该参数）保持收到 None 的旧语义。
-    404 不再按一般错误重试：资源已不存在，重试是纯浪费。
-    """
-    url = f'{PIXIV_BASE_URL}/ajax/illust/{pixiv_id}'
-    (limiter or _detail_limiter).wait()
-    _total_limiter.wait()
-    last_status = None
-    for attempt in range(DETAIL_MAX_RETRIES + 1):
-        try:
-            resp = session.get(url, timeout=DETAIL_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get('error'):
-                msg = str(data.get('message', ''))
-                if _is_auth_error(msg):
-                    raise PixivAuthError(msg)
-                if _is_permanently_removed_message(msg):
-                    logger.warning(f'Detail API 永久失败（已删除/非公開）{pixiv_id}: {msg}')
-                    return DEAD_DETAIL if return_dead else None
-                _record_detail_error(msg)
-                logger.warning(f'Detail API error for {pixiv_id}: {msg}')
-                return None
-            body = data['body']
-            urls = body.get('urls', {})
-            return {
-                'title': body.get('illustTitle', ''),
-                'user_id': int(body.get('userId', 0)),
-                'user_name': body.get('userName', ''),
-                'page_count': body.get('pageCount', 1),
-                'bookmark_count': body.get('bookmarkCount', 0),
-                'thumb_url': urls.get('thumb', urls.get('small', '')),
-                'upload_date': body.get('uploadDate', body.get('createDate', '')),
-                'original_urls': _extract_original_urls(body),
-                'tags': _parse_tags(body.get('tags')),
-            }
-        except requests.ConnectionError as e:
-            # 连接建立失败（超时 / 拒绝 / DNS / 代理）：重试几乎必然重复失败，
-            # 且每次都要空等满 DETAIL_TIMEOUT 的连接超时，3 次就是 30s+ 的
-            # 无谓等待。直接放弃，交由调用方降级——后台补全
-            # _kick_background_fill 之后还会兜一次。
-            logger.warning(f'Detail API 连接失败 {pixiv_id}: {e}')
-            return RETRYABLE_GLOBAL_DETAIL if return_dead else None
-        except requests.RequestException as e:
-            status = getattr(getattr(e, 'response', None), 'status_code', None)
-            last_status = status
-            if status == 401:
-                # 认证失效（cookie 过期等）：重试无意义，与检索路径一致上报，
-                # 避免 _process_items 把整页作品静默过滤成空结果。
-                raise PixivAuthError('Pixiv API returned HTTP 401 (认证已失效，请更新 cookies.txt)')
-            if status == 404:
-                # 作品不存在/已删除：确定性永久失败，重试纯浪费。
-                logger.warning(f'Detail API 404（作品不存在/已删除）{pixiv_id}')
-                return DEAD_DETAIL if return_dead else None
-            logger.warning(f'Detail API attempt {attempt + 1} failed for {pixiv_id}: {e}')
-            if attempt < DETAIL_MAX_RETRIES:
-                # 429/403 均为 Pixiv 限流（并发过高时返回 403），递增退避（3s/9s）
-                time.sleep((3 * (3 ** attempt)) if status in (403, 429) else 1)
-    # 重试耗尽：限流类失败是全局状态（不是该作品的问题），刷新路径据此熔断
-    if return_dead and last_status in (403, 429):
-        return RETRYABLE_GLOBAL_DETAIL
-    return None
+# 详情请求本身（含 404/删除类判定、限流退避、连接错误 fail fast）在
+# `pixiv_client.fetch_illust_detail`；`_get_illust_detail` 是它的历史私有别名，
+# 由本模块顶部绑定（`_fetch_details_parallel` 按模块级名查找，测试补丁可见）。
 
 
 def _fetch_details_parallel(pixiv_ids: list[int],
@@ -661,7 +349,8 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     取消未启动的拉取。**已启动的请求会全部处理完再返回**（不丢弃其结果，
     避免作品未入库导致分页漂移后跨页重复）；调用方需等待最慢的在途请求，
     代价受 DETAIL_TIMEOUT/退避上限约束。
-    limiter: 请求限速器；不传时用前台高速桶（搜索），后台补全应传 _fill_limiter。
+    limiter: 请求限速器；不传时用适配层的前台高速桶（搜索），后台补全应传
+        `pixiv_client._fill_limiter`。
 
     Returns: (成功详情 dict, 实际发起的请求数)。early_stop 取消的未启动请求
     不计入 attempted，避免统计把"未尝试"误报为"失败"。
@@ -755,7 +444,7 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
                     del _fill_last_attempt[pid]
         _filling_ids.update(new_ids)
     try:
-        details, _ = _fetch_details_parallel(new_ids, limiter=_fill_limiter)
+        details, _ = _fetch_details_parallel(new_ids, limiter=pixiv_client._fill_limiter)
         if not details:
             return
         with get_session() as db:
@@ -890,7 +579,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         max_results: 收集到该数量的通过结果后提前停止拉取详情（0 = 不限制）。
             用于搜索流式过滤，凑够一页就停，避免拉取整页详情拖慢搜索。
         limiter: 详情请求限速器；不传用前台高速桶（搜索）。后台任务应传
-            对应的低速桶（如 _fill_limiter），避免抢占交互搜索带宽。
+            对应的低速桶（如 `pixiv_client._fill_limiter`），避免抢占交互搜索带宽。
 
     Returns: 可直接用于 API 响应的 illust 字典列表
     """
@@ -920,8 +609,10 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             # bookmark_count 未补全（0）或收藏数过期：优先用列表接口自带的 bookmarkCount 修正
             if existing.bookmark_count == 0 or stale:
                 # defer 路径：API 返回数据自带 bookmarkCount，直接更新跳过补全
-                if defer_details and isinstance(item, dict) and item.get('bookmarkCount', 0) > 0:
-                    existing.bookmark_count = item['bookmarkCount']
+                # （字段名归适配层：`item_bookmark_count` 认的就是 Pixiv 的 bookmarkCount）
+                item_bm = item_bookmark_count(item) if isinstance(item, dict) else 0
+                if defer_details and item_bm > 0:
+                    existing.bookmark_count = item_bm
                     existing.bookmark_updated_at = now_utc
                 elif min_bookmarks > 0:
                     # 用户设了最低收藏但条目无收藏数 → 同步重新拉详情判断
@@ -939,7 +630,8 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             continue
 
         if defer_details:
-            item_tags = _parse_tags(item.get('tags', [])) if isinstance(item, dict) else []
+            # tags 走适配层解析（Pixiv 的 tags 有多种历史形态，字段名只有一处定义）
+            item_tags = parse_illust_summary(item)['tags'] if isinstance(item, dict) else []
             if _is_blocked(item_tags, blocked) or (hide_r18 and _is_r18(item_tags)):
                 continue
             # 注意：defer 仅在 min_bookmarks==0 或显式 defer 时进入，此时无需收藏数过滤；
@@ -1056,20 +748,23 @@ def _illust_from_item(item: dict, detail: dict | None = None) -> Illust:
     大多数字段来自搜索结果条目（列表上下文）。
     detail 为 None 时表示详情尚未拉取，bookmark_count/original_urls 留空，
     由后台补全任务稍后填入。
+    条目字段的读取全部经 `pixiv_client.parse_illust_summary`：Pixiv 改字段名
+    （`userId` → …、`updateDate` → …）只需要改适配层一处。
     """
+    summary = parse_illust_summary(item)
     illust = Illust(
-        pixiv_id=int(item['id']),
-        title=item.get('title', ''),
-        user_id=int(item.get('userId', 0)),
-        user_name=item.get('userName', ''),
-        page_count=item.get('pageCount', 1),
+        pixiv_id=summary['pixiv_id'],
+        title=summary['title'],
+        user_id=summary['user_id'],
+        user_name=summary['user_name'],
+        page_count=summary['page_count'],
         # 列表接口不返回 bookmarkCount（实测字段恒缺失），defer 写入时只能为 0，
         # 真实收藏数由后台补全任务写入
         bookmark_count=detail.get('bookmark_count', 0) if detail else 0,
-        thumb_url=item.get('url', ''),
-        upload_date=_parse_date(item.get('updateDate')),
+        thumb_url=summary['thumb_url'],
+        upload_date=_parse_date(summary['upload_date']),
     )
-    illust.tags_list = _parse_tags(item.get('tags', []))
+    illust.tags_list = summary['tags']
     illust.original_urls_list = detail.get('original_urls', []) if detail else []
     return illust
 
@@ -1114,48 +809,14 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
         _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
         return cached
 
-    tags = _split_tags(keyword)
-    if len(tags) == 1:
-        pixiv_query = tags[0]
-    elif tag_mode == 'and':
-        pixiv_query = ' '.join(tags)
-    else:
-        pixiv_query = '(' + ' OR '.join(tags) + ')'
+    # 检索词拼装（Pixiv 查询语法）+ 请求 + 信封判定都在适配层；
+    # 这里只负责"拿条目 → 过滤/入库/缓存"
+    pixiv_query = pixiv_client.build_search_query(keyword, tag_mode)
 
     session = build_pixiv_session()
-    quoted = requests.utils.quote(pixiv_query)
-    search_url = (
-        f'{PIXIV_BASE_URL}/ajax/search/illustrations/{quoted}'
-        f'?word={quoted}&order={sort_order}&mode={r18_mode}&p={page}'
-        f'&s_mode=s_tag&type=illust'
-    )
-
-    try:
-        resp = session.get(search_url, timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        search_data = resp.json()
-    except requests.RequestException as e:
-        logger.error(f'Search API failed: {e}')
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status == 401:
-            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
-        if status == 403:
-            _warn_403('Search')
-        return [], False
-
-    if search_data.get('error'):
-        msg = str(search_data.get('message', ''))
-        logger.error(f'Search API error: {msg}')
-        if _is_auth_error(msg):
-            raise PixivAuthError(msg)
-        return [], False
-
-    illusts_data = (
-        search_data.get('body', {})
-        .get('illust', {})
-        .get('data', [])
-    )
-    total = search_data.get('body', {}).get('illust', {}).get('total', 0)
+    illusts_data, total = pixiv_client.fetch_search_illusts(
+        session, pixiv_query,
+        sort_order=sort_order, r18_mode=r18_mode, page=page)
 
     if not illusts_data:
         _cache_put(cache_key, ([], False))
@@ -1166,7 +827,7 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
         blocked = _get_blocked_tags(db)
         results = _process_items(
             db, illusts_data,
-            id_extractor=lambda item: int(item['id']),
+            id_extractor=item_pixiv_id,
             illust_factory=_illust_from_item,
             blocked=blocked,
             min_bookmarks=min_bookmarks,
@@ -1195,39 +856,15 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
         return cached
 
     session = build_pixiv_session()
-    url = (
-        f'{PIXIV_BASE_URL}/ajax/discovery/artworks'
-        f'?mode={r18_mode}&p={page}&limit=60&order={sort_order}'
-    )
+    # 发现页的条目在 `body.thumbnails.illust`（旧形态 `body.illusts`），按 type 过滤
+    # 非插画条目、以及 `body.total` 的取法都是协议细节 → 适配层
+    illusts_data, total = pixiv_client.fetch_discovery_artworks(
+        session, sort_order=sort_order, r18_mode=r18_mode, page=page)
 
-    try:
-        resp = session.get(url, timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        logger.error(f'Discovery API failed: {e}')
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status == 401:
-            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
-        if status == 403:
-            _warn_403('Discovery')
-        return [], False
-
-    if data.get('error'):
-        msg = str(data.get('message', ''))
-        logger.error(f'Discovery API error: {msg}')
-        if _is_auth_error(msg):
-            raise PixivAuthError(msg)
-        return [], False
-
-    body = data.get('body', {})
-    thumbnails = body.get('thumbnails', {}).get('illust', body.get('illusts', []))
-    illusts_data = [t for t in thumbnails if not t.get('type') or t.get('type') == 'illust']
     if not illusts_data:
         _cache_put(cache_key, ([], False))
         return [], False
 
-    total = body.get('total', 0)
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE) if total else 1
     has_more = page < total_pages
 
@@ -1236,7 +873,7 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
         blocked = _get_blocked_tags(db)
         results = _process_items(
             db, illusts_data,
-            id_extractor=lambda item: int(item['id']),
+            id_extractor=item_pixiv_id,
             illust_factory=_illust_from_item,
             blocked=blocked,
             min_bookmarks=min_bookmarks,
@@ -1329,35 +966,17 @@ _user_profile_lock = threading.Lock()
 
 
 def _get_user_profile_ids(session: requests.Session, user_id: str) -> list[int]:
+    """`profile/all` 的**进程内缓存**包装（10 分钟）。
+
+    为什么缓存留在业务层而不是适配层：它是"少发请求"的业务策略（大画师每次翻页
+    都会重拉全量 id 列表），不是接口形态。请求本身在 `pixiv_client`。
+    """
     with _user_profile_lock:
         hit = _USER_PROFILE_CACHE.get(user_id)
         if hit and time.time() - hit[0] < _USER_PROFILE_TTL:
             return hit[1]
 
-    profile_url = f'{PIXIV_BASE_URL}/ajax/user/{user_id}/profile/all'
-    try:
-        _total_limiter.wait()  # 与其他 Pixiv 请求共用总限速，防止触发 429/403
-        resp = session.get(profile_url, timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        profile_data = resp.json()
-    except requests.RequestException as e:
-        logger.error(f'User profile API failed: {e}')
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status == 401:
-            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
-        if status == 403:
-            _warn_403('User profile')
-        return []
-
-    if profile_data.get('error'):
-        msg = str(profile_data.get('message', ''))
-        logger.error(f'User profile API error: {msg}')
-        if _is_auth_error(msg):
-            raise PixivAuthError(msg)
-        return []
-
-    all_illusts = profile_data.get('body', {}).get('illusts', {})
-    all_ids = sorted([int(iid) for iid in all_illusts.keys()], reverse=True)
+    all_ids = pixiv_client.fetch_user_profile_ids(session, user_id)
     if not all_ids:
         return []
 
@@ -1377,40 +996,18 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
         return cached
 
     session = build_pixiv_session()
-    url = f'{PIXIV_BASE_URL}/ajax/follow_latest/illust?mode={r18_mode}&p={page}'
-    try:
-        resp = session.get(url, timeout=DETAIL_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        logger.error(f'Follow latest API failed: {e}')
-        status = getattr(getattr(e, 'response', None), 'status_code', None)
-        if status == 401:
-            raise PixivAuthError(f'Pixiv API returned HTTP {status}')
-        if status == 403:
-            _warn_403('Follow latest')
-        return [], False
+    illusts_data, has_next = pixiv_client.fetch_following_latest(
+        session, r18_mode=r18_mode, page=page)
 
-    if data.get('error'):
-        msg = str(data.get('message', ''))
-        logger.error(f'Follow latest API error: {msg}')
-        if _is_auth_error(msg):
-            raise PixivAuthError(msg)
-        return [], False
-
-    body = data.get('body', {})
-    illusts_data = body.get('thumbnails', {}).get('illust', [])
     if not illusts_data:
         _cache_put(cache_key, ([], False))
         return [], False
-
-    has_next = not body.get('page', {}).get('isLastPage', True)
 
     with get_session() as db:
         blocked = _get_blocked_tags(db)
         results = _process_items(
             db, illusts_data,
-            id_extractor=lambda item: int(item['id']),
+            id_extractor=item_pixiv_id,
             illust_factory=_illust_from_item,
             blocked=blocked,
             defer_details=True,

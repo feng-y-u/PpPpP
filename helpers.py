@@ -16,8 +16,7 @@ from sqlalchemy.exc import OperationalError
 import config
 from config import DOWNLOAD_DIR, MEDIUM_IMAGE_SIZE
 from models import get_session, get_favorite_pids, Illust, BlockedTag, SearchCache
-import fetcher
-from fetcher import build_pixiv_session, _get_illust_detail
+import pixiv_client
 import runtime
 
 logger = logging.getLogger(__name__)
@@ -327,9 +326,9 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
             wheres.append('illusts.bookmark_count >= :min_bookmarks')
             params['min_bookmarks'] = min_bookmarks
         if r18_mode == 'safe':
-            r18_phs = ','.join(f':r18_{i}' for i in range(len(fetcher.R18_TAGS)))
+            r18_phs = ','.join(f':r18_{i}' for i in range(len(pixiv_client.R18_TAGS)))
             tag_wheres.append(f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({r18_phs}))')
-            params.update({f'r18_{i}': t for i, t in enumerate(fetcher.R18_TAGS)})
+            params.update({f'r18_{i}': t for i, t in enumerate(pixiv_client.R18_TAGS)})
         if blocked:
             blk_phs = ','.join(f':blk_{i}' for i in range(len(blocked)))
             tag_wheres.append(f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({blk_phs}))')
@@ -453,13 +452,17 @@ def _proxy_thumb(url: str) -> str:
 
 
 def _fetch_original_urls(pixiv_id: int) -> list[str]:
-    """按需拉取 Pixiv 详情，返回 original_urls。用于惰性详情场景。"""
-    session = build_pixiv_session()
+    """按需拉取 Pixiv 详情，返回 original_urls。用于惰性详情场景。
+
+    经**适配层**而不是 `fetcher`：本模块是叶子工具层，不该反向依赖业务层
+    （原图地址的三条解析路径也在适配层）。地址合法性不在这里判定 —— 取回后仍由
+    `check_image_url` + `config.IMAGE_HOST_ALLOWLIST` 分级决定要不要发请求。
+    """
+    session = pixiv_client.build_pixiv_session()
     try:
-        detail = _get_illust_detail(session, pixiv_id)
+        return pixiv_client.fetch_original_urls(session, pixiv_id)
     finally:
         session.close()
-    return detail.get('original_urls', []) if detail else []
 
 
 def _fmt_num(n: int | str) -> str:

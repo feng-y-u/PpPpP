@@ -1,0 +1,44 @@
+{
+  "error": false,
+  "message": "",
+  "body": {
+    "thumbnails": {
+      "illust": [
+        {
+          "id": "100000401",
+          "title": "【サンプル】关注画师新作 1",
+          "illustType": 0,
+          "createDate": "2026-05-01T00:00:00+09:00",
+          "updateDate": "2026-05-02T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/05/01/00/00/00/100000401_p0_square1200.jpg",
+          "tags": ["サンプル", "少女"],
+          "userId": "9000401",
+          "userName": "見本絵師I",
+          "pageCount": 1,
+          "xRestrict": 0,
+          "type": "illust"
+        },
+        {
+          "id": "100000402",
+          "title": "【サンプル】关注画师新作 2",
+          "illustType": 0,
+          "createDate": "2026-05-02T00:00:00+09:00",
+          "updateDate": "2026-05-03T00:00:00+09:00",
+          "url": "https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/05/02/00/00/00/100000402_p0_square1200.jpg",
+          "tags": ["R-18G", "サンプル"],
+          "userId": "9000402",
+          "userName": "見本絵師J",
+          "pageCount": 1,
+          "xRestrict": 2,
+          "type": "illust"
+        }
+      ]
+    },
+    "page": {
+      "isLastPage": false,
+      "current": 1,
+      "next": 2,
+      "prev": 0
+    }
+  }
+}
