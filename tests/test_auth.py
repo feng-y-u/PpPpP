@@ -68,12 +68,72 @@ class TestLogin:
         assert resp.status_code == 403
 
     def test_login_success_then_access(self, client, auth_enabled):
+        import hashlib
+        import hmac
+        import app
+
         token = _get_token(client)
+        with client.session_transaction() as sess:
+            sess['pre_login_marker'] = 'stale'
         resp = client.post('/login', json={'password': 'test-secret'},
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         assert resp.get_json()['ok'] is True
+        expected_version = hmac.new(
+            app.app.config['SECRET_KEY'].encode(),
+            b'test-secret',
+            hashlib.sha256,
+        ).hexdigest()
+        with client.session_transaction() as sess:
+            assert sess['authed'] is True
+            assert sess['credential_version'] == expected_version
+            assert 'pre_login_marker' not in sess
+            assert 'test-secret' not in sess.values()
+            assert app.app.config['SECRET_KEY'] not in sess.values()
         assert client.get('/').status_code == 200
+
+    def test_password_rotation_revokes_existing_session(self, client, auth_enabled, monkeypatch):
+        token = _get_token(client)
+        resp = client.post('/login', json={'password': 'test-secret'},
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+
+        monkeypatch.setattr('app.ACCESS_PASSWORD', 'rotated-secret')
+        assert client.get('/api/blocked-tags').status_code == 401
+
+    def test_legacy_session_without_credential_version_is_rejected(
+            self, client, auth_enabled):
+        with client.session_transaction() as sess:
+            sess['authed'] = True
+            sess.pop('credential_version', None)
+
+        resp = client.get('/api/blocked-tags')
+        assert resp.status_code == 401
+
+    def test_settings_gates_reject_stale_session_version(
+            self, client, monkeypatch):
+        import hashlib
+        import hmac
+        import app
+        import routes_settings
+
+        monkeypatch.setattr('app.ACCESS_PASSWORD', '')
+        monkeypatch.setattr('app.SETTINGS_PASSWORD', 'settings-secret')
+        monkeypatch.setattr(routes_settings.time, 'sleep', lambda _seconds: None)
+        stale_version = hmac.new(
+            app.app.config['SECRET_KEY'].encode(),
+            b'previous-secret',
+            hashlib.sha256,
+        ).hexdigest()
+        with client.session_transaction() as sess:
+            sess['authed'] = True
+            sess['credential_version'] = stale_version
+            sess['_csrf_token'] = 'csrf-test-token'
+
+        assert client.get('/api/settings').status_code == 403
+        resp = client.post('/api/settings/unlock', json={},
+                           headers={'X-CSRF-Token': 'csrf-test-token'})
+        assert resp.status_code == 403
 
     def test_open_redirect_blocked(self, client, auth_enabled):
         token = _get_token(client)
@@ -155,9 +215,8 @@ class TestRateLimitConcurrency:
 
     def test_http_login_still_capped_at_5(self, client, auth_enabled):
         """端到端冒烟：装饰器确实接到了限流上（用正确密码，避免失败延迟）。"""
-        token = _get_token(client)
         codes = [client.post('/login', json={'password': 'test-secret'},
-                             headers={'X-CSRF-Token': token}).status_code
+                             headers={'X-CSRF-Token': _get_token(client)}).status_code
                  for _ in range(7)]
         assert codes == [200] * 5 + [429, 429]
 

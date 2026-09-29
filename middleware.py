@@ -1,6 +1,7 @@
 # ── 认证 / CSRF / 限流 / 安全头中间件 ──
 from __future__ import annotations
 
+import hashlib
 import hmac
 import secrets
 import threading
@@ -99,12 +100,30 @@ _AUTH_EXEMPT_PATHS = {'/login', '/favicon.ico', '/csrf-token'}
 _AUTH_EXEMPT_PREFIXES = ('/static',)
 
 
+def _credential_version() -> str:
+    """派生当前全站口令代次；口令轮换后旧 session 即不再匹配。"""
+    import app
+    return hmac.new(
+        app.app.config['SECRET_KEY'].encode(),
+        (app.ACCESS_PASSWORD or '').encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _session_authed() -> bool:
+    """仅接受绑定到当前凭据代次的全站认证 session。"""
+    return (
+        bool(session.get('authed'))
+        and session.get('credential_version') == _credential_version()
+    )
+
+
 def _is_authed() -> bool:
     # 延迟导入读取 app.ACCESS_PASSWORD：middleware 被 app 顶部 import（循环导入
     # 禁止模块级引用 app）；且 tests monkeypatch('app.ACCESS_PASSWORD')，
     # from config import 得到的独立绑定看不到该补丁，必须经 app 模块取最新值。
     import app
-    return not app.ACCESS_PASSWORD or bool(session.get('authed'))
+    return not app.ACCESS_PASSWORD or _session_authed()
 
 
 @bp.before_app_request

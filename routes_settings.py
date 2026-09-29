@@ -22,8 +22,9 @@ import fetcher
 from fetcher import clear_search_cache
 from background import get_background_health
 from helpers import _atomic_write_json, _atomic_write_text
-from middleware import (_csrf_required, _get_csrf_token, _get_json_body,
-                        _is_authed, _rate_limit, _safe_next)
+from middleware import (_credential_version, _csrf_required, _get_csrf_token,
+                        _get_json_body, _is_authed, _rate_limit, _safe_next,
+                        _session_authed)
 from routes_prefetch import _PREFETCH_SETTINGS_KEYS
 from models import BlockedTag, get_session, safe_commit
 from runtime import _auto_follow_state, _prefetch_state
@@ -49,7 +50,9 @@ def login_submit():
     body = _get_json_body()
     password = str(body.get('password', ''))
     if app.ACCESS_PASSWORD and hmac.compare_digest(password.encode(), app.ACCESS_PASSWORD.encode()):
+        session.clear()
         session['authed'] = True
+        session['credential_version'] = _credential_version()
         session.permanent = True
         return jsonify({'ok': True, 'next': _safe_next(str(body.get('next', '')))})
     time.sleep(1)  # 失败延迟，减缓爆破
@@ -165,10 +168,10 @@ def _load_settings() -> dict:
 
 
 def _settings_locked() -> bool:
-    """设置页门禁：已全局登录则直通；否则按旧 SETTINGS_PASSWORD 流程。"""
+    """设置页门禁：当前凭据代次已全局登录则直通；否则按旧 SETTINGS_PASSWORD 流程。"""
     import app  # 延迟导入读取 app.SETTINGS_PASSWORD：tests monkeypatch('app.SETTINGS_PASSWORD')
     #             （test_auth.py TestSettingsCompat），from config import 绑定看不到补丁
-    if session.get('authed'):
+    if _session_authed():
         return False
     return bool(app.SETTINGS_PASSWORD) and not session.get('settings_unlocked')
 
@@ -186,7 +189,7 @@ def settings_page() -> str:
 def settings_unlock() -> Response:
     import app  # 延迟导入读取 app.SETTINGS_PASSWORD：tests monkeypatch('app.SETTINGS_PASSWORD')
     #             （test_auth.py TestSettingsCompat），from config import 绑定看不到补丁
-    if session.get('authed') or not app.SETTINGS_PASSWORD:
+    if _session_authed() or not app.SETTINGS_PASSWORD:
         return jsonify({'ok': True})
     body = _get_json_body()
     if hmac.compare_digest(str(body.get('password', '')).encode(), app.SETTINGS_PASSWORD.encode()):
