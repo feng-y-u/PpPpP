@@ -578,6 +578,16 @@ _search_cache_lock = threading.Lock()
 # _blocked_fingerprint），否则改完屏蔽标签要等十分钟才见效。
 _USER_SEARCH_CACHE_TTL = 600.0
 
+# 标签搜索专用的 TTL。
+# 标签搜索的成本是 1 次 HTTP，30 秒的缓存常在用户"翻回上一页"时已经过期，
+# 于是白等一次上游往返；120 秒覆盖了"看完一屏再回退"的实际节奏 —— 这是纯粹的
+# 等待时间优化，不减少任何一次请求。
+# 只有 `search_by_tag` 用它：发现页/关注页（`_SEARCH_CACHE_TTL`）与作者搜索
+# （`_USER_SEARCH_CACHE_TTL`）的缓存成本与语义各不相同，不能顺手统一。
+# 缓存键里**没有**屏蔽标签指纹，所以屏蔽标签增删必须靠 `clear_search_cache()`
+# 整体清空才立即生效（见 routes_settings 的屏蔽标签路由）。
+_TAG_SEARCH_CACHE_TTL = 120.0
+
 
 def _blocked_fingerprint(blocked: set[str]) -> str:
     """屏蔽标签集合的短指纹，用于把"屏蔽标签变了"反映到缓存键里。
@@ -992,12 +1002,18 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
     limiter: 详情请求限速器；不传用前台高速桶（搜索）。
     progress: 逐条进度回调（见 `_process_items`）；本页被限流截断时以
         `SearchRateLimitedError` 收尾，此时不写成功缓存。
+
+    结果缓存用 `_TAG_SEARCH_CACHE_TTL`（120 秒）：它比发现/关注页的 30 秒长，
+    因为命中与否只差"多等一次上游往返"；缓存键不含屏蔽标签指纹，屏蔽标签增删
+    靠 `clear_search_cache()` 整体清空生效。
     """
     if page > max_pages:
         return [], False
 
     cache_key = f'tag|q={keyword}|p={page}|s={sort_order}|tm={tag_mode}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
-    cached = _cache_get(cache_key)
+    # TTL 由**写入时**存进缓存条目（`_cache_put(ttl=)`），读取只认那一条：
+    # 这里传 ttl 是为了让"这条路径该用哪个 TTL"在调用点一眼可见，与 search_by_user 同款。
+    cached = _cache_get(cache_key, ttl=_TAG_SEARCH_CACHE_TTL)
     if cached is not None:
         # 缓存命中：本次未拉取详情，清零统计避免把上次搜索的耗时/失败归属到本次
         _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
@@ -1013,7 +1029,11 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
         sort_order=sort_order, r18_mode=r18_mode, page=page)
 
     if not illusts_data:
-        _cache_put(cache_key, ([], False))
+        # 空结果**不**跟随 120 秒的标签 TTL，仍按 `_SEARCH_CACHE_TTL`（30 秒）缓存：
+        # Cookie 过期时 Pixiv 会静默返回空页，而同条件重试命中同一个缓存键 ——
+        # 把窗口拉到 120 秒等于让"换个关键词再搜还是空"多持续 90 秒，用户无法把
+        # "真的没结果"和"凭据失效"分开。`search_by_user` 出于同一理由干脆不缓存空结果。
+        _cache_put(cache_key, ([], False), ttl=_SEARCH_CACHE_TTL)
         return [], False
 
     defer = defer_details or (min_bookmarks == 0)
@@ -1040,7 +1060,13 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
 
     total_pages = min((total + PER_PAGE - 1) // PER_PAGE, max_pages) if total else max_pages
     has_more = page < total_pages
-    _cache_put(cache_key, (results, has_more))
+    # 预算中途耗尽时本页还有条目没判定完（结果残缺、has_more 也随之失真），
+    # 不能写成功缓存 —— 否则下次命中会拿到同一份残缺页，并把它固化满 120 秒。
+    # 当前只有作者搜索会启用详情预算（routes_search 的 _user_fn），这条是防
+    # "哪天给标签路径也开预算"时不静默退化的护栏。
+    if budget_exhausted():
+        return results, has_more
+    _cache_put(cache_key, (results, has_more), ttl=_TAG_SEARCH_CACHE_TTL)
     return results, has_more
 
 
@@ -1094,6 +1120,9 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
         raise SearchRateLimitedError(
             f'发现页 p={page} 详情请求被限流，已确认的 {len(results)} 件结果不完整')
 
+    # 预算耗尽 = 本页条目没判定完，同 search_by_tag：不把残缺页固化进 30 秒缓存
+    if budget_exhausted():
+        return results, has_more
     _cache_put(cache_key, (results, has_more))
     return results, has_more
 
@@ -1237,6 +1266,9 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
         )
         safe_commit(db)
 
+    # 关注页不需要"残缺页不进缓存"的守卫：它恒走 defer 路径且不传 min_bookmarks，
+    # `_process_items` 里会消耗预算的 to_fetch / 会因限流截断的 to_refetch 两条分支
+    # 都不会进（后者要求 min_bookmarks > 0），上游异常在到达这里之前就已抛出。
     _cache_put(cache_key, (results, has_next))
     return results, has_next
 

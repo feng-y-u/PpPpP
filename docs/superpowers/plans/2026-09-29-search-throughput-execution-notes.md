@@ -6,6 +6,57 @@
 
 ---
 
+## Task 6：缓存边界与用户摘要接口（已实施）
+
+### 实施结果
+
+- 新增 `fetcher._TAG_SEARCH_CACHE_TTL = 120.0`，**仅** `search_by_tag` 的
+  `_cache_get/_cache_put` 使用。发现页/关注页仍是 `_SEARCH_CACHE_TTL = 30.0`；
+  作者搜索仍是 `_USER_SEARCH_CACHE_TTL = 600.0`，缓存键里的 `_blocked_fingerprint(blocked)`
+  分量与键格式一字未动。
+- `search_by_tag` 与 `browse_discovery` 在 `budget_exhausted()` 为真时不再写成功缓存
+  （与 `search_by_user` 早已有的守卫对齐）。当前只有作者搜索会启用详情预算
+  （`routes_search` 的 `_user_fn`），这两条是防"哪天给标签/发现路径也开预算"时静默退化的护栏。
+- 屏蔽标签增删仍走 `routes_settings` → `clear_search_cache()` 整体清空；新增用例从路由入口
+  （`POST` / `DELETE /api/blocked-tags`）钉住"立即生效"，因为标签缓存键里**没有**屏蔽指纹。
+- 限流截断（`SearchRateLimitedError`）不写成功缓存已有用例；本次补上"上游抛 `PixivAuthError`
+  时一条缓存都不写"的断言。
+
+### 观察（本次刻意未改，留给后续判断）
+
+- **`_cache_get(key, ttl=)` 的 `ttl` 是惰性形参**：条目实际的 TTL 是写入时存进
+  `(ts, entry_ttl, value)` 的那个值，读取时只认它。传 `ttl` 仅让调用点的意图可见
+  （作者搜索 600 秒那条一直如此）。标签路径的 120 秒因此同样由
+  `_cache_put(..., ttl=_TAG_SEARCH_CACHE_TTL)` 落地，没有改 `_cache_get` 的语义。
+- **空页照样进缓存**：标签/发现路径"上游成功但返回空页"会写缓存（`if not illusts_data` 分支），
+  本次只把标签那条从 30 秒延长到 120 秒。空页不是异常，Pixiv 在 Cookie 失效时也会静默返回
+  空结果，所以这是既有语义；作者搜索路径的空结果按设计不写缓存。
+
+### 摘要端点 go/no-go：**no-go**（未发现满足字段的离线契约证据）
+
+只读检查范围与逐条结论（未运行任何真实 Cookie / 真实 Pixiv 请求）：
+
+1. `pixiv-api-http-main/core/api/app.js` 的路由表只有 illust / manga / novel / search / follow
+   五组，**没有任何用户维度的作品列表路由**；`core/api/module/user/pid.js` 是 **0 字节空文件**
+   （`core/api/module/illust/index.js` 只 `export * from './pid.js'` 与 `../manga/manga-pid.js`）；
+   在整个参考实现里 grep `profile` 与 `user/` **零命中**。也就是说参考实现连
+   `profile/all` 都没有，更没有"用户作品分页端点"这一形态可供对照。
+2. `tests/fixtures/pixiv/user_profile_all.json` 的 `body.illusts` 形如
+   `{"100000305": {}, "100000303": {}, …}` —— **值全是空对象**，只有键（作品 id）可用；
+   `tests/fixtures/pixiv/README.md` 亦记为"`body.illusts` 的键即作品 id"。
+   它无法证明 `title / page_count / thumb / upload_date / tags / bookmark_count` 中的任何一项，
+   更没有分页终止信息。
+3. 带摘要字段的既有样本（`search_illustrations.json`、`discovery_artworks.json`、
+   `follow_latest.json`）分别属于关键词搜索、发现页、关注流 —— 都不是按用户的作品分页，
+   也证明不了按用户维度的分页终止信息（`follow_latest.json` 的 `isLastPage` 属关注流）。
+4. 现有样本全部是**手工编写**的（README 的刷新流程 `scripts/pixiv_capture.py` 需要真实 Cookie），
+   本身即为弱证据，达不到"脱敏样本证明全部必需字段可从规范解析得到"这条杠。
+
+判定：**不新增 `endpoint_*` / `fetch_*`，不改 `pixiv_client.py`、
+`tests/test_pixiv_contract.py`、`tests/fixtures/pixiv/`**。`search_by_user` 继续以
+`profile/all`（id 集合/游标来源）＋逐条详情为路径，详情预算、过滤与缓存语义不变。
+这是「未发现满足字段的离线契约证据」的明确结论，不是待办。
+
 ## Task 4 必读（消除活陷阱）
 
 1. **publisher 只经 `progress` 形参注入 `search_by_tag` / `search_by_user` / `browse_discovery`。**
@@ -82,5 +133,6 @@ Task 2 必须补一条测试证明：熔断打开时预取轮次失败**不会**
 |---|---|---|---|
 | Task 1 详情 gate | 完成（2 轮审查 + 2 轮修复） | `ccf8a9a` | 新文件 37 例 |
 | Task 3 逐条发布 + 限流批次 | 完成（spec + 质量两轮审查） | `be0dfee` | `test_fetcher.py` 101 例；全量 650 passed / 2 skipped；`fetcher.py` ~1249 行 |
+| Task 6 缓存边界 + 摘要 no-go | 完成 | 本次提交（`perf: 缩短重复标签搜索等待并守住缓存边界`） | 新增 7 例（`test_fetcher.py` +5 / `test_settings_api.py` +2）；全量 686 passed / 2 skipped / 4 环境性失败（`test_temp_root_*`，基线上同样失败） |
 
 基线（Task 1 之前）：全量 599 passed / 2 skipped（= 601 例）。

@@ -1683,8 +1683,187 @@ class TestUserSearchResultCache:
             fetcher.clear_search_cache()
 
 
+class TestTagSearchResultCacheTTL:
+    """标签搜索结果缓存的 TTL：专用 120 秒，且**只有**标签路径用它。
+
+    标签搜索的成本是 1 次 HTTP，原来的 30 秒缓存常在用户"翻回上一页"时已经过期，
+    白等一次上游往返；120 秒覆盖了"看完一屏再回退"的实际节奏。
+    发现页/关注页的成本同样是 1 次 HTTP，但它们的缓存是另一套语义，必须继续用
+    `_SEARCH_CACHE_TTL`（30 秒）—— 下面把两条路径**各自写进缓存条目的 TTL** 都钉出来，
+    而不是只断言"行为像"（改了常量但仍落在时间窗口里也能蒙过去）。
+    """
+
+    @staticmethod
+    def _tag_search(mock_fetch, mock_items, keyword='ttl'):
+        mock_items.return_value = ([_item(901)], 1)
+        mock_fetch.return_value = _detail_batch({901: _detail(901)}, 1)
+        return fetcher.search_by_tag(keyword, min_bookmarks=500)
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    @patch('fetcher._fetch_details_parallel')
+    def test_tag_cache_ttl_is_120s(
+            self, mock_fetch, mock_items, mock_sess, clean_db, monkeypatch):
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        fetcher.clear_search_cache()
+        try:
+            self._tag_search(mock_fetch, mock_items)
+            assert mock_items.call_count == 1
+
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('tag|q=ttl')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._TAG_SEARCH_CACHE_TTL == 120.0
+
+            clock.advance(119.0)
+            self._tag_search(mock_fetch, mock_items)
+            assert mock_items.call_count == 1, \
+                '119 秒（< 120）必须仍命中缓存：30 秒 TTL 会在这里重打一次上游'
+
+            clock.advance(2.0)      # 累计 121 秒
+            self._tag_search(mock_fetch, mock_items)
+            assert mock_items.call_count == 2, '121 秒（> 120）缓存必须失效并重新请求'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    def test_empty_tag_page_keeps_short_ttl(
+            self, mock_items, mock_sess, clean_db, monkeypatch):
+        """空结果页**不**跟随 120 秒：它必须留在 30 秒窗口里。
+
+        为什么单独钉住：Cookie 过期时 Pixiv **静默返回空页**，而同条件重试命中同一个
+        缓存键 —— 若空页也按 120 秒缓存，"凭据失效"会被伪装成"这个标签真的没作品"
+        长达两分钟，用户只会反复换关键词而不是去检查 Cookie。空结果继续按
+        `_SEARCH_CACHE_TTL`（30 秒）缓存，`search_by_user` 更是干脆不缓存空结果。
+        """
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        fetcher.clear_search_cache()
+        try:
+            mock_items.return_value = ([], 0)
+            assert fetcher.search_by_tag('empty-ttl') == ([], False)
+
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('tag|q=empty-ttl')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._SEARCH_CACHE_TTL == 30.0, \
+                '空结果页必须留在 30 秒窗口，不能继承 120 秒的标签 TTL'
+
+            clock.advance(31.0)
+            assert fetcher.search_by_tag('empty-ttl') == ([], False)
+            assert mock_items.call_count == 2, \
+                '31 秒（> 30）后空结果缓存必须失效并重新请求上游'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_discovery_artworks')
+    @patch('fetcher._fetch_details_parallel')
+    def test_discovery_cache_keeps_30s_ttl(
+            self, mock_fetch, mock_items, mock_sess, clean_db, monkeypatch):
+        """发现页不得被顺手改成 120 秒：它是另一条路径，TTL 仍是 `_SEARCH_CACHE_TTL`。"""
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        mock_items.return_value = ([_item(911)], 1)
+        mock_fetch.return_value = _detail_batch({911: _detail(911)}, 1)
+        fetcher.clear_search_cache()
+        try:
+            fetcher.browse_discovery(min_bookmarks=500)
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('disc|')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._SEARCH_CACHE_TTL == 30.0
+
+            clock.advance(31.0)
+            fetcher.browse_discovery(min_bookmarks=500)
+            assert mock_items.call_count == 2, '发现页 31 秒后必须重新请求（仍是 30 秒 TTL）'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_following_latest')
+    @patch('fetcher._kick_background_fill')
+    def test_following_cache_keeps_30s_ttl(
+            self, mock_kick, mock_items, mock_sess, clean_db, monkeypatch):
+        """关注页同样保持 30 秒（`fetch_following` 恒走 defer 路径，不拉详情）。"""
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        mock_items.return_value = ([_item(921)], False)
+        fetcher.clear_search_cache()
+        try:
+            fetcher.fetch_following(1, r18_mode='all')
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('follow|')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._SEARCH_CACHE_TTL == 30.0
+
+            clock.advance(31.0)
+            fetcher.fetch_following(1, r18_mode='all')
+            assert mock_items.call_count == 2, '关注页 31 秒后必须重新请求（仍是 30 秒 TTL）'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    @patch('fetcher._fetch_details_parallel')
+    def test_budget_exhausted_tag_page_not_cached(self, mock_fetch, mock_items, mock_sess, clean_db):
+        """预算中途耗尽的标签页是残缺的（本页还有条目没判定），不得写成功缓存。
+
+        当前只有作者搜索会启用详情预算，这条守的是"哪天给标签路径也开预算"时
+        不静默退化成"残缺页被 120 秒 TTL 固化"。
+        """
+        mock_items.return_value = ([_item(931)], 1)
+        mock_fetch.return_value = _detail_batch({931: _detail(931)}, 1)
+        fetcher.clear_search_cache()
+        try:
+            fetcher._budget_begin(1)
+            fetcher._budget_consume(1)
+            assert fetcher.budget_exhausted() is True
+
+            fetcher.search_by_tag('budget', min_bookmarks=500)
+            assert not any(k.startswith('tag|q=budget') for k in fetcher._SEARCH_CACHE)
+        finally:
+            fetcher._budget_end()
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_discovery_artworks')
+    @patch('fetcher._fetch_details_parallel')
+    def test_budget_exhausted_discovery_page_not_cached(
+            self, mock_fetch, mock_items, mock_sess, clean_db):
+        """发现页同样不得把预算截断的残缺页写进缓存（与标签路径同款守卫）。"""
+        mock_items.return_value = ([_item(941)], 1)
+        mock_fetch.return_value = _detail_batch({941: _detail(941)}, 1)
+        fetcher.clear_search_cache()
+        try:
+            fetcher._budget_begin(1)
+            fetcher._budget_consume(1)
+            assert fetcher.budget_exhausted() is True
+
+            fetcher.browse_discovery(min_bookmarks=500)
+            assert not any(k.startswith('disc|') for k in fetcher._SEARCH_CACHE)
+        finally:
+            fetcher._budget_end()
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    def test_upstream_auth_error_not_cached(self, mock_items, mock_sess, clean_db):
+        """认证/上游异常必须原样抛出，绝不能顺手写一条空结果的"成功"缓存。
+
+        否则 Cookie 失效后的第一次失败搜索会留下一份"没有作品"的空页，用户在 TTL
+        内怎么重试都看不到真实结果。
+        """
+        mock_items.side_effect = pixiv_client.PixivAuthError('cookie 已失效')
+        fetcher.clear_search_cache()
+        try:
+            with pytest.raises(pixiv_client.PixivAuthError):
+                fetcher.search_by_tag('auth', min_bookmarks=500)
+            assert fetcher._SEARCH_CACHE == {}
+        finally:
+            fetcher.clear_search_cache()
+
+
 class TestRateLimitedSearchCache:
-    """限流截断的搜索不得写成功缓存：残缺结果被 30 秒 TTL 固化后，用户重试也拿不到补全。"""
+    """限流截断的搜索不得写成功缓存：残缺结果被 TTL 固化后，用户重试也拿不到补全。"""
 
     @patch('fetcher.build_pixiv_session')
     @patch('pixiv_client.fetch_search_illusts')
