@@ -28,3 +28,7 @@ progress.md
 # 手工跑测试/评审留下的临时目录（其中可能有本地凭据样本，别误提交）
 .test-tmp/
 .test-tmp-review/
+# 测试把 PIXIV_INSTANCE_DIR 指到仓库根时留下的实例目录，里面是生成的 .cursor_secret。
+# 曾有一条被 `git add -A` 暂存进索引、差一步就随提交带走（已移出并删除），故加通配。
+# 目录名按进程号命名（pixiv_test_instance_<pid>），所以必须用通配而不是固定名。
+pixiv_test_instance_*/
