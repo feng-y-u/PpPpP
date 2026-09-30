@@ -122,6 +122,59 @@ class TestPrefetchOneTag:
         assert row.prefetch_source == 0
 
 
+class TestIsUserOwned:
+    """保护判定收窄后的语义：只认下载意图，收藏夹不再是保护来源。
+
+    "已下载 → 受保护"由调用方（容量清理/最终收藏数刷新）的 `download_status`
+    判定负责，本类只钉 `_is_user_owned` 自己的 DownloadLog 口径。
+    """
+
+    def test_plain_illust_is_not_user_owned(self, clean_db):
+        clean_db.add(Illust(pixiv_id=6001, title='plain'))
+        safe_commit(clean_db)
+
+        assert background._is_user_owned(clean_db, 6001) is False
+
+    def test_user_download_log_is_user_owned(self, clean_db):
+        """失败/取消待重试也是用户意图：用户点过下载，不能当缓存垃圾。"""
+        from models import DownloadLog
+        clean_db.add_all([
+            Illust(pixiv_id=6002, title='failed'),
+            Illust(pixiv_id=6003, title='cancelled'),
+            DownloadLog(pixiv_id=6002, action='failed', message='下载失败待重试'),
+            DownloadLog(pixiv_id=6003, action='cancelled', message='用户取消待重试'),
+        ])
+        safe_commit(clean_db)
+
+        assert background._is_user_owned(clean_db, 6002) is True
+        assert background._is_user_owned(clean_db, 6003) is True
+
+    def test_prefetch_deleted_log_is_not_user_owned(self, clean_db):
+        """`prefetch_deleted` 是缓存清理自己写的，认它等于给作品永久保护。"""
+        from models import DownloadLog
+        clean_db.add_all([
+            Illust(pixiv_id=6004, title='evicted-before'),
+            DownloadLog(pixiv_id=6004, action='prefetch_deleted', message='之前被清理过'),
+        ])
+        safe_commit(clean_db)
+
+        assert background._is_user_owned(clean_db, 6004) is False
+
+    def test_collection_membership_no_longer_protects(self, clean_db):
+        """只收藏、从未下载的作品不再算"用户拥有"。
+
+        过渡用例：`Collection`/`CollectionItem` 由后续任务整体删除，届时本用例一并删除。
+        """
+        coll = Collection(name='我的收藏')
+        clean_db.add(coll)
+        clean_db.commit()
+        clean_db.add(
+            CollectionItem(collection_id=coll.id, pixiv_id=6005, position=1000.0))
+        safe_commit(clean_db)
+
+        assert background._is_user_owned(clean_db, 6005) is False
+
+
 class TestCapacityCleanup:
     def test_capacity_cleanup_skips_user_download_logged(self, clean_db, monkeypatch):
         """用户点过下载的作品（DownloadLog）不当缓存垃圾清掉。"""
@@ -217,33 +270,40 @@ class TestCapacityCleanup:
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == []
 
-    def test_capacity_cleanup_skips_downloaded_and_collected(self, clean_db):
+    def test_capacity_cleanup_protection_is_download_only(self, clean_db, monkeypatch):
+        """保护只看"已下载 / 用户点过下载"：收藏夹不再构成保护。
+
+        过渡用例：`Collection`/`CollectionItem` 由后续任务整体删除，届时 pid 2
+        改成普通未保护作品，断言不变。
+        """
+        from models import DownloadLog
         coll = Collection(name='test-coll')
         clean_db.add(coll)
         clean_db.commit()
         clean_db.add(CollectionItem(collection_id=coll.id, pixiv_id=2, position=1000.0))
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
-            SearchCache(tag='tag_old', illust_ids='[1, 2]',
+            SearchCache(tag='tag_old', illust_ids='[1, 2, 3]',
                         cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
             Illust(pixiv_id=1, title='dl', prefetch_source=1, download_status='done',
                    prefetch_refresh_at=refreshed),
-            Illust(pixiv_id=2, title='col', prefetch_source=1, prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='col-only', prefetch_source=1,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=3, title='log', prefetch_source=1,
+                   prefetch_refresh_at=refreshed),
+            DownloadLog(pixiv_id=3, action='cancelled', message='用户取消待重试'),
         ])
         safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 2)  # need_free = 1
 
-        old = app._prefetch_state['max_illusts']
-        try:
-            app._prefetch_state['max_illusts'] = 0
-            app._prefetch_capacity_cleanup()
-        finally:
-            app._prefetch_state['max_illusts'] = old
+        app._prefetch_capacity_cleanup()
 
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
-        assert remaining == {1, 2}
-        # 受保护（已下载/已收藏）的作品保留在标签列表中
-        ids = json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_old').first().illust_ids)
-        assert ids == [1, 2]
+        assert remaining == {1, 3}, '已下载/点过下载的保留；只收藏的与普通作品同等对待'
+        # 被删除的作品也要从标签列表摘掉，未被删的保留
+        ids = json.loads(clean_db.query(SearchCache).filter(
+            SearchCache.tag == 'tag_old').first().illust_ids)
+        assert ids == [1, 3]
 
     def test_capacity_cleanup_keeps_protected_in_list(self, clean_db):
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
@@ -513,7 +573,7 @@ class TestPrefetchThreadLiveness:
 
 
 class TestPrefetchRefreshBookmarks:
-    """最终收藏数刷新：满 1 天刷新一次，<10 删除，保护已下载/已收藏。"""
+    """最终收藏数刷新：满 1 天刷新一次，<10 删除，保护已下载/用户点过下载的。"""
 
     def _old_illust(self, clean_db, pid, days=2, **kw):
         import models
@@ -707,7 +767,7 @@ class TestPrefetchRefreshBookmarks:
         assert illust.refresh_failed_at is None  # 成功清标记
 
     def test_refresh_deletes_permanently_dead(self, clean_db, monkeypatch):
-        """永久失败（DEAD_DETAIL，404/删除类）：未下载未收藏 → 删行 + 摘除全部缓存引用。"""
+        """永久失败（DEAD_DETAIL，404/删除类）：未下载且无用户下载日志 → 删行 + 摘除全部缓存引用。"""
         self._old_illust(clean_db, 5008)
         clean_db.add(SearchCache(tag='t', illust_ids='[5008]', status='done'))
         clean_db.add(SearchCache(tag='t2', illust_ids='[5008, 900]', status='done'))
@@ -735,8 +795,12 @@ class TestPrefetchRefreshBookmarks:
         assert illust.prefetch_refresh_at is not None
         assert illust.refresh_failed_at is None
 
-    def test_refresh_keeps_dead_collected(self, clean_db, monkeypatch):
-        """永久失败但已收藏 → 保留行、标记刷新完成退出队列。"""
+    def test_refresh_deletes_dead_collected_without_download(self, clean_db, monkeypatch):
+        """永久失败 + 只收藏未下载 → 删除（收藏夹已移除，不再构成保护）。
+
+        过渡用例：`Collection`/`CollectionItem` 由后续任务整体删除，届时本用例
+        与 `test_refresh_deletes_permanently_dead` 等价、可并入。
+        """
         self._old_illust(clean_db, 5010)
         fav = Collection(name='我的收藏')
         clean_db.add(fav)
@@ -747,9 +811,7 @@ class TestPrefetchRefreshBookmarks:
 
         app._prefetch_refresh_bookmarks()
 
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5010).first()
-        assert illust is not None
-        assert illust.prefetch_refresh_at is not None
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5010).first() is None
 
     def test_refresh_keeps_dead_with_download_log(self, clean_db, monkeypatch):
         """永久失败但用户点过下载（DownloadLog）→ 保留行、标记完成。"""

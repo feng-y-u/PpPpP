@@ -20,7 +20,7 @@ from config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
                     PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE)
 from fetcher import build_credentialless_session, build_pixiv_session, fetch_following
 from helpers import _get_download_dir, _extract_ext, check_image_url
-from models import (get_session, Illust, CollectionItem, SearchCache,
+from models import (get_session, Illust, SearchCache,
                     DownloadLog, safe_commit)
 from runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
                      _queued_downloads, _download_progress,
@@ -285,14 +285,14 @@ def _remove_pids_from_search_caches(db, pids: list[int]) -> None:
 
 
 def _is_user_owned(db, pixiv_id: int) -> bool:
-    """用户"拥有"这件作品：在收藏夹里，或有用户操作类下载日志。
+    """用户"拥有"这件作品：有用户操作类下载日志（含失败/取消待重试）。
 
-    这类作品不能当缓存垃圾清掉：收藏=明确意图；下载日志（含失败/取消待重试）
-    =用户点过下载。逐条查询而非整轮快照，避免"循环中新增收藏仍可能被删"的窗口。
+    保护只来自下载意图 —— 用户点过下载，作品就不该被当成缓存垃圾清掉；
+    除此之外不再认任何"归属"信号（本地收藏标记已随该功能整体移除）。
+    逐条查询而非整轮快照：刷新循环每轮要发网络请求、窗口很长，逐条判能让
+    循环期间新写入的下载日志立刻生效。
     只认用户操作类 action —— `prefetch_deleted` 是缓存清理自己写的，不算。
     """
-    if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).first():
-        return True
     return db.query(DownloadLog).filter(
         DownloadLog.pixiv_id == pixiv_id,
         DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
@@ -311,7 +311,7 @@ def _prefetch_refresh_bookmarks(max_items: int = PREFETCH_REFRESH_BATCH) -> None
         'ok': 0,                 # 成功拿到详情并写入收藏数
         'deleted_low': 0,        # 其中因最终收藏数 < 10 被删除
         'deleted_dead': 0,       # 永久失败（404/删除类）被删除
-        'kept_dead': 0,          # 永久失败但已下载/已收藏 → 保留并标记完成
+        'kept_dead': 0,          # 永久失败但已下载/点过下载 → 保留并标记完成
         'failed_transient': 0,   # 暂时性失败 → 写退避标记
         'failed_global': 0,      # 限流/连接错误（全局性，不写标记）
         'force_done': 0,         # 失败超期被强制标记完成
@@ -330,15 +330,15 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
 
     规则（用户需求）：
     - 拉取的作品给足一天时间涨收藏，之后只刷新这一次（prefetch_refresh_at 标记）；
-    - 刷新后的最终收藏数 < 10 且未下载未收藏的，直接从缓存删除；
-    - 已下载 / 已收藏的不删（保护）。
+    - 刷新后的最终收藏数 < 10 且未下载、无用户下载日志的，直接从缓存删除；
+    - 已下载 / 用户点过下载的不删（保护；保护判定见 `_is_user_owned`）。
 
     失败处理（2026-09-08 持久化状态机，见 docs/superpowers/specs/
     2026-09-08-prefetch-refresh-retry-backoff-design.md）：
     - 暂时性失败（详情返回 None）→ 写 refresh_failed_at，退避期内不再入选，
       防止永久失败的死作品每轮占满名额（head-of-line blocking）；
-    - 永久失败（DEAD_DETAIL：404 / 删除类报错）→ 未下载未收藏的当场删除出清，
-      已下载 / 已收藏的标记刷新完成、保留作品；
+    - 永久失败（DEAD_DETAIL：404 / 删除类报错）→ 未下载、无用户下载日志的当场
+      删除出清，已下载 / 点过下载的标记刷新完成、保留作品；
     - 失败超过 PREFETCH_REFRESH_FORCE_DONE → 强制标记完成、退出刷新队列，
       交由容量清理按低收藏优先淘汰（防"未刷新"积压单独顶破容量上限）；
     - 全局性失败（限流/连接错误，`RETRYABLE_GLOBAL_DETAIL`）不写退避标记，
@@ -353,7 +353,6 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
     backoff_before = now - timedelta(seconds=PREFETCH_REFRESH_BACKOFF)
     force_done_before = now - timedelta(seconds=PREFETCH_REFRESH_FORCE_DONE)
 
-    fav_ids: set[int] = set()
     pids: list[int] = []
     with get_session() as db:
         # 长期失败兜底先行：失败超过阈值仍未成功 → 强制标记完成、退出刷新队列
@@ -418,8 +417,8 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
                         continue
                     # 排队中（worker 还没把状态写成 downloading）同样受保护：否则
                     # "queued → 首个 commit"窗口内被删行，下载会静默消失。
-                    # 逐条取快照（而非整轮一次），与本函数"循环中新增收藏仍可能被
-                    # 删"的既有取向一致 —— 本循环每轮要发网络请求，窗口很长。
+                    # 逐条取快照（而非整轮一次），与本函数"循环期间新写入的下载
+                    # 日志应立刻生效"的既有取向一致 —— 本循环每轮要发网络请求，窗口很长。
                     protected = (illust.download_status in ('done', 'downloading')
                                  or illust.local_paths_list
                                  or is_queued_download(pid)
@@ -435,12 +434,12 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
                             logger.info(f'[prefetch] 永久失败（已删除/非公開），删除缓存作品 {pid}')
                             safe_commit(db)
                             continue
-                        # 已下载/已收藏：保留作品，标记完成退出刷新队列
+                        # 已下载/点过下载：保留作品，标记完成退出刷新队列
                         illust.prefetch_refresh_at = now
                         illust.refresh_failed_at = None
                         stats['kept_dead'] += 1
                         safe_commit(db)
-                        logger.info(f'[prefetch] 永久失败但已下载/收藏，保留并标记完成 {pid}')
+                        logger.info(f'[prefetch] 永久失败但已下载/点过下载，保留并标记完成 {pid}')
                         continue
                     if detail is None:
                         # 暂时性失败：写退避时间戳，backoff 期内不再尝试
@@ -544,12 +543,13 @@ def _prefetch_capacity_cleanup() -> None:
             return
         need_free = count - max_illusts
 
-        fav_ids = {c.pixiv_id for c in db.query(CollectionItem.pixiv_id).all()}
         # 排队中的下载也要保护：worker 尚未把状态写成 downloading，但用户已经点过
         # 下载。"queued → 首个 commit"窗口内删行会让下载静默消失（审计 S3）。
         queued_pids = queued_download_snapshot()
         # 用户操作过下载的作品（含失败/取消待重试）不当缓存垃圾；缓存清理自己写的
-        # prefetch_deleted 不算（否则同一 pid 再次入库后会获得"永久保护"）
+        # prefetch_deleted 不算（否则同一 pid 再次入库后会获得"永久保护"）。
+        # 这里整轮取一次快照（与 `_is_user_owned` 同一 action 口径），避免每行一条
+        # DownloadLog 查询 —— 容量清理要遍历全部预取作品，逐行查是 N+1。
         dl_pids = {
             p[0] for p in db.query(DownloadLog.pixiv_id).filter(
                 DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
@@ -562,7 +562,7 @@ def _prefetch_capacity_cleanup() -> None:
         for i in db.query(Illust).filter(Illust.prefetch_source == 1).all():
             if i.download_status in ('done', 'downloading') or i.local_paths_list:
                 continue
-            if i.pixiv_id in fav_ids or i.pixiv_id in dl_pids:
+            if i.pixiv_id in dl_pids:
                 continue
             if i.pixiv_id in queued_pids:
                 continue

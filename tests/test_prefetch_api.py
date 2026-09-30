@@ -8,7 +8,7 @@ import pytest
 import app
 import background
 import helpers
-from models import SearchCache, Illust, Collection, CollectionItem, safe_commit
+from models import SearchCache, Illust, safe_commit
 
 
 def _get_token(client):
@@ -234,20 +234,20 @@ class TestPrefetchTagsAPI:
         # pid1 未被引用且可删 → 删除；pid2 被 other 引用 → 保留；pid3 已下载 → 保留
         assert remaining == {2, 3}
 
-    def test_delete_keeps_collected_illusts(self, client, clean_db):
-        coll = Collection(name='c')
-        clean_db.add(coll)
-        clean_db.commit()
-        clean_db.add(CollectionItem(collection_id=coll.id, pixiv_id=5, position=1000.0))
+    def test_delete_keeps_downloading_illusts(self, client, clean_db):
+        """下载中的预取作品不随标签删除，其余未被引用的预取作品被删。"""
         clean_db.add_all([
-            SearchCache(tag='t', illust_ids='[5]'),
-            Illust(pixiv_id=5, title='collected', prefetch_source=1),
+            SearchCache(tag='t', illust_ids='[5, 6]'),
+            Illust(pixiv_id=5, title='downloading', prefetch_source=1,
+                   download_status='downloading'),
+            Illust(pixiv_id=6, title='plain', prefetch_source=1),
         ])
         safe_commit(clean_db)
         token = _get_token(client)
         resp = client.delete('/api/prefetch/tags/t', headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5).first() is not None
+        remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
+        assert remaining == {5}
 
     def test_delete_keeps_non_prefetch_illusts(self, client, clean_db):
         clean_db.add_all([
