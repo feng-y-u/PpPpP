@@ -2,7 +2,37 @@
 
 ## 状态
 
-设计已在对话中逐节确认，等待用户审阅；尚未实现。实现依赖当前工作区正在进行的 Pixiv 客户端适配层工作，避免同时改动同一请求层。
+**已实现并验证**（2026-09-29，分支 `feature/search-throughput`；实现 HEAD `ba47c9b`，其后只有本次回写的 docs 提交 —— 本设计已逐节落地，无未决的规格问题）。
+
+**完成范围与 commit**
+
+| 任务 | commit | 交付 |
+|---|---|---|
+| Task 1 | `ccf8a9a` | `pixiv_client._DetailRequestGate`（在途 2、429 开路、3 个不同 403/60s、半开探测、翻倍封顶 900s、服务器 `Retry-After` 另设 6h 天花板）+ `tests/test_pixiv_client_limits.py` |
+| Task 3 | `51cfb22` | `fetcher._DetailFetchBatch` / `_ProcessedItems`（`rate_limited`）、逐条 `progress` 事件、已入库记录立即发布、`SearchRateLimitedError` 在 `safe_commit` 之后、任何成功缓存之前抛出 |
+| Task 4 | `4fcac74` | `routes_search` 锁内任务快照（`revision`/`progress`/`complete`/`warning`/`input_cursor`）+ HTTP 200 的 `partial` 终态（保留 preview、游标不前移、`error`/`cancelled` 清空 preview 并把计数器归零） |
+| Task 5 | `41435bd` | `static/page-index.js` 独立预览状态、`pollSearch(..., onProgress, onPartial)`、provisional 卡片不可操作、`done` 用 canonical 页替换预览、`partial` 保留 preview + warning、error/404/取消清空 |
+| Task 2 | `89137bc` | gate 接入 `fetch_illust_detail`（每次 attempt：detail/fill 桶 → 总桶 → 槽位；`observe_response` 在 `raise_for_status` 之前）；搜索路径抛 `PixivRateLimitedError`，`return_dead=True` 刷新路径映射 `RETRYABLE_GLOBAL_DETAIL` |
+| Task 6 | `ba47c9b` | `_TAG_SEARCH_CACHE_TTL = 120.0`（仅 `search_by_tag`；空页仍 30s）、预算耗尽不写缓存；摘要端点判定 no-go |
+
+实际执行顺序 Task 1 → 3 → 4 → 5 → 2 → 6 → 7（先完成 `partial`/UI 语义，最后接通闸门），与「实施边界与顺序」一致。
+
+**测试与验证（离线，不访问真实 Pixiv、不读真实 Cookie）**
+
+- 全量 `powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q` → **688 passed / 2 skipped / 4 failed(env) = 694 collected**；基线 `d961824` 同环境实测 **595 passed / 2 skipped / 4 failed(env) = 601 collected** ⇒ 本计划新增 **93** 个用例（76 个测试函数 + 参数化展开）。`git diff --check` 干净。
+- 那 4 个失败是**环境噪声**：`tests/test_test_setup.py::test_temp_root_*` 在沙箱下 spawn 的子 PowerShell 语言模式不同（`subprocess.CalledProcessError`）；`tests/test_test_setup.py` 在本分支整个未被改动，基线同环境同样失败这 4 条。
+- 性能对比（一次性 mock 脚手架，24 件作者搜索、每题固定 50 ms、真假令牌桶、同一 fake Session 跑新/旧两份 `fetcher.py`+`pixiv_client.py`）：**首条可轮询结果 0.058 s vs 完整页 30.74 s**；旧实现首结果 == done == 30.74 s（结构上没有增量通道）⇒ 首结果提前约 **530×**，而完整页时间**不变**（这正是非目标，摘要端点已 no-go）。峰值在途详情 **2**（旧 **5**）；全 403 时只发 **3** 个详情请求（旧 72）后以 `partial` 收尾；全 429 时只发 **1** 个。速率常量实测回读仍为 **45/20/60**（`FETCH_DETAIL_WORKERS=5`、`_DETAIL_MAX_IN_FLIGHT=2`）。
+- 判据逐条落点（实测 or `file::test_name`）见计划的 Task 7 Step 2 判据表；本设计的 7 条验收项全部有对应实现或测试。
+
+**摘要端点：no-go**（未发现满足字段的离线契约证据）。`pixiv-api-http-main/` 无任何用户维度作品列表路由（`core/api/module/user/pid.js` 是 0 字节空文件，全仓 grep `profile` 零命中）；`tests/fixtures/pixiv/user_profile_all.json` 的 `body.illusts` 值全是空对象、只有 id 键可用；带摘要字段的样本分属搜索/发现/关注流，且都是手工编写。⇒ 不加 `endpoint_*`/`fetch_*`，`pixiv_client.py`、`tests/test_pixiv_contract.py`、`tests/fixtures/pixiv/` 未改，`search_by_user` 继续 `profile/all` + 逐条详情。
+
+**仍未验证 / 已知遗留**（不在本次修复范围，详见计划文末「遗留」）
+
+1. **真实 429 与传输层重试**：默认 https 路径下 urllib3 的 `status_forcelist=[429,…]` 在传输层吃掉 429（`RetryError` 不带 `.response`），闸收不到 429、`Retry-After` 由传输层在**持有闸槽位期间**睡掉（实测每 fetch 约 11 s，把线程级停顿放大成全局 cap-2 停顿）。修它要动 62 s 放大不变量，需单独决策。
+2. **`_cache_get(key, ttl=...)` 的 `ttl` 是惰性形参**（有效 TTL 由写入时决定）——既有行为，倾向删形参而不是继续加调用点。
+3. **浏览器 smoke（Task 5 Step 3）从未执行**：本环境无浏览器；前端逻辑仅由一次性 Node `vm` + fake-DOM 探针验证（54/54 断言）。真实 CSS/交互、`renderInChunks` 时序、`partial` 下按钮可用性未验证；可照做的手工步骤已写进计划 Task 5 Step 3。
+4. **`fetcher.py` 已 1282 行**：publisher/缓存管线是否拆成独立模块是计划层面提出、明确推迟的问题。
+5. 真实上游的**成功详情吞吐、缓存命中率、403/429 率**未用 mock 度量（mock 里没有真实网络延迟，测不出意义）；本次只测首结果/完成时间与限流路径的对比。
 
 ## 背景与问题
 
@@ -97,6 +127,8 @@
 5. 验证详情并发上限最多 2，令牌桶速率常量未被提高，前台/后台共用总闸仍有效。
 6. 验证标签缓存命中、120 秒 TTL、屏蔽标签更新失效，以及画师搜索原有 600 秒指纹缓存、预算和分页行为不回退。
 7. 全量离线 pytest 通过；端到端体验用本地 mock Pixiv 响应检查首批结果先于完整任务显示。性能报告分别记录首结果延迟、完整页时间、详情请求数、缓存命中和 403 数。完整冷画师搜索只有在摘要接口实证减少详情请求时，才要求总耗时下降。
+
+> **验证结果（Task 7 回写）**：第 1、3、4、5、6、7 条成立并已实测/钉住；第 2 条改为**无浏览器的等价验证**（Node `vm` + fake-DOM 探针 54/54 断言）+ 一份待人工执行的手工步骤（计划 Task 5 Step 3）——**真实浏览器 smoke 尚未执行**。第 7 条的“缓存命中”未用 mock 度量（见状态区遗留 5）。逐条判据到实测/测试名的映射见计划 Task 7 Step 2 的判据表。
 
 ## 实施边界与顺序
 

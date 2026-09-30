@@ -213,7 +213,7 @@ E:\pixiv\
 | `helpers.py` | 纯工具函数与库内查询 | `enforce_image_cache_limit`、`_scan_local_downloads`、`_build_orphan_dicts`、`query_cached_tag`、`_pid_filter`、`_next_collection_position`、`_compute_move_position`、`_delete_illust_files`、`_delete_orphan_files` | config、models、fetcher、runtime |
 | `middleware.py` | 认证墙 / CSRF / IP 限流 / 安全头（app 级钩子） | `_require_login`、`_csrf_required`、`_rate_limit`、`_check_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_safe_next`、`_security_headers`、`bp` | runtime |
 | `background.py` | 后台线程与下载引擎 | `_auto_follow_worker`、`_prefetch_loop`、`_prefetch_one_tag`、`_prefetch_refresh_bookmarks`、`_refresh_bookmarks_pass`、`_prefetch_capacity_cleanup`、`reset_prefetch_refresh`、`_download_illust`、`_reset_stuck_downloads`、`_reset_stuck_prefetch`、`start_background_threads`、`_is_user_owned` | fetcher、helpers、runtime、models |
-| `fetcher.py` | Pixiv API 封装（认证/搜索/详情/限流/重试/预算/取消/入库/连接池） | `build_pixiv_session`、`get_pooled_session`、`reset_pooled_session`、`paginated_search`、`search_by_tag`、`search_by_user`、`browse_discovery`、`fetch_following`、`_get_illust_detail`、`_fetch_details_parallel`、`_process_items`、`_insert_new_illusts`、`encode_cursor`/`decode_cursor`、`_TokenBucket`、`PixivAuthError`、`SearchCancelledError`、`DEAD_DETAIL`、`RETRYABLE_GLOBAL_DETAIL` | config、models |
+| `fetcher.py` | Pixiv API 封装（认证/搜索/详情/限流/重试/预算/取消/入库/连接池） | `build_pixiv_session`、`get_pooled_session`、`reset_pooled_session`、`paginated_search`、`search_by_tag`、`search_by_user`、`browse_discovery`、`fetch_following`、`_get_illust_detail`、`_fetch_details_parallel`、`_process_items`、`_insert_new_illusts`、`encode_cursor`/`decode_cursor`、`_TokenBucket`、`PixivAuthError`、`SearchCancelledError`、`SearchRateLimitedError`、`_DetailFetchBatch`、`_ProcessedItems`、`DEAD_DETAIL`、`RETRYABLE_GLOBAL_DETAIL` | config、models |
 | `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `search`、`search_status`、`cache_items`、`api_cache_tags`、`cache_item_delete`、`api_following`、`_submit_search_task`、`_cleanup_search_tasks` | middleware、helpers、fetcher、background、models、runtime |
 | `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理 / 收藏/打开目录 | `thumb_proxy`、`serve_image`、`detail_page`、`detail_api`、`api_gallery`、`delete_gallery`、`batch_delete_gallery`、`api_favorite_*`、`api_open_dir`、`CACHE_DIR`（单点定义） | helpers、fetcher、middleware、models、runtime |
 | `routes_download.py` | 下载触发/状态/取消/批量/导出/管理页 | `trigger_download`、`batch_download`、`_cancel_download_internal`、`download_status`、`download_status_batch`、`download_file`、`api_downloads` | background、helpers、middleware、models、runtime |
@@ -321,12 +321,14 @@ sequenceDiagram
         F->>F: _process_items：去重→屏蔽/R18/收藏数过滤→defer 或同步详情→_insert_new_illusts（ON CONFLICT DO NOTHING）
         F->>DB: 写入 illusts + safe_commit
     end
-    T-->>RS: 异步：task['status']=done / {results,cursor,has_more,fetch_stats}
+    T-->>RS: 异步：task['status']=done / partial / error / cancelled
+    Note over T,RS: 运行中即逐条发布：progress={examined,accepted,detail_failed}、revision 单调自增、results=已确认预览（≤ITEMS_PER_PAGE）
     U->>RS: 轮询 GET /api/search/status/<task_id>（2s，searchGeneration 代数防竞态）
-    RS-->>U: {status, results, cursor, has_more, fetch_stats}（cancelled→200；error→401/502）
+    RS-->>U: {status, results, cursor, has_more, fetch_stats, revision, progress, complete, warning}（cancelled/partial→200；error→401/502）
 ```
 
 要点（源码）：
+- 终态语义：`done` 用 canonical 页替换预览；`partial`（全局限流闸截断，`SearchRateLimitedError`）保留已确认预览、游标不前移、不写成功缓存；`error` / `cancelled` 清空预览并把 progress 计数器归零。状态端点在同一把 `_search_tasks_lock` 内复制快照后再 `jsonify`。
 - 参数：`type`(tag|user)、`query`、`min_bookmarks`、`sort`(popular_d|date_d)、`tag_mode`(or|and)、`r18_mode`(all|safe)、`cursor`（`routes_search.py:119-140`）。`popular_d` 需 Pixiv Premium，非 Premium 静默空结果。
 - **提交即取消在途任务**（`routes_search.py:51-56`）：旧的抢令牌桶会拖慢新搜索。
 - 作者搜索是唯一「必须拉详情才能过滤」的路径：`detail_budget=ITEMS_PER_PAGE×2`（`routes_search.py:210`、`fetcher.py:89`），预算存 `threading.local`（`fetcher._detail_budget`），耗尽即停翻页；残缺结果不写缓存（`fetcher.py:1262-1263`）。
@@ -488,14 +490,14 @@ graph LR
 | --- | --- | --- | --- |
 | `build_pixiv_session()` | `() -> requests.Session` | 构造带 UA/Referer/Cookie/代理/SSL/Retry(total=1,connect=0) 的 session；**所有 Pixiv 请求必须经此工厂** | 搜索/详情/下载/补全；每次新建（连接池销毁） |
 | `get_pooled_session()` / `reset_pooled_session()` | — | 线程内连接池复用，Cookie mtime 变化自动重建 | `/thumb`、`_fetch_details_parallel` 热点路径 |
-| `paginated_search(search_fn, query_params, items_per_page, cursor_data, *, detail_budget=0)` | 返回 (batch, next_cursor, has_more) | 游标驱动分页；翻页前后取消检查；预算检查；失败页结束分页 | `routes_search._fn`（3 类搜索共用） |
-| `search_by_tag(keyword, min_bookmarks, page, sort_order, max_pages, tag_mode, r18_mode, defer_details, max_results, limiter)` | (results, has_more) | 标签搜索；`defer = defer_details or min_bookmarks==0` 默认不拉详情（列表自带 tags/thumb）；结果缓存 30s（键含全部参数） | `routes_search`、`background._prefetch_one_tag` |
-| `search_by_user(user_id, min_bookmarks, page, hide_r18, max_results, limiter)` | (results, has_more) | 作者搜索：profile/all 只给 id，必须全量同步详情过滤；**切片用 ITEMS_PER_PAGE(24)**；独立缓存 600s 且键含 `_blocked_fingerprint(blocked)` | `routes_search` |
-| `browse_discovery(page, sort_order, min_bookmarks, r18_mode, ...)` | (results, has_more) | 发现页（空查询回退） | `routes_search` |
+| `paginated_search(search_fn, query_params, items_per_page, cursor_data, *, detail_budget=0)` | 返回 (batch, next_cursor, has_more) | 游标驱动分页；翻页前后取消检查；预算检查；失败页结束分页；**不接受 `progress`**（看不到条目，收下只会静默丢掉 —— publisher 一律注入 `search_by_*`） | `routes_search._fn`（3 类搜索共用） |
+| `search_by_tag(keyword, min_bookmarks, page, sort_order, max_pages, tag_mode, r18_mode, defer_details, max_results, limiter, progress)` | (results, has_more) | 标签搜索；`defer = defer_details or min_bookmarks==0` 默认不拉详情（列表自带 tags/thumb）；结果缓存 `_TAG_SEARCH_CACHE_TTL`=120s（空页仍 30s，键含全部参数）；限流/预算耗尽不写缓存 | `routes_search`、`background._prefetch_one_tag` |
+| `search_by_user(user_id, min_bookmarks, page, hide_r18, max_results, limiter, progress)` | (results, has_more) | 作者搜索：profile/all 只给 id，必须全量同步详情过滤；**切片用 ITEMS_PER_PAGE(24)**；独立缓存 600s 且键含 `_blocked_fingerprint(blocked)` | `routes_search` |
+| `browse_discovery(page, sort_order, min_bookmarks, r18_mode, defer_details, max_results, limiter, progress)` | (results, has_more) | 发现页（空查询回退）；缓存仍 `_SEARCH_CACHE_TTL`=30s | `routes_search` |
 | `fetch_following(page, r18_mode)` | (results, has_more) | 关注最新作品；本地方再兜一层 R18 过滤 | `background._auto_follow_worker`、`routes_search.api_following` |
-| `_get_illust_detail(session, pixiv_id, limiter, return_dead=False)` | dict / None / 哨兵 | 详情拉取 + 分类重试（ConnectionError 立即返回；403/429 退避 3s/9s；其他退避 1s；401→PixivAuthError；404/删除关键词→DEAD_DETAIL） | `_fetch_details_parallel`、`helpers._fetch_original_urls`、`background._refresh_bookmarks_pass` |
-| `_fetch_details_parallel(pixiv_ids, early_stop, limiter)` | (results: dict, attempted: int) | 并行详情 + early_stop 流式过滤 + 取消；已启动请求处理完再返回（防分页漂移重复） | `_process_items`、`_background_fill_details` |
-| `_process_items(db, items, id_extractor, illust_factory, blocked, *, min_bookmarks, hide_r18, defer_details, max_results, limiter)` | list[dict] | 去重→过滤→（defer 写库/同步拉详情）→入库→收藏标注；`_budget_consume(attempted)` | 3 个搜索函数 |
+| `_get_illust_detail(session, pixiv_id, limiter, return_dead=False)` | dict / None / 哨兵 | 详情拉取 + 分类重试（ConnectionError 立即返回；403 退避 3s/9s（真实 429 被传输层拦下 → 归入"其他" 1s）；其他退避 1s；401→PixivAuthError；404/删除关键词→DEAD_DETAIL）；每次 attempt 先取 detail/fill 桶与总桶、再进 `_detail_gate` 槽位 | `_fetch_details_parallel`、`helpers._fetch_original_urls`、`background._refresh_bookmarks_pass` |
+| `_fetch_details_parallel(pixiv_ids, early_stop, limiter, on_detail)` | `_DetailFetchBatch(details, attempted, rate_limited)` | 并行详情 + early_stop 流式过滤 + 取消；已启动请求处理完再返回（防分页漂移重复）；`on_detail(pid, detail)` 在 collector 线程按完成顺序回调；被闸拒绝的请求不计 `attempted`、不回调 | `_process_items`、`_background_fill_details` |
+| `_process_items(db, items, id_extractor, illust_factory, blocked, *, min_bookmarks, hide_r18, defer_details, max_results, limiter, progress)` | `_ProcessedItems`（list 子类 + `.rate_limited`） | 去重→过滤→（defer 写库/同步拉详情）→入库→收藏标注；`_budget_consume(attempted)`；`progress` 逐条发 `examined` / `detail_failed` / `result` 三类事件（候选仍以返回值为准） | 3 个搜索函数 |
 | `_insert_new_illusts(db, illusts)` | `{pid: 赢家行}` | `INSERT ... ON CONFLICT DO NOTHING` 冲突容忍批量写 + 按 pid 回查 | `_process_items` |
 | `_background_fill_details(pixiv_ids)` / `_kick_background_fill(pixiv_ids)` | — | 后台补全 bookmark_count/original_urls（低速桶 20/min、作品级 300s 去重） | `_process_items`（defer 路径）、`routes_gallery.api_gallery` |
 | `encode_cursor(data)` / `decode_cursor(cursor)` | str / dict\|None | HMAC-SHA256 签名游标（`CURSOR_SECRET`），校验失败返回 None | `paginated_search` / `routes_search.search` |

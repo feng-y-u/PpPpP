@@ -5,10 +5,12 @@
 """
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 
 import app
+import fetcher
 import pixiv_client
 import helpers
 import routes_settings
@@ -560,3 +562,64 @@ class TestAutoFollowStatus:
         assert '最近一轮出错' in js, '要有一句人能读懂的文案'
         assert "el.classList.toggle('text-danger', !s.alive || !!s.last_error)" in js, \
             '线程活着但每轮都失败也要标红 —— 这正是这个字段存在的意义'
+
+
+# ── 屏蔽标签 → 搜索缓存失效 ──
+
+_TAG_CACHE_PROBE = 'cache-probe'
+
+
+def _seed_tag_cache():
+    """按真实路径写一条标签搜索缓存条目（不碰网络、不拉详情）。"""
+    fetcher.clear_search_cache()
+    item = {
+        'id': '7001', 'title': 'テスト', 'userId': 1, 'userName': 'u', 'pageCount': 1,
+        'url': 'https://i.pximg.net/thumb/7001.jpg',
+        'updateDate': '2026-01-01T00:00:00+09:00', 'tags': [{'tag': 'a'}],
+    }
+    with patch('pixiv_client.fetch_search_illusts', return_value=([item], 1)), \
+            patch('fetcher.build_pixiv_session'), \
+            patch('fetcher._fetch_details_parallel',
+                  return_value=fetcher._DetailFetchBatch({}, 0)):
+        fetcher.search_by_tag(_TAG_CACHE_PROBE, min_bookmarks=500)
+    assert any(k.startswith(f'tag|q={_TAG_CACHE_PROBE}') for k in fetcher._SEARCH_CACHE), \
+        '夹具本身要先写进一条标签缓存，否则下面的"已清空"断言毫无意义'
+
+
+class TestBlockedTagInvalidatesSearchCache:
+    """屏蔽标签的增删必须**当场**清空搜索结果缓存。
+
+    标签搜索的缓存键里**没有**屏蔽标签指纹（只有作者搜索那条 600 秒缓存带 `bt=`），
+    所以屏蔽集合一变，能让结果立刻正确的唯一手段就是 `clear_search_cache()`。
+    少了这一步，新屏蔽的标签要等标签 TTL 走完才生效。
+    """
+
+    def test_adding_blocked_tag_clears_tag_cache(self, client, clean_db):
+        _seed_tag_cache()
+        try:
+            resp = client.post('/api/blocked-tags',
+                               data=json.dumps({'tag': 'zz-blocked'}),
+                               content_type='application/json',
+                               headers={'X-CSRF-Token': _token(client)})
+
+            assert resp.status_code == 200
+            assert fetcher._SEARCH_CACHE == {}, '新增屏蔽标签后标签缓存必须立即失效'
+        finally:
+            fetcher.clear_search_cache()
+
+    def test_deleting_blocked_tag_clears_tag_cache(self, client, clean_db):
+        added = client.post('/api/blocked-tags',
+                           data=json.dumps({'tag': 'zz-blocked'}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': _token(client)})
+        assert added.status_code == 200
+
+        _seed_tag_cache()
+        try:
+            resp = client.delete('/api/blocked-tags/zz-blocked',
+                                 headers={'X-CSRF-Token': _token(client)})
+
+            assert resp.status_code == 200
+            assert fetcher._SEARCH_CACHE == {}, '删除屏蔽标签后标签缓存必须立即失效'
+        finally:
+            fetcher.clear_search_cache()

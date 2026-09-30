@@ -13,7 +13,7 @@ import requests
 import fetcher
 import pixiv_client
 from config import ITEMS_PER_PAGE, PER_PAGE
-from models import BlockedTag, Illust
+from models import BlockedTag, Collection, CollectionItem, Illust
 
 
 class TestDetailRateLimiter:
@@ -46,6 +46,40 @@ def _item(pid: int, bookmark_count=None, tags=('a', 'b')):
     return item
 
 
+def _detail_batch(details=None, attempted=0, *, rate_limited=False):
+    """构造 `_fetch_details_parallel` 的返回对象（替代 tuple 的显式类型）。"""
+    return fetcher._DetailFetchBatch(dict(details or {}), attempted, rate_limited=rate_limited)
+
+
+def _detail(pid: int, bookmark_count: int = 600, tags=('a',)) -> dict:
+    """一条规范化详情（`pixiv_client.parse_illust_detail` 的输出形状）。"""
+    return {
+        'title': f't{pid}', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
+        'bookmark_count': bookmark_count, 'thumb_url': f'https://x/{pid}.jpg',
+        'upload_date': '2026-01-01T00:00:00+09:00',
+        'original_urls': [f'https://i.pximg.net/{pid}_p0.jpg'],
+        'tags': list(tags),
+    }
+
+
+class _FakeClock:
+    """可手动推进的假时钟。
+
+    只替换 `fetcher.time`（模块全局），真正的 `time` 模块不受影响 —— 真实 sleep /
+    其它线程的计时照常工作。缓存的 TTL 判定全部走 `time.time()`，替换它就能在
+    不睡眠的前提下验证"599 秒还算命中、601 秒已失效"。
+    """
+
+    def __init__(self, now: float = 1_000_000.0):
+        self.now = now
+
+    def time(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 @pytest.fixture
 def _cookie_file(tmp_path, monkeypatch):
     """给走**真实** `_fetch_details_parallel` 的用例一个临时 Cookie 文件。
@@ -61,6 +95,17 @@ def _cookie_file(tmp_path, monkeypatch):
     return cookie
 
 
+@pytest.fixture(autouse=True)
+def _fresh_detail_gate(monkeypatch):
+    """每个用例一条全新的详情熔断闸——闸是有状态的，开路状态会**跨用例泄漏**。
+
+    `fetch_illust_detail` 读的是 `pixiv_client` 的模块级单例：某个用例把它开到 60 秒
+    冷却后，后续用例的详情调用会直接收到 `PixivRateLimitedError`，红灯与自身断言无关、
+    顺序一变又"自己好了"。要造"闸已开路"的场景用 `_open_detail_gate()` 自行替换实例。
+    """
+    monkeypatch.setattr(pixiv_client, '_detail_gate', pixiv_client._DetailRequestGate())
+
+
 class TestProcessItemsBookmarkFill:
     @patch('fetcher._kick_background_fill')
     @patch('fetcher._fetch_details_parallel')
@@ -70,7 +115,7 @@ class TestProcessItemsBookmarkFill:
         而不是直接显示 0（fetch_following / 浏览页路径）。"""
         clean_db.add(Illust(pixiv_id=1001, title='old', bookmark_count=0))
         clean_db.commit()
-        mock_fetch.return_value = {}
+        mock_fetch.return_value = _detail_batch()
 
         results = fetcher._process_items(
             clean_db, [_item(1001, 500)],
@@ -94,7 +139,7 @@ class TestProcessItemsBookmarkFill:
         记录应排入后台补全队列，而不是被永久静默丢弃。"""
         clean_db.add(Illust(pixiv_id=1002, title='old', bookmark_count=0))
         clean_db.commit()
-        mock_fetch.return_value = ({}, 1)
+        mock_fetch.return_value = _detail_batch(attempted=1)
 
         results = fetcher._process_items(
             clean_db, [_item(1002)],
@@ -115,7 +160,7 @@ class TestProcessItemsBookmarkFill:
         """min>0 + 条目无 bookmarkCount：详情拉取成功时更新 DB 并显示真实值。"""
         clean_db.add(Illust(pixiv_id=1003, title='old', bookmark_count=0))
         clean_db.commit()
-        mock_fetch.return_value = ({1003: {
+        mock_fetch.return_value = _detail_batch({1003: {
             'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
             'bookmark_count': 900, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
@@ -141,7 +186,7 @@ class TestProcessItemsBookmarkFill:
     @patch('fetcher._fetch_details_parallel')
     def test_new_item_defer_writes_zero_and_background_fills(self, mock_fetch, mock_fill, clean_db):
         """defer 路径：新记录列表接口无 bookmarkCount（恒缺失），写入 0 并排入后台补全。"""
-        mock_fetch.return_value = ({}, 0)
+        mock_fetch.return_value = _detail_batch()
 
         results = fetcher._process_items(
             clean_db, [_item(1004, 1200)],
@@ -167,7 +212,8 @@ class TestProcessItemsBookmarkFill:
                 'original_urls': ['https://i.pximg.net/2001_p0.jpg'],
                 'tags': ['a']}
         d300 = {**d500, 'bookmark_count': 300}
-        mock_fetch.return_value = ({2001: d500, 2002: d300, 2003: d500, 2004: d500}, 4)
+        mock_fetch.return_value = _detail_batch(
+            {2001: d500, 2002: d300, 2003: d500, 2004: d500}, 4)
 
         items = [_item(2001), _item(2002), _item(2003), _item(2004)]
         results = fetcher._process_items(
@@ -192,7 +238,7 @@ class TestProcessItemsBookmarkFill:
     @patch('fetcher._fetch_details_parallel')
     def test_max_results_zero_does_not_pass_early_stop(self, mock_fetch, clean_db):
         """max_results=0（默认，批量下载）时不传 early_stop，全量拉取。"""
-        mock_fetch.return_value = ({}, 0)
+        mock_fetch.return_value = _detail_batch()
         fetcher._process_items(
             clean_db, [_item(3001, 500)],
             id_extractor=lambda item: int(item['id']),
@@ -208,15 +254,15 @@ class TestProcessItemsBookmarkFill:
         已启动的请求仍处理完（不 break 丢弃），返回其全部结果。"""
         with patch('fetcher._get_illust_detail', return_value=None), \
              patch('fetcher.build_pixiv_session', side_effect=RuntimeError('no net')):
-            results, attempted = fetcher._fetch_details_parallel(
+            batch = fetcher._fetch_details_parallel(
                 [4001, 4002, 4003, 4004],
                 early_stop=lambda detail: True,
             )
             # shutdown(wait=False) 不等待后台线程；sleep 让残留线程在 patch
             # 恢复前结束，避免其调用真实 _get_illust_detail 联网
             time.sleep(0.5)
-        assert results == {}
-        assert attempted >= 1  # 已启动的请求（全部失败）均被处理，未启动的已取消
+        assert batch.details == {}
+        assert batch.attempted >= 1  # 已启动的请求（全部失败）均被处理，未启动的已取消
 
     def test_fetch_stats_accurate_failure_count(self, clean_db, _cookie_file):
         """统计准确性：早停取消的请求不计入失败；仅实际发起的请求统计失败数。"""
@@ -318,7 +364,7 @@ class TestProcessItemsDuplicateInsert:
     @patch('fetcher._kick_background_fill')
     @patch('fetcher._fetch_details_parallel')
     def test_duplicate_items_in_non_defer_batch(self, mock_fetch, mock_fill, clean_db):
-        mock_fetch.return_value = ({2001: {'bookmark_count': 100, 'tags': ['a']}}, 1)
+        mock_fetch.return_value = _detail_batch({2001: {'bookmark_count': 100, 'tags': ['a']}}, 1)
 
         results = fetcher._process_items(
             clean_db, [_item(2001), _item(2001)],
@@ -348,6 +394,285 @@ class TestProcessItemsDuplicateInsert:
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 2002).count() == 1
 
 
+class TestDetailProgressPublication:
+    """详情流水线逐条发布已通过过滤的结果，并把全局限流标成批次状态。
+
+    进度回调必须在**搜索任务自己的线程**里跑 —— 也就是 `_fetch_details_parallel`
+    中消费 `as_completed` 的那个 collector 线程（它只是碰巧由调用方线程执行，
+    而不是线程池 worker）。理由有两条：① `_cancelled()` 是 threading.local，
+    worker 线程读不到任务线程的取消状态；② 回调要发布的是"已确认"的结果，
+    与调用方共享同一份事务语义，丢到 worker 里就需要给共享状态另加锁。
+    """
+
+    def test_detail_progress_callback_runs_in_collector_thread(self, _cookie_file):
+        collector_thread = threading.get_ident()
+        first_done = threading.Event()
+        seen: list[tuple[int, int, dict | None]] = []
+
+        def fake_detail(session, pixiv_id, limiter=None):
+            if pixiv_id == 99:
+                first_done.set()            # 99 先完成，另外两条才放行
+            elif not first_done.wait(timeout=5):
+                raise AssertionError('先完成的详情始终没跑完，用例死锁')
+            return {'pixiv_id': pixiv_id, 'title': f'p{pixiv_id}'}
+
+        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+            batch = fetcher._fetch_details_parallel(
+                [1, 2, 99],
+                on_detail=lambda pid, detail: seen.append(
+                    (threading.get_ident(), pid, detail)))
+
+        assert seen, '三条详情都完成了，on_detail 一次都没被调用'
+        assert [pid for _tid, pid, _d in seen][0] == 99, '回调顺序 = future 完成顺序'
+        assert sorted(pid for _tid, pid, _d in seen) == [1, 2, 99]
+        assert all(tid == collector_thread for tid, _pid, _d in seen), \
+            'on_detail 必须在消费 as_completed 的 collector 线程回调'
+        assert batch.attempted == 3
+
+    def test_process_items_publishes_only_filter_matches(self, clean_db, _cookie_file):
+        """result 事件只发通过屏蔽标签/收藏数/R18 的记录；详情失败只发 detail_failed。"""
+        clean_db.add(Collection(name='我的收藏'))
+        clean_db.commit()
+        fav = clean_db.query(Collection).filter(Collection.name == '我的收藏').first()
+        clean_db.add(CollectionItem(collection_id=fav.id, pixiv_id=11))
+        clean_db.commit()
+
+        def fake_detail(session, pixiv_id, limiter=None):
+            if pixiv_id == 15:                              # 详情失败：不该发 result
+                return None
+            return _detail(
+                pixiv_id,
+                bookmark_count={11: 600, 12: 100, 13: 600, 14: 600}[pixiv_id],
+                tags={11: ['a'], 12: ['a'], 13: ['ng'], 14: ['R-18']}[pixiv_id])
+
+        events: list[dict] = []
+        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+            results = fetcher._process_items(
+                clean_db, [_item(pid) for pid in (11, 12, 13, 14, 15)],
+                id_extractor=lambda item: int(item['id']),
+                illust_factory=fetcher._illust_from_item,
+                blocked={'ng'}, min_bookmarks=500, hide_r18=True,
+                progress=events.append)
+
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [11, 12, 13, 14, 15]
+        assert [e['pixiv_id'] for e in events if e['type'] == 'detail_failed'] == [15]
+        assert [e['result']['pixiv_id'] for e in events if e['type'] == 'result'] == [11], \
+            '每个 PID 的 result 只发一次，且只有通过全部过滤的记录才发'
+        assert [r['pixiv_id'] for r in results] == [11]
+        assert results.rate_limited is False
+        published = [e['result'] for e in events if e['type'] == 'result'][0]
+        assert published['bookmark_count'] == 600
+        assert published['is_favorite'] is True, '收藏状态要按调用线程取到的收藏集合打标'
+
+    def test_defer_path_publishes_summary_without_detail_requests(self, clean_db):
+        """defer 路径（标签/发现/关注）直接用条目摘要发布，不为进度多拉一次详情。"""
+        events: list[dict] = []
+        with patch('fetcher._kick_background_fill'), \
+             patch('fetcher._fetch_details_parallel') as mock_fetch:
+            results = fetcher._process_items(
+                clean_db, [_item(31), _item(32, tags=('ng',))],
+                id_extractor=lambda item: int(item['id']),
+                illust_factory=fetcher._illust_from_item,
+                blocked={'ng'}, min_bookmarks=0, defer_details=True,
+                progress=events.append)
+
+        mock_fetch.assert_not_called()
+        assert [r['pixiv_id'] for r in results] == [31]
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [31, 32]
+        assert [e['result']['pixiv_id'] for e in events if e['type'] == 'result'] == [31]
+        assert [e['result']['bookmark_count'] for e in events if e['type'] == 'result'] == [0], \
+            '摘要路径的收藏数为 0（列表接口不带 bookmarkCount），由后台补全刷新'
+
+    def test_cancelled_search_does_not_publish_progress(self, clean_db):
+        """取消后不再发布旧任务进度，但已通过过滤的作品仍按原事务语义收尾。"""
+        clean_db.add(Illust(pixiv_id=41, title='t', bookmark_count=700))
+        clean_db.commit()
+        events: list[dict] = []
+        ev = threading.Event()
+        ev.set()
+        fetcher._cancel_begin(ev.is_set)
+        try:
+            with patch('fetcher._kick_background_fill'):   # 这条记录缺原图，会触发后台补全
+                results = fetcher._process_items(
+                    clean_db, [_item(41)],
+                    id_extractor=lambda item: int(item['id']),
+                    illust_factory=fetcher._illust_from_item,
+                    blocked=set(), min_bookmarks=0, defer_details=False,
+                    progress=events.append)
+        finally:
+            fetcher._cancel_end()
+
+        assert events == [], '旧任务已被新搜索取代，不能再刷它的进度'
+        assert [r['pixiv_id'] for r in results] == [41], '入库/返回语义不因取消而改变'
+
+    def test_rate_limited_batch_keeps_completed_details(self, clean_db, _cookie_file):
+        """限流（闸开路）截断批次：已完成详情照常保留并入库，批次标 rate_limited。
+
+        被闸拒绝的请求**没有发出**，不能计入 attempted，也不能算成"详情失败"——
+        否则限流会被误报成"这些作品不匹配"，已完成的部分也一起丢掉。
+
+        13/14/15 必须等 11/12 都完成才被闸拒绝（用 Event 同步、带超时上限）：否则
+        "11/12 已完成"这件事就只是 `FETCH_DETAIL_WORKERS == 5 == len(batch)` 与假实现
+        同样便宜带来的巧合 —— 拒绝路径会对每个 future 调 `cancel()`（只对 PENDING 有效），
+        工作线程数一变，11/12 就可能在启动前被取消，用例为一个无关原因变红。
+        """
+        both_done = threading.Event()
+        done: set[int] = set()
+        done_lock = threading.Lock()
+
+        def fake_detail(session, pixiv_id, limiter=None):
+            if pixiv_id in (11, 12):
+                with done_lock:
+                    done.add(pixiv_id)
+                    if done == {11, 12}:
+                        both_done.set()
+                return _detail(pixiv_id)
+            # 闸拒绝的必须是"11/12 已完成之后"才发起的请求
+            if not both_done.wait(timeout=5):
+                raise AssertionError('11/12 始终没跑完，用例死锁')
+            raise fetcher.PixivRateLimitedError('详情熔断闸开路')
+
+        # 抓 `_process_items` 内部那一批，而不是另起一次 `_fetch_details_parallel`：
+        # 跑两轮会让 13/14/15 的第二个闸在第二轮一开场就拒绝，11/12 反而被取消。
+        batches: list = []
+        real_batch = fetcher._fetch_details_parallel
+
+        def spy_batch(pixiv_ids, **kwargs):
+            batch = real_batch(pixiv_ids, **kwargs)
+            batches.append(batch)
+            return batch
+
+        events: list[dict] = []
+        with patch('fetcher._get_illust_detail', side_effect=fake_detail), \
+             patch('fetcher._fetch_details_parallel', side_effect=spy_batch):
+            results = fetcher._process_items(
+                clean_db, [_item(pid) for pid in (11, 12, 13, 14, 15)],
+                id_extractor=lambda item: int(item['id']),
+                illust_factory=fetcher._illust_from_item,
+                blocked=set(), min_bookmarks=0, defer_details=False,
+                progress=events.append)
+
+        (batch,) = batches
+        assert done == {11, 12}, '11/12 必须都已发起并完成，才谈得上"保留已完成部分"'
+        assert batch.rate_limited is True
+        assert set(batch.details) == {11, 12}
+        assert batch.attempted == 2, '只有真正发出的请求才计 attempted'
+        assert results.rate_limited is True, '批次限流必须传到 _ProcessedItems'
+        assert sorted(r['pixiv_id'] for r in results) == [11, 12], '已完成的详情仍要照常入库/返回'
+        assert [e['pixiv_id'] for e in events if e['type'] == 'detail_failed'] == [], \
+            '被闸拒绝不是"这件作品详情失败"'
+
+    def test_parallel_detail_propagates_auth_error(self, _cookie_file):
+        """PixivAuthError 必须原样抛出，不能被宽泛 except 吞成"详情失败"。
+
+        吞掉的结果是整页静默变空：用户看到 0 条结果，而不是"Cookie 已失效"。
+        """
+        seen: list[tuple[int, dict | None]] = []
+
+        def fake_detail(session, pixiv_id, limiter=None):
+            raise fetcher.PixivAuthError('Pixiv API returned HTTP 401')
+
+        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+            with pytest.raises(fetcher.PixivAuthError):
+                fetcher._fetch_details_parallel(
+                    [21, 22, 23],
+                    on_detail=lambda pid, detail: seen.append((pid, detail)))
+
+        assert seen == [], '认证失效不是"这件作品详情失败"，不能回调成 detail=None'
+
+    def test_paginated_search_propagates_rate_limited(self):
+        """限流是全局状态，不是"这页没搜到"：不能落入宽泛 except 当空页完成。"""
+        def fake_fn(page, remaining=None):
+            raise fetcher.SearchRateLimitedError('详情请求被限流')
+
+        with pytest.raises(fetcher.SearchRateLimitedError):
+            fetcher.paginated_search(fake_fn, {'type': 'user'}, 24)
+
+    def test_existing_record_published_before_detail_batch_completes(self, clean_db):
+        """已入库且通过全部过滤的记录，必须在**详情批次还在途中**就发布。
+
+        这是作者搜索的典型形态：一页 24 条里命中已入库记录的概率很高，而它不需要
+        任何网络请求就能定稿。若只在收尾的统一兜底里发布，它就得排在一整页无关
+        作品的详情请求后面（约 30 秒）才出现在前端 —— 渐进显示要消除的正是这种
+        等待。这里让详情批次卡在 `threading.Event` 上，另开观察线程在"批次在途"
+        那一刻断言 result 事件已经发出（收尾兜底此时根本还没执行）。
+        """
+        row = Illust(pixiv_id=5001, title='cached', bookmark_count=700)
+        row.original_urls_list = ['https://i.pximg.net/5001_p0.jpg']
+        clean_db.add(row)
+        clean_db.commit()
+
+        events: list[dict] = []
+        batch_started = threading.Event()
+        batch_release = threading.Event()
+        seen_in_flight: list[list[int]] = []
+        failures: list[BaseException] = []
+
+        def blocking_batch(pixiv_ids, **kwargs):
+            """替身详情批次：卡住不放，模拟作者搜索那约 30 秒。"""
+            batch_started.set()
+            if not batch_release.wait(timeout=10):
+                raise AssertionError('详情批次始终没被放行，用例死锁')
+            return _detail_batch()
+
+        def observer():
+            try:
+                assert batch_started.wait(timeout=10), '详情批次始终没开始'
+                seen_in_flight.append(
+                    [e['result']['pixiv_id'] for e in events if e['type'] == 'result'])
+            except BaseException as e:      # 线程里的断言不会让用例失败，带回主线程
+                failures.append(e)
+            finally:
+                batch_release.set()
+
+        with patch('fetcher._fetch_details_parallel', side_effect=blocking_batch), \
+             patch('fetcher._kick_background_fill'):
+            watcher = threading.Thread(target=observer)
+            watcher.start()
+            try:
+                fetcher._process_items(
+                    clean_db, [5001, 5002],
+                    id_extractor=lambda pid: pid,
+                    illust_factory=fetcher._illust_from_detail,
+                    blocked=set(), min_bookmarks=0,
+                    progress=events.append)
+            finally:
+                watcher.join(timeout=10)
+
+        assert failures == [], f'详情批次还在途，已入库记录却没有发布：{failures}'
+        assert not watcher.is_alive()
+        assert seen_in_flight == [[5001]], \
+            '批次尚未结束，已入库记录就该出现在 result 事件里'
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [5001, 5002]
+
+    @patch('fetcher._kick_background_fill')
+    @patch('fetcher._fetch_details_parallel')
+    def test_duplicate_input_pid_examined_and_published_once(
+            self, mock_fetch, mock_fill, clean_db):
+        """输入里同一 pixiv_id 出现两次时：examined 只发一次、result 只发布一次。
+
+        重复输入不是纸面假设：Pixiv 分页会漂移（两次翻页之间作品被删除/新增，向后
+        分页整体错位），同一作品因此可能跨页、跨批次重复出现。前端把重复项当成两件
+        作品就会多算进度、多插一张卡，所以 `_process_items` 必须自己把重复吃下去 ——
+        这里钉住 examined 的 once-per-PID 去重（连同 published_pids 的单次发布）。
+        """
+        mock_fetch.return_value = _detail_batch({3001: _detail(3001, bookmark_count=600)}, 1)
+        events: list[dict] = []
+
+        results = fetcher._process_items(
+            clean_db, [_item(3001), _item(3001)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(), min_bookmarks=500, defer_details=False,
+            progress=events.append)
+
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [3001], \
+            '同一 PID 被检查两次，只应发一次 examined'
+        assert [r['pixiv_id'] for r in results] == [3001]
+        assert [e['result']['pixiv_id'] for e in events if e['type'] == 'result'] == [3001], \
+            '同一 PID 的结果只应发布一次'
+
+
 class TestPaginatedSearchRemaining:
     def test_remaining_decreases_across_pages(self):
         """跨页累计：paginated_search 每页把"还需收集的条数"传给 search_fn。"""
@@ -363,6 +688,21 @@ class TestPaginatedSearchRemaining:
         assert len(results) == 3
         assert calls == [(1, 3), (2, 2), (3, 1)]
         assert has_more is True
+
+
+class TestPaginatedSearchNoProgressParam:
+    """分页层不参与逐条发布：progress 只能注入 `search_by_*` / `_process_items`。
+
+    留着这个形参的代价不是"多一个没用的参数"，而是它**看起来接得上**：下一任务按
+    计划字面"沿 `app.paginated_search` 和对应 `app.search_by_*` 闭包传入"时，接线
+    通过、测试全绿，端到端却零事件。所以这里钉住它必须直接不存在。
+    """
+
+    def test_progress_keyword_is_rejected(self):
+        with pytest.raises(TypeError):
+            fetcher.paginated_search(
+                lambda page, remaining=None: ([], False), {'type': 'user'}, 24,
+                progress=[].append)
 
 
 class TestUserProfileCache:
@@ -497,7 +837,7 @@ class TestFillAttemptMapPruning:
         monkeypatch.setattr(fetcher, '_filling_ids', set())
         calls: list[list[int]] = []
         monkeypatch.setattr(fetcher, '_fetch_details_parallel',
-                            lambda ids, **kwargs: (calls.append(list(ids)), ({}, 0))[1])
+                            lambda ids, **kwargs: (calls.append(list(ids)), _detail_batch())[1])
         return calls
 
     def test_fill_attempt_map_pruned_when_large(self, monkeypatch):
@@ -563,6 +903,30 @@ class TestFillAttemptMapPruning:
         assert len(fetcher._fill_last_attempt) == 8, '清理后不该残留陈年条目'
 
 
+class TestBackgroundFillRateLimited:
+    """后台补全批次被限流截断时的行为。"""
+
+    def test_rate_limited_fill_still_writes_completed_details(self, monkeypatch, clean_db):
+        """已拿到的详情照常写库（刷新是幂等的，拿到不写才亏），且去重集合必须释放 ——
+        否则这些作品在整个进程生命周期内都不会再被补全。"""
+        monkeypatch.setattr(fetcher, '_filling_ids', set())
+        monkeypatch.setattr(fetcher, '_fill_last_attempt', {})
+        monkeypatch.setattr(fetcher, '_fetch_details_parallel', lambda ids, **kwargs: _detail_batch(
+            {7001: {'bookmark_count': 777,
+                    'original_urls': ['https://i.pximg.net/7001_p0.jpg']}},
+            2, rate_limited=True))
+        clean_db.add(Illust(pixiv_id=7001, title='t', bookmark_count=1))
+        clean_db.commit()
+
+        fetcher._background_fill_details([7001, 7002])   # 不应抛异常打断预取循环
+
+        clean_db.expire_all()   # 补全用自己的事务提交，过期后重读才是库里真实值
+        row = clean_db.query(Illust).filter(Illust.pixiv_id == 7001).first()
+        assert row.bookmark_count == 777
+        assert row.original_urls_list == ['https://i.pximg.net/7001_p0.jpg']
+        assert fetcher._filling_ids == set(), '限流截断也必须释放 _filling_ids'
+
+
 class TestBookmarkStaleness:
     def _old_illust(self, clean_db, pid, bookmark_count, days_ago):
         illust = Illust(pixiv_id=pid, title='old', bookmark_count=bookmark_count)
@@ -607,7 +971,7 @@ class TestBookmarkStaleness:
     def test_stale_record_sync_refetch_and_timestamp_update(self, mock_fetch, clean_db):
         """min>0：收藏数过期的记录同步拉详情刷新，并更新时间戳。"""
         self._old_illust(clean_db, 7002, 500, days_ago=8)
-        mock_fetch.return_value = ({7002: {
+        mock_fetch.return_value = _detail_batch({7002: {
             'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
             'bookmark_count': 800, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
@@ -638,7 +1002,7 @@ class TestBookmarkStaleness:
     def test_non_defer_new_record_stamps_timestamp(self, mock_fetch, clean_db):
         """非 defer 插入（同步拉详情成功）：新记录应带 bookmark_updated_at，
         否则 7 天 TTL 刷新永远不会作用于它。"""
-        mock_fetch.return_value = ({8001: {
+        mock_fetch.return_value = _detail_batch({8001: {
             'title': 't', 'user_id': 1, 'user_name': 'u', 'page_count': 1,
             'bookmark_count': 900, 'thumb_url': 'https://x.jpg',
             'upload_date': '2026-01-01T00:00:00+09:00',
@@ -682,7 +1046,7 @@ class TestBookmarkStaleness:
         """非 defer（批量下载等 min>0 场景）：同步拉详情失败的记录仍应排入后台补全，
         不再静默丢弃。"""
         self._old_illust(clean_db, 8003, 0, days_ago=0)
-        mock_fetch.return_value = ({}, 1)  # 拉取失败
+        mock_fetch.return_value = _detail_batch(attempted=1)  # 拉取失败
 
         results = fetcher._process_items(
             clean_db, [_item(8003)],
@@ -746,7 +1110,10 @@ class TestDetailRetryPolicy:
         calls, mock_sleep, result = self._run(monkeypatch, self._http_error(429))
         assert result is None
         assert calls == fetcher.DETAIL_MAX_RETRIES + 1
-        assert mock_sleep.call_count == fetcher.DETAIL_MAX_RETRIES
+        # 只数**退避**睡眠：每次重试都要重取令牌，而旁路桶（6000/分钟）自己也会
+        # sleep 0.01s —— 混在一起数会把"重取令牌"错判成"多退避了一次"。
+        backoffs = [c.args[0] for c in mock_sleep.call_args_list if c.args[0] >= 1]
+        assert backoffs == [3, 9], '403/429 的退避是不可变的 3s/9s'
 
     def test_401_raises_auth_error_immediately(self, monkeypatch):
         """认证失效重试无意义，必须直接上报 PixivAuthError。"""
@@ -864,14 +1231,59 @@ class TestDetailRetryPolicy:
         self._run_static(monkeypatch, dead, return_dead=True)
         assert fetcher.get_detail_error_samples() == {}
 
+    def test_hostile_error_message_is_truncated_in_log(self, monkeypatch, caplog):
+        """外部 message 只能以截断后的形态进日志：换行能伪造日志行，超长能刷屏。
+
+        两条报错日志（判死 / 未识别）与 429 的 `Retry-After` 同源风险，走同一个
+        `_log_safe_header`。
+        """
+        hostile = 'A' * 500 + '\n伪造日志行'
+        monkeypatch.setattr(pixiv_client, '_detail_error_samples', {})
+        with caplog.at_level(logging.WARNING, logger='pixiv_client'):
+            self._run_static(
+                monkeypatch,
+                self._json_resp({'error': True, 'message': '作品已被删除' + hostile}),
+                return_dead=True)
+            self._run_static(
+                monkeypatch,
+                self._json_resp({'error': True, 'message': '謎のエラー' + hostile}),
+                return_dead=True)
+
+        lines = [r.getMessage() for r in caplog.records
+                 if r.name == 'pixiv_client'
+                 and ('Detail API 永久失败' in r.getMessage()
+                      or 'Detail API error for' in r.getMessage())]
+        assert len(lines) == 2, '两条报错日志都要覆盖'
+        for line in lines:
+            assert '\n' not in line, '外部报文不得换行伪造日志'
+            assert 'A' * 41 not in line, '外部报文必须截断'
+        assert all('123' in line for line in lines), 'pixiv_id 仍要保留'
+
     def test_session_does_not_retry_connect_errors(self, monkeypatch):
-        """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。"""
+        """传输层同样不能重试连接错误（Retry(connect=0)），否则又叠回一层。
+
+        后三条断言把传输层配置**钉死**：它们不是复述实现，而是决定 429 走哪条路的
+        分水岭。429 在 `status_forcelist` 里 → urllib3 先重试一次，耗尽后 requests 抛
+        **不带 `.response` 的 `RetryError`**，`fetch_illust_detail` 拿不到状态码，
+        只能归入"其他"→ 1s，熔断闸的 `observe_response(429)` 也收不到它；真正的
+        限流信号是 403（不在 forcelist，响应原样返回）。`respect_retry_after_header`
+        决定这段时间由传输层睡（睡在闸槽位内）还是由应用层退避。适配器只
+        `mount('https://', ...)`：`PIXIV_BASE_URL` 为 `http://` 的镜像走默认适配器
+        （`max_retries=0`、不重试），429 响应原样回来并**到达闸** —— 闸的 429 分支
+        因此才不是死代码。改动这三项里任何一项都会改变上述路径，故在此显式固化。
+        """
         monkeypatch.setattr(pixiv_client, '_load_cookie', lambda: None)
         monkeypatch.setattr(pixiv_client, '_cookie_value', 'test')
         session = pixiv_client.build_pixiv_session()
-        retry = session.get_adapter('https://www.pixiv.net').max_retries
+        https_adapter = session.get_adapter('https://www.pixiv.net')
+        retry = https_adapter.max_retries
         assert retry.connect == 0
         assert retry.total == 1
+        assert retry.status_forcelist == [429, 500, 502, 503]
+        assert retry.respect_retry_after_header is True
+        http_adapter = session.get_adapter('http://www.pixiv.net')
+        assert http_adapter is not https_adapter, '适配器只应挂在 https:// 上'
+        assert http_adapter.max_retries.total == 0, 'http:// 镜像不重试，429 会到达闸'
 
 
 class TestPooledSession:
@@ -1041,7 +1453,7 @@ class TestUserSearchPageSize:
     @staticmethod
     def _call(clean_db, mock_ids, mock_fetch, n_works=100, page=1):
         mock_ids.return_value = list(range(1, n_works + 1))
-        mock_fetch.return_value = ({}, 0)
+        mock_fetch.return_value = _detail_batch()
         return fetcher.search_by_user('12345', page=page, max_results=ITEMS_PER_PAGE)
 
     @patch('fetcher.build_pixiv_session')
@@ -1081,7 +1493,7 @@ class TestUserSearchResultCache:
 
     @staticmethod
     def _call(mock_fetch, page=1):
-        mock_fetch.return_value = ({}, 0)
+        mock_fetch.return_value = _detail_batch()
         return fetcher.search_by_user('12345', page=page, max_results=ITEMS_PER_PAGE)
 
     @patch('fetcher.build_pixiv_session')
@@ -1165,6 +1577,26 @@ class TestUserSearchResultCache:
     @patch('fetcher.build_pixiv_session')
     @patch('fetcher._get_user_profile_ids')
     @patch('fetcher._fetch_details_parallel')
+    def test_rate_limited_result_not_cached(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """限流截断的页是残缺的：必须抛 SearchRateLimitedError 且不写成功缓存。
+
+        否则下一次搜索会命中这份"看起来完整"的残缺页，直到 600 秒 TTL 结束 ——
+        用户根本不知道还有作品没被检查过。
+        """
+        mock_ids.return_value = list(range(1, 61))
+        # 不用 self._call：它会把 return_value 重置成默认批次，盖掉这里的限流标记
+        mock_fetch.return_value = _detail_batch({1: _detail(1)}, 24, rate_limited=True)
+        fetcher.clear_search_cache()
+        try:
+            with pytest.raises(fetcher.SearchRateLimitedError):
+                fetcher.search_by_user('12345', page=1, max_results=ITEMS_PER_PAGE)
+            assert not any(k.startswith('user|q=12345') for k in fetcher._SEARCH_CACHE)
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
     def test_budget_exhausted_result_not_cached(self, mock_fetch, mock_ids, mock_sess, clean_db):
         """预算中途耗尽的结果是残缺的，缓存它等于把残缺固化到 TTL 结束。"""
         mock_ids.return_value = list(range(1, 61))
@@ -1179,6 +1611,339 @@ class TestUserSearchResultCache:
         finally:
             fetcher._budget_end()
             fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_cache_ttl_is_user_search_600s_not_tag_30s(
+            self, mock_fetch, mock_ids, mock_sess, clean_db, monkeypatch):
+        """钉住作者搜索缓存的 TTL：就是 600 秒，不是标签搜索那条 30 秒。
+
+        用假时钟验证"599 秒仍命中、601 秒失效"：若误用标签搜索的 30 秒 TTL，
+        599 秒那一步就会重新拉详情（`_fetch_details_parallel` / `_get_user_profile_ids`
+        再被调用），用例即失败 —— 这正是要钉住的差异，也补上了"完整画师搜索重复
+        执行仍命中 600 秒缓存"这条规范契约此前只能间接推知的缺口。
+        """
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        mock_ids.return_value = list(range(1, 61))
+        mock_fetch.return_value = _detail_batch()
+        fetcher.clear_search_cache()
+        try:
+            self._call(mock_fetch)
+            assert (mock_fetch.call_count, mock_ids.call_count) == (1, 1)
+
+            # 直接钉住写进缓存的那条 TTL（索引 1 = entry_ttl），而不只是"行为像"，
+            # 免得日后改了常量却仍然通过时间窗口断言
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('user|q=12345')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._USER_SEARCH_CACHE_TTL == 600.0
+
+            clock.advance(599.0)
+            self._call(mock_fetch)
+            assert (mock_fetch.call_count, mock_ids.call_count) == (1, 1), \
+                '599 秒（< 600）必须仍命中缓存，既不重拉详情也不重拉 profile'
+
+            clock.advance(2.0)      # 累计 601 秒
+            self._call(mock_fetch)
+            assert mock_fetch.call_count == 2, '601 秒（> 600）缓存必须失效并重新搜索'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_blocked_fingerprint_is_part_of_cache_key(
+            self, mock_fetch, mock_ids, mock_sess, clean_db):
+        """屏蔽标签指纹必须参与作者搜索缓存键：同一批输入、只改屏蔽集合就要换条目。
+
+        TTL 长达 600 秒，指纹漏掉就意味着"改完屏蔽标签还得等十分钟才见效"。这里
+        把键里的 `bt=` 分量直接钉出来（只断言"重新搜索了"的话，TTL 过期后的重搜
+        也能满足，测不出指纹的作用）。
+        """
+        mock_ids.return_value = list(range(1, 61))
+        mock_fetch.return_value = _detail_batch()
+        fetcher.clear_search_cache()
+        try:
+            self._call(mock_fetch)
+            first_key = next(iter(fetcher._SEARCH_CACHE))
+            assert fetcher._blocked_fingerprint(set()) in first_key
+            assert mock_fetch.call_count == 1
+
+            clean_db.add(BlockedTag(tag='a'))
+            clean_db.commit()
+
+            self._call(mock_fetch)
+            keys = list(fetcher._SEARCH_CACHE)
+            assert len(keys) == 2, '屏蔽标签集合变了就该是另一条缓存条目'
+            assert fetcher._blocked_fingerprint({'a'}) in keys[1]
+            assert fetcher._blocked_fingerprint({'a'}) != fetcher._blocked_fingerprint(set())
+            assert mock_fetch.call_count == 2, '指纹变了必须重新搜索，不能吃旧缓存'
+        finally:
+            fetcher.clear_search_cache()
+
+
+class TestTagSearchResultCacheTTL:
+    """标签搜索结果缓存的 TTL：专用 120 秒，且**只有**标签路径用它。
+
+    标签搜索的成本是 1 次 HTTP，原来的 30 秒缓存常在用户"翻回上一页"时已经过期，
+    白等一次上游往返；120 秒覆盖了"看完一屏再回退"的实际节奏。
+    发现页/关注页的成本同样是 1 次 HTTP，但它们的缓存是另一套语义，必须继续用
+    `_SEARCH_CACHE_TTL`（30 秒）—— 下面把两条路径**各自写进缓存条目的 TTL** 都钉出来，
+    而不是只断言"行为像"（改了常量但仍落在时间窗口里也能蒙过去）。
+    """
+
+    @staticmethod
+    def _tag_search(mock_fetch, mock_items, keyword='ttl'):
+        mock_items.return_value = ([_item(901)], 1)
+        mock_fetch.return_value = _detail_batch({901: _detail(901)}, 1)
+        return fetcher.search_by_tag(keyword, min_bookmarks=500)
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    @patch('fetcher._fetch_details_parallel')
+    def test_tag_cache_ttl_is_120s(
+            self, mock_fetch, mock_items, mock_sess, clean_db, monkeypatch):
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        fetcher.clear_search_cache()
+        try:
+            self._tag_search(mock_fetch, mock_items)
+            assert mock_items.call_count == 1
+
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('tag|q=ttl')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._TAG_SEARCH_CACHE_TTL == 120.0
+
+            clock.advance(119.0)
+            self._tag_search(mock_fetch, mock_items)
+            assert mock_items.call_count == 1, \
+                '119 秒（< 120）必须仍命中缓存：30 秒 TTL 会在这里重打一次上游'
+
+            clock.advance(2.0)      # 累计 121 秒
+            self._tag_search(mock_fetch, mock_items)
+            assert mock_items.call_count == 2, '121 秒（> 120）缓存必须失效并重新请求'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    def test_empty_tag_page_keeps_short_ttl(
+            self, mock_items, mock_sess, clean_db, monkeypatch):
+        """空结果页**不**跟随 120 秒：它必须留在 30 秒窗口里。
+
+        为什么单独钉住：Cookie 过期时 Pixiv **静默返回空页**，而同条件重试命中同一个
+        缓存键 —— 若空页也按 120 秒缓存，"凭据失效"会被伪装成"这个标签真的没作品"
+        长达两分钟，用户只会反复换关键词而不是去检查 Cookie。空结果继续按
+        `_SEARCH_CACHE_TTL`（30 秒）缓存，`search_by_user` 更是干脆不缓存空结果。
+        """
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        fetcher.clear_search_cache()
+        try:
+            mock_items.return_value = ([], 0)
+            assert fetcher.search_by_tag('empty-ttl') == ([], False)
+
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('tag|q=empty-ttl')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._SEARCH_CACHE_TTL == 30.0, \
+                '空结果页必须留在 30 秒窗口，不能继承 120 秒的标签 TTL'
+
+            clock.advance(31.0)
+            assert fetcher.search_by_tag('empty-ttl') == ([], False)
+            assert mock_items.call_count == 2, \
+                '31 秒（> 30）后空结果缓存必须失效并重新请求上游'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_discovery_artworks')
+    @patch('fetcher._fetch_details_parallel')
+    def test_discovery_cache_keeps_30s_ttl(
+            self, mock_fetch, mock_items, mock_sess, clean_db, monkeypatch):
+        """发现页不得被顺手改成 120 秒：它是另一条路径，TTL 仍是 `_SEARCH_CACHE_TTL`。"""
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        mock_items.return_value = ([_item(911)], 1)
+        mock_fetch.return_value = _detail_batch({911: _detail(911)}, 1)
+        fetcher.clear_search_cache()
+        try:
+            fetcher.browse_discovery(min_bookmarks=500)
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('disc|')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._SEARCH_CACHE_TTL == 30.0
+
+            clock.advance(31.0)
+            fetcher.browse_discovery(min_bookmarks=500)
+            assert mock_items.call_count == 2, '发现页 31 秒后必须重新请求（仍是 30 秒 TTL）'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_following_latest')
+    @patch('fetcher._kick_background_fill')
+    def test_following_cache_keeps_30s_ttl(
+            self, mock_kick, mock_items, mock_sess, clean_db, monkeypatch):
+        """关注页同样保持 30 秒（`fetch_following` 恒走 defer 路径，不拉详情）。"""
+        clock = _FakeClock()
+        monkeypatch.setattr(fetcher, 'time', clock)
+        mock_items.return_value = ([_item(921)], False)
+        fetcher.clear_search_cache()
+        try:
+            fetcher.fetch_following(1, r18_mode='all')
+            key = next(iter(fetcher._SEARCH_CACHE))
+            assert key.startswith('follow|')
+            assert fetcher._SEARCH_CACHE[key][1] == fetcher._SEARCH_CACHE_TTL == 30.0
+
+            clock.advance(31.0)
+            fetcher.fetch_following(1, r18_mode='all')
+            assert mock_items.call_count == 2, '关注页 31 秒后必须重新请求（仍是 30 秒 TTL）'
+        finally:
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    @patch('fetcher._fetch_details_parallel')
+    def test_budget_exhausted_tag_page_not_cached(self, mock_fetch, mock_items, mock_sess, clean_db):
+        """预算中途耗尽的标签页是残缺的（本页还有条目没判定），不得写成功缓存。
+
+        当前只有作者搜索会启用详情预算，这条守的是"哪天给标签路径也开预算"时
+        不静默退化成"残缺页被 120 秒 TTL 固化"。
+        """
+        mock_items.return_value = ([_item(931)], 1)
+        mock_fetch.return_value = _detail_batch({931: _detail(931)}, 1)
+        fetcher.clear_search_cache()
+        try:
+            fetcher._budget_begin(1)
+            fetcher._budget_consume(1)
+            assert fetcher.budget_exhausted() is True
+
+            fetcher.search_by_tag('budget', min_bookmarks=500)
+            assert not any(k.startswith('tag|q=budget') for k in fetcher._SEARCH_CACHE)
+        finally:
+            fetcher._budget_end()
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_discovery_artworks')
+    @patch('fetcher._fetch_details_parallel')
+    def test_budget_exhausted_discovery_page_not_cached(
+            self, mock_fetch, mock_items, mock_sess, clean_db):
+        """发现页同样不得把预算截断的残缺页写进缓存（与标签路径同款守卫）。"""
+        mock_items.return_value = ([_item(941)], 1)
+        mock_fetch.return_value = _detail_batch({941: _detail(941)}, 1)
+        fetcher.clear_search_cache()
+        try:
+            fetcher._budget_begin(1)
+            fetcher._budget_consume(1)
+            assert fetcher.budget_exhausted() is True
+
+            fetcher.browse_discovery(min_bookmarks=500)
+            assert not any(k.startswith('disc|') for k in fetcher._SEARCH_CACHE)
+        finally:
+            fetcher._budget_end()
+            fetcher.clear_search_cache()
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    def test_upstream_auth_error_not_cached(self, mock_items, mock_sess, clean_db):
+        """认证/上游异常必须原样抛出，绝不能顺手写一条空结果的"成功"缓存。
+
+        否则 Cookie 失效后的第一次失败搜索会留下一份"没有作品"的空页，用户在 TTL
+        内怎么重试都看不到真实结果。
+        """
+        mock_items.side_effect = pixiv_client.PixivAuthError('cookie 已失效')
+        fetcher.clear_search_cache()
+        try:
+            with pytest.raises(pixiv_client.PixivAuthError):
+                fetcher.search_by_tag('auth', min_bookmarks=500)
+            assert fetcher._SEARCH_CACHE == {}
+        finally:
+            fetcher.clear_search_cache()
+
+
+class TestRateLimitedSearchCache:
+    """限流截断的搜索不得写成功缓存：残缺结果被 TTL 固化后，用户重试也拿不到补全。"""
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    @patch('fetcher._fetch_details_parallel')
+    def test_tag_search_rate_limited_not_cached(self, mock_fetch, mock_items, mock_sess, clean_db):
+        mock_items.return_value = ([_item(51)], 1)
+        mock_fetch.return_value = _detail_batch({51: _detail(51)}, 1, rate_limited=True)
+        fetcher.clear_search_cache()
+        try:
+            with pytest.raises(fetcher.SearchRateLimitedError):
+                fetcher.search_by_tag('lim', min_bookmarks=500)
+            assert fetcher._SEARCH_CACHE == {}, '限流页不能进成功缓存'
+        finally:
+            fetcher.clear_search_cache()
+
+
+class TestSearchFunctionProgressPassThrough:
+    """`search_by_*` 必须把 publisher 原样转交给 `_process_items`。
+
+    这条链路此前完全没有用例覆盖：删掉任何一个 `progress=progress`，整套用例依然
+    全绿（进度用例都直接调 `_process_items`）。下一任务按计划把路由的 publisher
+    沿 `search_by_*` 注入，接错就是"接线通过、测试全绿、端到端零事件"——所以三个
+    入口各钉一条，属于 `search_by_*` 的形参而不是 `_process_items` 的形参。
+    """
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_search_illusts')
+    @patch('fetcher._fetch_details_parallel')
+    def test_tag_search_forwards_progress(self, mock_fetch, mock_items, mock_sess, clean_db):
+        mock_items.return_value = ([_item(61)], 1)
+        mock_fetch.return_value = _detail_batch({61: _detail(61)}, 1)
+        fetcher.clear_search_cache()
+        events: list[dict] = []
+        try:
+            results, _has_more = fetcher.search_by_tag(
+                'prog', min_bookmarks=500, progress=events.append)
+        finally:
+            fetcher.clear_search_cache()
+
+        assert [r['pixiv_id'] for r in results] == [61]
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [61], \
+            'search_by_tag 收下的 publisher 必须一路传到 _process_items'
+        assert [e['result']['pixiv_id'] for e in events if e['type'] == 'result'] == [61]
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('fetcher._get_user_profile_ids')
+    @patch('fetcher._fetch_details_parallel')
+    def test_user_search_forwards_progress(self, mock_fetch, mock_ids, mock_sess, clean_db):
+        mock_ids.return_value = [71]
+        mock_fetch.return_value = _detail_batch({71: _detail(71)}, 1)
+        fetcher.clear_search_cache()
+        events: list[dict] = []
+        try:
+            results, _has_more = fetcher.search_by_user('12345', progress=events.append)
+        finally:
+            fetcher.clear_search_cache()
+
+        assert [r['pixiv_id'] for r in results] == [71]
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [71], \
+            'search_by_user 收下的 publisher 必须一路传到 _process_items'
+        assert [e['result']['pixiv_id'] for e in events if e['type'] == 'result'] == [71]
+
+    @patch('fetcher.build_pixiv_session')
+    @patch('pixiv_client.fetch_discovery_artworks')
+    @patch('fetcher._fetch_details_parallel')
+    def test_discovery_forwards_progress(self, mock_fetch, mock_items, mock_sess, clean_db):
+        mock_items.return_value = ([_item(81)], 1)
+        mock_fetch.return_value = _detail_batch({81: _detail(81)}, 1)
+        fetcher.clear_search_cache()
+        events: list[dict] = []
+        try:
+            results, _has_more = fetcher.browse_discovery(
+                min_bookmarks=500, progress=events.append)
+        finally:
+            fetcher.clear_search_cache()
+
+        assert [r['pixiv_id'] for r in results] == [81]
+        assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [81], \
+            'browse_discovery 收下的 publisher 必须一路传到 _process_items'
+        assert [e['result']['pixiv_id'] for e in events if e['type'] == 'result'] == [81]
 
 
 class TestSearchDetailBudget:
@@ -1317,11 +2082,11 @@ class TestSearchCancellation:
         with patch('fetcher._get_illust_detail') as mock_detail:
             fetcher._cancel_begin(ev.is_set)
             try:
-                details, attempted = fetcher._fetch_details_parallel([1, 2, 3, 4, 5])
+                batch = fetcher._fetch_details_parallel([1, 2, 3, 4, 5])
             finally:
                 fetcher._cancel_end()
-        assert details == {}
-        assert attempted == 0
+        assert batch.details == {}
+        assert batch.attempted == 0
         mock_detail.assert_not_called()
 
     def test_cancel_keeps_in_flight_results(self, _cookie_file):
@@ -1342,11 +2107,11 @@ class TestSearchCancellation:
         with patch('fetcher._get_illust_detail', side_effect=fake_detail):
             fetcher._cancel_begin(ev.is_set)
             try:
-                details, attempted = fetcher._fetch_details_parallel(ids)
+                batch = fetcher._fetch_details_parallel(ids)
             finally:
                 fetcher._cancel_end()
-        assert len(details) == first_batch
-        assert attempted == first_batch, '取消的不计 attempted，在途的才计'
+        assert len(batch.details) == first_batch
+        assert batch.attempted == first_batch, '取消的不计 attempted，在途的才计'
 
 
 class TestSplitTags:
@@ -1377,3 +2142,183 @@ class TestSplitTags:
         #（中文逗号在上一行 replace 里已转成英文逗号），而不是空列表 ——
         # 返回空列表会让上游拿不到任何关键词。此断言按实测行为固定。
         assert fetcher._split_tags('，,') == [',,']
+
+
+# ── 熔断闸接进详情路径后的两条跨模块语义 ──
+
+
+def _open_detail_gate(monkeypatch, pids=(901, 902, 903)):
+    """把 `pixiv_client` 的模块级闸换成新实例并**按真实调用顺序**开路。
+
+    用替换实例（而不是导入期的真实单例）：闸是有状态的，把它开在真实单例上会污染
+    同文件/其它文件的详情用例（`_fresh_detail_gate` 已经预置了一条新闸，这里再换一条
+    只是为了拿到它的引用）。
+    """
+    gate = pixiv_client._DetailRequestGate()
+    monkeypatch.setattr(pixiv_client, '_detail_gate', gate)
+    for pid in pids:
+        with gate.request_slot(pid):
+            gate.observe_response(pid, 403)
+    assert gate.is_open, '用例前置条件：闸必须已开路'
+    return gate
+
+
+def _bypass_detail_limiters(monkeypatch):
+    """旁路三级令牌桶：离线用例只关心接线，不该为真实限速付等待时间。"""
+    monkeypatch.setattr(pixiv_client, '_detail_limiter', pixiv_client._TokenBucket(6000))
+    monkeypatch.setattr(pixiv_client, '_fill_limiter', pixiv_client._TokenBucket(6000))
+    monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
+
+
+class TestDetailGateDoesNotEscapeToRoutes:
+    """闸拒绝必须被 `_fetch_details_parallel` 收成 `rate_limited`，绝不冒泡。
+
+    一旦 `PixivRateLimitedError` 逃到 `routes_search`，那里的宽 `except Exception`
+    会把它变成 HTTP 502 `error` —— 可重试的限流被静默降级成"搜索失败"，
+    `partial` 态（保留已确认结果、以可重试状态收尾）直接失效。
+    """
+
+    def test_open_gate_surfaces_as_rate_limited_without_http(self, monkeypatch):
+        _bypass_detail_limiters(monkeypatch)
+        _open_detail_gate(monkeypatch)
+
+        class _NoHttpSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError('闸开路期间不得发出任何详情 HTTP 请求')
+
+        session = _NoHttpSession()
+        # 这条路径用的是线程内连接池，换成"一用就炸"的哨兵来证明 HTTP 没发出
+        monkeypatch.setattr(fetcher, 'get_pooled_session', lambda *a, **k: session)
+
+        batch = fetcher._fetch_details_parallel([11, 12, 13])   # 关键：不抛
+
+        assert session.calls == 0
+        assert batch.rate_limited is True
+        assert batch.attempted == 0, '被闸拒绝的请求没发出，不计 attempted'
+        assert batch.details == {}, '被拒不算"这件作品详情失败"'
+
+
+class TestPrefetchTagWedgeOnGateOpen:
+    """闸开路时预取轮次算失败，但标签必须可重试、容量清理照跑、已入库作品不丢。
+
+    决策（见 plans/2026-09-29-search-throughput-execution-notes.md「Task 2 必读」）：
+    `_prefetch_one_tag` 的宽 `except Exception` 会把 `SearchRateLimitedError` 变成
+    "该标签本轮失败" —— 这是**预期语义**：标签记 `error`、下轮重试，已入库作品
+    下轮从库里命中 existing 记录，不会丢也不会重拉。
+    """
+
+    def test_tag_recovers_next_round_and_cleanup_still_runs(self, clean_db, monkeypatch,
+                                                             _cookie_file):
+        import app
+        import background
+        from models import SearchCache
+
+        # 上一轮已入库的作品 + 已缓存的标签列表（本轮失败不得把它们清掉）
+        clean_db.add(Illust(pixiv_id=7, title='cached', bookmark_count=600))
+        clean_db.add(SearchCache(tag='t', illust_ids='[7]', status='done'))
+        clean_db.commit()
+
+        class _CountingSession:
+            """任何详情请求都回 404：既证明"该发的发了"，也证明"不该发的没发"。"""
+
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                resp = requests.Response()
+                resp.status_code = 404
+                return resp
+
+        session = _CountingSession()
+        # 详情走线程内连接池，它读的是 pixiv_client 的全局 build_pixiv_session
+        monkeypatch.setattr(pixiv_client, 'build_pixiv_session', lambda: session)
+        # search_by_tag 用的是 fetcher 自己 from-import 的绑定（再导出一份），两处都要换
+        monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
+        _bypass_detail_limiters(monkeypatch)
+        monkeypatch.setattr(fetcher, '_kick_background_fill', lambda pids: None)
+        # 两轮的上游列表完全相同：7 已入库、8 从未入库（闸开路那轮没写成）
+        monkeypatch.setattr(pixiv_client, 'fetch_search_illusts',
+                            lambda session, query, **kwargs: ([_item(7), _item(8)], 2))
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
+        cleaned = []
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
+
+        gate = _open_detail_gate(monkeypatch)
+        app._prefetch_loop()
+        clean_db.expire_all()   # 预取用自己的事务提交，过期后重读才是库里的真实值
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert gate.is_open
+        assert row.status == 'error', '本轮算失败，但状态必须可重试（不是 fetching 残留）'
+        assert row.illust_ids == '[7]', '本轮失败不得清掉已入库作品的缓存列表'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 7).count() == 1
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 8).count() == 0
+        assert cleaned == [1], '单标签失败不得跳过容量清理'
+        assert session.calls == 0, '闸开路时连一发详情请求都不该发出'
+
+        # 第二轮：闸换成全新实例（等价于冷却到期/重启后恢复）→ 同一标签继续预取
+        monkeypatch.setattr(pixiv_client, '_detail_gate', pixiv_client._DetailRequestGate())
+        app._prefetch_loop()
+        clean_db.expire_all()
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
+        assert row.status == 'done', '标签不得被永久卡死'
+        assert json.loads(row.illust_ids) == [7], '已入库作品被重新推导为 existing，不重复'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 7).count() == 1
+        assert cleaned == [1, 1], '第二轮同样要跑到容量清理'
+        assert session.calls == 1, \
+            '第二轮只该为未入库的 8 发一次详情；已入库的 7 从库里命中，不重拉'
+
+
+class TestRefreshPathMapsGateRefusalToGlobalFailure:
+    """`return_dead=True` 的最终收藏数刷新必须把闸拒绝当成**全局**暂时失败。
+
+    这是接闸后最容易踩坏的一条：按单作品写 `refresh_failed_at` 会把整个刷新队列刷上
+    24h 退避（Pixiv 恢复后还要多等一天），让异常冒泡又会跳过 `_prefetch_loop` 的
+    容量清理、`prefetch_max_illusts` 上限随之失效。
+    """
+
+    def test_open_gate_aborts_refresh_without_per_work_backoff(self, clean_db, monkeypatch):
+        import app
+        import background
+
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        for pid in (61, 62, 63):
+            clean_db.add(Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,
+                                bookmark_count=0, created_at=old))
+        clean_db.commit()
+
+        class _NoHttpSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError('闸开路期间不得发出详情 HTTP 请求')
+
+            def close(self):
+                pass
+
+        session = _NoHttpSession()
+        monkeypatch.setattr(app, 'build_pixiv_session', lambda: session)
+        _bypass_detail_limiters(monkeypatch)
+        _open_detail_gate(monkeypatch)
+
+        app._prefetch_refresh_bookmarks()   # 关键：不抛
+        clean_db.expire_all()
+
+        stats = app._prefetch_state['refresh_stats']
+        assert stats['processed'] == 3
+        assert stats['failed_global'] == 3, '闸拒绝必须记成全局性失败'
+        assert stats['aborted'] == 'rate_limit', \
+            f'连续 {background.PREFETCH_REFRESH_ABORT_STREAK} 条全局失败即中止本轮'
+        assert session.calls == 0
+        for pid in (61, 62, 63):
+            illust = clean_db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            assert illust.refresh_failed_at is None, '全局限流不得写成该作品的退避'
+            assert illust.prefetch_refresh_at is None, '作品仍留在刷新队列里（下轮再试）'

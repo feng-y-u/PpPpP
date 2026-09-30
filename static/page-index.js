@@ -10,6 +10,14 @@ let currentSearchType = null;
 // 通过比对代数静默失效（服务端同时会取消旧任务），旧结果不再渲染
 let searchGeneration = 0;
 
+// ── 临时预览（搜索进行中已确认的作品）──
+// 它们**绝不能**写进 loadedPages：服务端的逐条发布发生在 safe_commit **之前**
+//（见 routes_search._make_search_publisher），未定稿的行可能随事务回滚，
+// 写进分页状态就等于把不确定的数据提交成"页"。预览只在网格里额外展示，
+// done 时被 canonical 页整体替换，partial 保留，失败/取消时清空。
+let searchPreview = [];
+let lastSearchRevision = 0;        // 已处理到的最新快照版本号（revision 每次事件都自增）
+
 const R18_STATE_KEY = 'pixiv_r18_mode';
 const SEARCH_STATE_KEY = 'pv_search_state';
 const SEARCH_CACHE_TTL = 30 * 60 * 1000;         // 搜索结果前端缓存 30 分钟（页面刷新快速恢复）
@@ -78,6 +86,8 @@ function renderPaginationBar() {
   const container = $('#pageNumbers');
   bar.style.display = loadedPages.length > 0 ? 'block' : 'none';
   if (!loadedPages.length) return;
+  // 已提交页：导航控件恢复可见（首次搜索的预览期可能把它们藏起来过，见 setPaginationNavHidden）
+  setPaginationNavHidden(false);
 
   let html = '';
   for (let i = 0; i < loadedPages.length && i < 20; i++) {
@@ -100,6 +110,25 @@ function renderPaginationBar() {
   $('#paginationStatus').textContent = `第 ${currentPage} 页 · 已缓 ${loadedPages.length} 页`;
 }
 
+// 首次搜索期间分页栏被强制显示（只为承载 #paginationStatus），但此时没有任何已提交页：
+// 空白页码区 + 两个禁用按钮纯属占位，藏掉它们让分页栏只剩状态文字。
+// 隐藏方式刻意采用"记下内联 display、原样还原"而不是写死 none/''：模板里 #pageNumbers
+// 是 display:flex（页码之间的 4px 间距），清空或写死成别的值都会让**已提交页**的分页栏
+// 外观发生变化 —— 而已提交页必须和以前一模一样。
+function setPaginationNavHidden(hidden) {
+  ['#pageNumbers', '#prevPageBtn', '#nextPageBtn'].forEach(sel => {
+    const el = $(sel);
+    if (!el) return;
+    if (hidden) {
+      if (el.dataset.navDisplay === undefined) el.dataset.navDisplay = el.style.display;
+      el.style.display = 'none';
+    } else if (el.dataset.navDisplay !== undefined) {
+      el.style.display = el.dataset.navDisplay;
+      delete el.dataset.navDisplay;
+    }
+  });
+}
+
 function renderPage(pageNum) {
   const page = loadedPages[pageNum - 1];
   if (!page) return;
@@ -110,6 +139,10 @@ function renderPage(pageNum) {
     grid.appendChild(node);
     return node;
   }, { chunk: 12, delay: 25 }).then(() => {
+    // 重渲染把网格清空了，预览卡也跟着没了 —— 补一次同步。预览是"运行中搜索"的实时信息，
+    // 不该因为用户翻了一页就消失到下一次轮询（下一次轮询同样会补，但别让用户白等）。
+    // 没有预览时 syncPreviewCards 是空转，canonical 路径行为不变。
+    syncPreviewCards();
     lazyLoad();
   });
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -160,6 +193,11 @@ async function loadNextPage() {
   if (!nextCursor) return;
   // 翻页期间用户改条件重搜：doSearch 会升代数，本函数的轮询静默失效
   const gen = searchGeneration;
+  // 本次翻页是新任务：上一次尝试（可能以 partial 收尾、预览还留在页面上）的
+  // 预览状态必须清掉，否则旧预览会与本次任务的已确认结果混在一起。
+  // 放在按钮置为"加载中"之前：resetPreviewUI 是**带副作用的复位**（会重排/收起分页栏），
+  // 先调它、再设按钮态，否则这里的"加载中..."会被它覆盖掉
+  resetPreviewUI();
   $('#nextPageBtn').disabled = true;
   $('#nextPageBtn').textContent = '加载中...';
   const restoreBtn = () => {
@@ -198,6 +236,8 @@ async function loadNextPage() {
     // 异步任务：按钮状态由轮询回调恢复（done 时 renderPaginationBar，
     // 失败/404 时 restoreBtn），避免用旧 hasMore 提前恢复导致重复翻页
     pollSearch(data.task_id, (res) => {
+      // done：canonical 页整体替换预览（不是合并），先清预览卡再提交本页
+      resetPreviewUI();
       if (!res.results.length) {
         hasMore = res.has_more || false;
         renderPaginationBar();
@@ -221,7 +261,11 @@ async function loadNextPage() {
       renderPaginationBar();
       saveSearchState();
       maybeToastFetchStats(res.fetch_stats);
-    }, restoreBtn, gen);
+    }, () => {
+      // error / 404 / 取消：清空预览 + 恢复按钮（toast 与 showLoading(false) 由 pollSearch 处理）
+      resetPreviewUI();
+      restoreBtn();
+    }, gen, handleSearchProgress, (res) => finishPartial(res, restoreBtn));
   } catch {
     if (gen === searchGeneration) { showToast('网络错误', true); restoreBtn(); }
   }
@@ -239,6 +283,7 @@ async function doSearch() {
   const tagMode = $('#tagMode').value || 'or';
   const r18Mode = $('#r18Mode').value;
   resetPagination();
+  resetPreviewUI();  // 新一代搜索开始：上一代（可能是 partial 保留下来）的预览必须清掉
   currentSearchType = type;
   $('#masonryGrid').innerHTML = '';
   $('#emptyState').style.display = 'none';
@@ -276,7 +321,24 @@ async function doSearch() {
       finishSearch(data);
       return;
     }
-    pollSearch(data.task_id, finishSearch, undefined, gen);
+    pollSearch(
+      data.task_id,
+      (res) => {
+        // done：预览整体**替换**为 canonical 页，绝不合并 —— 多页扫描可能接受多于
+        // ITEMS_PER_PAGE 件，canonical 取扫描顺序前 N 件而预览是完成顺序，两边合法地
+        // 可以不一致。必须先清预览卡片，否则 canonical 卡会追加在预览卡后面
+        resetPreviewUI();
+        finishSearch(res);
+      },
+      () => {
+        // error / 404 / 取消：清空预览，否则失败的搜索会在页面上留下幽灵卡片
+        //（toast 与 showLoading(false) 已由 pollSearch 处理）
+        resetPreviewUI();
+      },
+      gen,
+      handleSearchProgress,
+      (res) => finishPartial(res)
+    );
   } catch { if (gen === searchGeneration) { showToast('网络错误', true); showLoading(false); } }
 }
 
@@ -314,7 +376,121 @@ function dedupResults(items) {
   return items.filter(r => !seen.has(r.pixiv_id));
 }
 
-function pollSearch(taskId, onDone, onFail, gen) {
+// ── 预览态收口 ──
+// 预览与分页状态完全隔离：全程不写 nextCursor / hasMore / currentPage / currentSearchType，
+// 也不调 saveSearchState()（没有完整页可记，写进去会让刷新恢复出半页结果）。
+
+// 注意这是**带副作用的复位**，不只是"删掉预览卡"：它还会重排或收起分页栏、复位翻页按钮与
+// 状态文案。名字必须点出这一点，否则调用方很容易在"先把按钮置成加载中"之后才调它，
+// 于是按钮态被悄悄覆盖（loadNextPage 就是靠调整调用顺序避开的，见那里的注释）。
+function resetPreviewUI() {
+  searchPreview = [];
+  lastSearchRevision = 0;
+  // 只删带 data-preview-pid 标记的预览卡：翻页中断时网格里还有已提交的页，
+  // 整块清空会把它们一起抹掉
+  $$('#masonryGrid [data-preview-pid]').forEach(n => n.remove());
+  if (loadedPages.length) {
+    // 已有已提交页：状态文案与按钮交回分页栏统一维护
+    //（失败路径下按钮随后由调用方的 restoreBtn 恢复）
+    renderPaginationBar();
+  } else {
+    // 首次搜索还没提交任何页：收起预览期间临时显示出来的分页栏并清掉临时文案
+    $('#paginationBar').style.display = 'none';
+    $('#prevPageBtn').disabled = true;
+    $('#nextPageBtn').disabled = true;
+    $('#paginationStatus').textContent = '';
+  }
+}
+
+// 把预览卡补进网格：只追加"还没显示过"的（DOM 里已有的 + 已提交页里的都跳过）。
+// 这个函数是**幂等**的：集合没变时 fresh 为空，等于一次廉价空转，不会重复渲染。
+// 因此调用方可以（也必须）在每次轮询都无脑调它 —— 它自己负责比对，调用方不要在外面
+// 加"集合没变就跳过"的门禁：跳页/重渲染会整块清空网格，那种门禁会让清空后的预览
+// 卡一直不回来，直到某个**新** PID 到达（旧实现在此处踩过这个坑）。
+function syncPreviewCards() {
+  const shown = new Set();
+  $$('#masonryGrid [data-preview-pid]').forEach(n => {
+    const pid = parseInt(n.dataset.previewPid, 10);
+    if (!isNaN(pid)) shown.add(pid);
+  });
+  const committed = new Set(loadedPages.flat().map(r => r.pixiv_id));
+  const fresh = searchPreview.filter(r => !shown.has(r.pixiv_id) && !committed.has(r.pixiv_id));
+  if (!fresh.length) return;
+  renderInChunks(fresh, (r) => {
+    // 预览卡走独立的渲染分支：不打下载/跳详情的行为（见 renderCard 的 opts.preview）
+    const node = renderCard(r, { preview: true });
+    node.dataset.previewPid = String(r.pixiv_id);
+    return node;
+  }, { chunk: 12, delay: 25 }).then(() => lazyLoad());
+}
+
+function updatePreviewStatus(progress) {
+  const accepted = progress.accepted ?? 0;
+  const examined = progress.examined ?? 0;
+  // examined 只能当活动计数器：它在任何详情完成之前就整批发出，"N/N examined"
+  // 会瞬间到 100% 而 accepted 仍是 0 —— 绝不能渲染成完成比例。
+  // accepted 不封顶，可以大于网格里的预览条数（预览被服务端截到一页），所以
+  // "已找到 N 件"取 accepted，网格渲染取 results，不能假定两者一致。
+  $('#paginationStatus').textContent = `已找到 ${accepted} 件，仍在筛选（已检查 ${examined} 条）`;
+  // paginationBar 平时只在有已提交页时才显示（由 renderPaginationBar 决定）。首次
+  // 搜索期间 loadedPages 为空 —— 这里必须把状态栏显出来，否则"已找到 N 件"没地方看。
+  // 但此时没有任何已提交页：页码区必然是空的、翻页按钮必然无处可去，留着只是白占一行，
+  // 所以把导航控件一起藏掉，让分页栏只承载状态文案（renderPaginationBar 会恢复它们）。
+  // 翻页中断时状态栏本就可见，且按钮状态由 loadNextPage 自己维护，不能覆盖。
+  if (!loadedPages.length) {
+    $('#paginationBar').style.display = 'block';
+    $('#prevPageBtn').disabled = true;
+    $('#nextPageBtn').disabled = true;  // 首次搜索还没有游标，翻页必然无处可去
+    setPaginationNavHidden(true);
+  }
+}
+
+// running 响应的预览处理器（done 之前的每次轮询都会走这里）。
+// **每次轮询都无条件重跑 syncPreviewCards**：跳页/分页导航会调 renderPage 整块清空网格，
+// 而"预览 PID 集合没变就跳过同步"这种门禁会让清空后的预览一直不回来 —— 集合没变，
+// 门禁不放行，用户只能等某个新 PID 到达（审查已用假 DOM 复现）。幂等性与去重都在
+// syncPreviewCards 里（它按 DOM + 已提交页算差集），所以这里不需要再看集合是否变化。
+// revision 仍然只用于节流状态文案：它每次事件都自增（连 examined 计数也推进），
+// 拿它当渲染判据会在 examined 突发时白重渲染一轮。
+function handleSearchProgress(data) {
+  const results = Array.isArray(data.results) ? data.results : [];
+  const ids = new Set();
+  const preview = [];
+  for (const r of results) {
+    const pid = r?.pixiv_id;
+    if (pid === undefined || pid === null || ids.has(pid)) continue;
+    ids.add(pid);
+    preview.push(r);
+  }
+  searchPreview = preview;
+  if (data.revision !== lastSearchRevision) {
+    lastSearchRevision = data.revision;
+    updatePreviewStatus(data.progress || {});
+  }
+  syncPreviewCards();
+}
+
+// partial 收口：详情请求被限流闸截断，本页没搜完，但已确认的预览对用户仍是有效信息，
+// 所以保留展示；关键语义是**不**把它提交成"页" —— loadedPages / nextCursor /
+// hasMore / currentPage 一律不动，也不写前端搜索缓存。
+// restoreBtn：翻页中断时恢复按钮，让用户冷却后按**同一个游标**重试；首次搜索本来
+// 就没有游标，下一页保持禁用。
+// 只走状态行这一条通道（warning 已经写在里面）：不再额外弹 toast，同一件事报两遍是噪声。
+function finishPartial(data, restoreBtn) {
+  showLoading(false);
+  const accepted = data.progress?.accepted ?? searchPreview.length;
+  const warning = data.warning || '本页结果不完整，请稍后重试';
+  $('#paginationStatus').textContent = accepted ? `${warning}（已找到 ${accepted} 件）` : warning;
+  if (!loadedPages.length) {
+    $('#paginationBar').style.display = 'block';  // 首次搜索时状态栏平时是隐藏的
+    // 同上：没有任何已提交页，页码区与翻页按钮都是空摆设，藏掉让分页栏只剩状态文字
+    setPaginationNavHidden(true);
+  }
+  if (restoreBtn) restoreBtn();
+  else $('#nextPageBtn').disabled = true;
+}
+
+function pollSearch(taskId, onDone, onFail, gen, onProgress, onPartial) {
   // gen：发起本次轮询的搜索代数。新搜索会升代数 —— 旧任务的轮询发现代数
   // 不匹配就静默退出，不弹错误、不碰 UI（新搜索正在接管界面）
   const stale = () => gen !== undefined && gen !== searchGeneration;
@@ -330,7 +506,9 @@ function pollSearch(taskId, onDone, onFail, gen) {
       const data = await resp.json();
       if (stale()) return;
       if (data.status === 'running') {
-        setTimeout(() => pollSearch(taskId, onDone, onFail, gen), 2000);
+        // 增量预览只追加不提交：onProgress 里不碰 loadedPages / 游标 / 分页状态
+        if (onProgress) onProgress(data);
+        setTimeout(() => pollSearch(taskId, onDone, onFail, gen, onProgress, onPartial), 2000);
         return;
       }
       if (data.status === 'cancelled') {
@@ -351,6 +529,18 @@ function pollSearch(taskId, onDone, onFail, gen) {
         }
         showLoading(false);
         if (onFail) onFail();
+        return;
+      }
+      if (data.status === 'partial') {
+        // partial：本页被限流闸截断，**绝不能**落进 finishSearch —— 那会把预览当成
+        // 完整页提交、写进分页状态，还会吃掉 warning。先按 running 处理把最新的
+        // 已确认结果渲染出来，再单独收口（保留预览、停 loading、报 warning、不碰游标）
+        if (onProgress) onProgress(data);
+        if (onPartial) onPartial(data);
+        // 两个调用方都传了 onPartial；万一将来漏传，这里只留一条可观测的告警，
+        // 绝不落到"把 partial 当失败"的兜底：那会 showLoading(false) + onFail()，
+        // 而 onFail 会清掉刚由 onProgress 渲染出来的预览，把"不完整页"误报成"失败"。
+        else console.warn('pollSearch: partial 响应缺少 onPartial 处理器，预览保持原样');
         return;
       }
       onDone(data);
@@ -388,26 +578,42 @@ $('#r18Mode').addEventListener('change', () => {
 });
 
 // ── Render Card ──
-function renderCard(r) {
+// opts.preview：预览卡（搜索中已确认、但服务端**还没 safe_commit** 的作品，见 routes_search
+// 的 _make_search_publisher）。这一步之差有用户可见的后果：该 pid 的行可能随后随事务回滚，
+// 此时 /detail/<pid> 会 abort(404)、下载接口返回 404 作品不存在（routes_download）——
+// 作者搜索一页要 1.33s/件，最长几十秒都能点到这种"还不存在的作品"。
+// 选择的组合（最小且稳妥）：
+//   ① 渲染层不打行为：预览卡不渲染下载按钮、卡片点击只弹"仍在筛选中"，不跳详情；
+//   ② 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
+//      .photo-card-actions）往预览卡塞回下载按钮，点击也到不了它自己的监听器；
+//   ③ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
+// 不传 opts 时（canonical 路径）行为与从前逐字一致 —— 已提交卡照旧下载、跳详情、开灯箱。
+function renderCard(r, opts) {
+  const preview = !!(opts && opts.preview);
   const isDone = r.download_status === 'done';
   const isDl = r.download_status === 'downloading';
   let btnHtml;
-  if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
+  if (preview) btnHtml = '<span class="preview-hint" style="font-size:0.68rem;color:var(--text-muted);">筛选中…</span>';
+  else if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
   else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
   else btnHtml = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>`;
 
   const badges = [];
+  // 预览卡多一枚"筛选中"徽标 + 虚线描边（内联，样式表不动）：用户必须能一眼分辨
+  // "这是刚刚筛出来的预览"与"这是已提交、可以放心点开的结果"
+  if (preview) badges.push('<span class="photo-badge" style="background:rgba(226,87,126,.9);color:#fff;">筛选中</span>');
   badges.push(`<span class="photo-badge">♥ ${fmtNum(r.bookmark_count)}</span>`);
   if (r.page_count > 1) badges.push(`<span class="photo-badge">${r.page_count}P</span>`);
   if (isDone) badges.push(`<span class="photo-badge" style="background:rgba(59,138,94,.85);color:#fff;">已下载</span>`);
+  const cardStyle = preview ? ' style="outline:2px dashed var(--accent); outline-offset:-2px;"' : '';
 
   const tags = (r.tags||[]).slice(0,6).map(t =>
     `<span class="photo-tag" data-tag="${escAttr(t)}">${escHtml(t)}<span class="tag-block-x" data-block="${escAttr(t)}">&times;</span></span>`).join('');
 
   const item = document.createElement('div');
-  item.className = 'masonry-item';
+  item.className = preview ? 'masonry-item preview-card' : 'masonry-item';
   item.innerHTML = `
-    <div class="photo-card" data-pixiv-id="${r.pixiv_id}">
+    <div class="photo-card"${cardStyle} data-pixiv-id="${r.pixiv_id}">
       <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23ecece7'%3E%3C/svg%3E"
            data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" class="img-fade" alt="">
       <div class="photo-badges">${badges.join('')}</div>
@@ -439,6 +645,8 @@ function renderCard(r) {
   // Card click → detail page
   item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
+    // 预览卡不跳详情：行可能还没提交，/detail/<pid> 此时是 404。给个短提示优于静默无反应。
+    if (preview) { showToast('该作品仍在筛选中'); return; }
     window.location.href = `/detail/${r.pixiv_id}`;
   });
 
@@ -465,11 +673,27 @@ function renderCard(r) {
   return item;
 }
 
+// 兜底不变量：预览卡不能触发下载。renderCard 的 preview 分支根本不渲染下载按钮，
+// 但 app.js 的 updateDlDone / resetDlBtn 会按 pid 重写 .photo-card-actions 的 innerHTML ——
+// 将来任何新路径都可能往预览卡里塞回一个可点的下载按钮。捕获阶段拦下，按钮自身的
+// 监听器（含将来新加的）就不会执行，这条保证不依赖"渲染时不放按钮"这个巧合。
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('.dl-btn, .dl-file-btn');
+  if (!btn || !btn.closest('[data-preview-pid]')) return;
+  e.stopPropagation();
+  e.preventDefault();
+  showToast('该作品仍在筛选中');
+}, true);
+
 // ── Batch Download ──
 let batchInProgress = false;
 $('#downloadAllBtn').addEventListener('click', async () => {
   if (batchInProgress) return;
-  const ids = Array.from($$('.photo-card')).map(c => parseInt(c.dataset.pixivId));
+  // 排除预览卡（data-preview-pid）：它们指向尚未 safe_commit 的行，批量接口此时查不到、
+  // 提交未定稿的 PID 毫无意义（还可能随事务回滚）。已提交卡片不受影响。
+  const ids = Array.from($$('.photo-card'))
+    .filter(c => !c.closest('[data-preview-pid]'))
+    .map(c => parseInt(c.dataset.pixivId));
   if (!ids.length) return;
   batchInProgress = true;
   const btn = $('#downloadAllBtn'), st = $('#downloadAllStatus');

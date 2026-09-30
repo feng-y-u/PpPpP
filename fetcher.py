@@ -8,6 +8,7 @@ from base64 import urlsafe_b64encode, urlsafe_b64decode
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -33,6 +34,7 @@ import pixiv_client
 # 静默失效（`_TokenBucket` 是无状态类，再导出供测试构造限速器，见 test_fetcher.py）。
 from pixiv_client import (
     PixivAuthError,
+    PixivRateLimitedError,
     R18_TAGS,
     DEAD_DETAIL, RETRYABLE_GLOBAL_DETAIL,
     _TokenBucket,
@@ -131,6 +133,17 @@ class SearchCancelledError(Exception):
     """搜索任务被新搜索取代（用户改了条件重搜），调用链据此中止。"""
 
 
+class SearchRateLimitedError(Exception):
+    """本次搜索被 Pixiv 全局限流截断（详情熔断闸开路），结果不完整。
+
+    与 `SearchCancelledError` 并列，但语义相反：取消是"这批结果已作废"，限流是
+    "这批结果**只是部分**"。调用方不得把它降级成空页或"没有匹配"——那等于把
+    受限作品说成不存在：既会写进成功缓存（下次命中还是这份残缺页），又会让
+    游标以为本页已筛选完。
+    `paginated_search` 显式把它抛出宽泛的分页 except，由路由层以可重试状态收尾。
+    """
+
+
 _cancel_state = threading.local()
 
 
@@ -168,6 +181,10 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
             仅作者搜索需要 —— 它的详情是"必须拉完才知道能不能要"的成本，
             其余路径要么不拉详情（defer），要么代价是常数级。
 
+    本层**不得**接收 progress / publisher 形参：它只看页边界、看不到条目，收下也只能
+    原样丢掉（"接线通过、测试全绿、端到端零事件"的静默陷阱）。publisher 一律注入
+    `search_by_tag` / `search_by_user` / `browse_discovery`，由它们转交 `_process_items`。
+
     Returns:
         (results, next_cursor, has_more)
     """
@@ -199,6 +216,10 @@ def paginated_search(search_fn, query_params: dict, items_per_page: int,
             except PixivAuthError:
                 raise
             except SearchCancelledError:
+                raise
+            except SearchRateLimitedError:
+                # 限流不是"这页失败了"，而是"这页只拉到了一部分"：如果落进下面的
+                # 宽泛 except，残缺页会被当成正常（甚至空）页完成，并且照常返回游标。
                 raise
             except Exception as e:
                 logger.error(f'paginated_search: page {pixiv_page} failed: {e}')
@@ -323,6 +344,20 @@ def _is_blocked(tags: list[str], blocked: set[str]) -> bool:
 def _is_r18(tags: list[str]) -> bool:
     return bool(set(tags) & R18_TAGS)
 
+
+def _rejected(tags: list[str], bookmark_count: int, blocked: set[str],
+              min_bookmarks: int, hide_r18: bool) -> bool:
+    """记录是否被"屏蔽标签 / 收藏数 / R18"三者之一拒绝。
+
+    入库前的过滤与逐条 progress 的"能否发布"必须是**同一份判定**，否则预览里
+    会出现最终结果里没有的作品（或反之）。所以抽出来单点定义，以下各处共用。
+    """
+    return (
+        _is_blocked(tags, blocked)
+        or bookmark_count < min_bookmarks
+        or (hide_r18 and _is_r18(tags))
+    )
+
 # 详情失败形态（`DEAD_DETAIL` / `RETRYABLE_GLOBAL_DETAIL`）、删除类报文关键词表与
 # 未识别报文采样，全部随详情请求迁至 `pixiv_client` —— 它们是"这次请求的失败形态"，
 # 不是业务概念。哨兵与 `get_detail_error_samples` 由本模块顶部再导出。
@@ -340,10 +375,28 @@ def get_last_fetch_stats() -> dict:
 # 由本模块顶部绑定（`_fetch_details_parallel` 按模块级名查找，测试补丁可见）。
 
 
+@dataclass(frozen=True)
+class _DetailFetchBatch:
+    """一批详情请求的结果。
+
+    `rate_limited=True` 表示这批被全局限流闸截断（详情请求被 `PixivRateLimitedError`
+    拒绝）：`details` 只是**已完成的部分**，调用方不得当成完整结果（不许写成功缓存、
+    不许把没拉到的作品当成"不匹配"）。
+    单件失败仍用 `details` 里缺这个 pid / `None` 表示 —— 刻意不把两者混成同一个
+    `None`：一个只影响这一件，另一个说明上游正在限流、继续发请求只会更糟。
+    """
+
+    details: dict[int, dict]
+    attempted: int
+    rate_limited: bool = False
+
+
 def _fetch_details_parallel(pixiv_ids: list[int],
                             early_stop: Callable[[dict | None], bool] | None = None,
-                            limiter: _TokenBucket | None = None) -> tuple[dict[int, dict], int]:
-    """并行拉取详情，支持提前终止。
+                            limiter: _TokenBucket | None = None,
+                            on_detail: Callable[[int, dict | None], None] | None = None
+                            ) -> _DetailFetchBatch:
+    """并行拉取详情，支持提前终止，并可逐条回调已完成的结果。
 
     early_stop: 每完成一个详情后调用（参数为该详情或 None），返回 True 时
     取消未启动的拉取。**已启动的请求会全部处理完再返回**（不丢弃其结果，
@@ -351,14 +404,22 @@ def _fetch_details_parallel(pixiv_ids: list[int],
     代价受 DETAIL_TIMEOUT/退避上限约束。
     limiter: 请求限速器；不传时用适配层的前台高速桶（搜索），后台补全应传
         `pixiv_client._fill_limiter`。
+    on_detail: 每个完成详情（含失败，即 detail=None）的回调，参数为 (pixiv_id, detail)。
+        在**本函数的调用线程**（消费 as_completed 的 collector 线程）里按 future
+        完成顺序调用 —— 调用方的进度回调要读 `_cancelled()`（threading.local）
+        并复用调用线程的事务语义，所以不能下放到 worker 线程。
+        被限流闸拒绝的请求不会回调：它根本没发出，不是"这件作品详情失败"。
 
-    Returns: (成功详情 dict, 实际发起的请求数)。early_stop 取消的未启动请求
-    不计入 attempted，避免统计把"未尝试"误报为"失败"。
+    Returns: `_DetailFetchBatch`。`attempted` 只计**真正发出**的请求：early_stop /
+    取消拦下的未启动请求、以及被限流闸拒绝的请求都不计入，避免统计把"未尝试"
+    误报成"失败"。
     """
     if not pixiv_ids:
-        return {}, 0
+        return _DetailFetchBatch({}, 0)
     results = {}
     attempted = 0
+    rate_limited = False
+    auth_error: BaseException | None = None
     # 取消回调在**调用线程**（搜索任务线程）读取后闭包进 worker：threading.local
     # 在线程池线程里读不到任务线程的值。Event.is_set 线程安全，worker 里随时可查。
     cancel_cb = getattr(_cancel_state, 'should_stop', None)
@@ -379,6 +440,25 @@ def _fetch_details_parallel(pixiv_ids: list[int],
                 pid, detail = future.result()
             except CancelledError:
                 continue  # 被 early_stop 取消的未发起请求：不计入 attempted/失败
+            except PixivRateLimitedError as e:
+                # 闸在**发出请求之前**拒绝：这条请求没发出，既不计 attempted、
+                # 也不算详情失败（否则限流会被误报成"这些作品不匹配"）。
+                # 未启动的任务立刻取消；已在途的继续收（成功详情照常保留并发布）。
+                if not rate_limited:
+                    logger.warning(f'详情批量拉取被限流闸截断（{e}），保留已完成的部分')
+                rate_limited = True
+                for f in futures:
+                    f.cancel()
+                continue
+            except PixivAuthError as e:
+                # 认证失效必须原样上报：宽泛 except 会把它吞成"这件详情失败"，
+                # 整页静默变空（用户看到 0 结果，而不是"Cookie 已失效"）。
+                # 先取消未启动的，收完在途的，最后再抛。
+                if auth_error is None:
+                    auth_error = e
+                for f in futures:
+                    f.cancel()
+                continue
             except Exception as e:
                 logger.error(f'Parallel fetch failed for {futures[future]}: {e}')
                 detail = None
@@ -392,16 +472,20 @@ def _fetch_details_parallel(pixiv_ids: list[int],
             attempted += 1
             if detail is not None:
                 results[pid] = detail
+            if on_detail is not None:
+                on_detail(pid, detail)
             if early_stop is not None and early_stop(detail):
                 # 触发早停：只取消未启动的请求；已启动的照常处理完再返回。
                 # 若丢弃已启动的结果，这些作品不会写入 DB，Pixiv 分页漂移后
                 # 会再次出现并被当作新作品 → 跨页重复（2026-08 bug 修复）。
                 for f in futures:
                     f.cancel()
+        if auth_error is not None:
+            raise auth_error
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
-    return results, attempted
+    return _DetailFetchBatch(results, attempted, rate_limited)
 
 
 # ── 后台详情补全 ──
@@ -444,7 +528,13 @@ def _background_fill_details(pixiv_ids: list[int]) -> None:
                     del _fill_last_attempt[pid]
         _filling_ids.update(new_ids)
     try:
-        details, _ = _fetch_details_parallel(new_ids, limiter=pixiv_client._fill_limiter)
+        batch = _fetch_details_parallel(new_ids, limiter=pixiv_client._fill_limiter)
+        # 限流截断时照常写入已完成的部分（补全只是刷新收藏数/原图，拿到的就是
+        # 有效数据）；`_fetch_details_parallel` 自己吞掉限流异常，不会打断补全循环。
+        if batch.rate_limited:
+            logger.info(
+                f'后台详情补全被限流闸截断：只写入已完成的 {len(batch.details)}/{len(new_ids)} 条')
+        details = batch.details
         if not details:
             return
         with get_session() as db:
@@ -488,6 +578,16 @@ _search_cache_lock = threading.Lock()
 # _blocked_fingerprint），否则改完屏蔽标签要等十分钟才见效。
 _USER_SEARCH_CACHE_TTL = 600.0
 
+# 标签搜索专用的 TTL。
+# 标签搜索的成本是 1 次 HTTP，30 秒的缓存常在用户"翻回上一页"时已经过期，
+# 于是白等一次上游往返；120 秒覆盖了"看完一屏再回退"的实际节奏 —— 这是纯粹的
+# 等待时间优化，不减少任何一次请求。
+# 只有 `search_by_tag` 用它：发现页/关注页（`_SEARCH_CACHE_TTL`）与作者搜索
+# （`_USER_SEARCH_CACHE_TTL`）的缓存成本与语义各不相同，不能顺手统一。
+# 缓存键里**没有**屏蔽标签指纹，所以屏蔽标签增删必须靠 `clear_search_cache()`
+# 整体清空才立即生效（见 routes_settings 的屏蔽标签路由）。
+_TAG_SEARCH_CACHE_TTL = 120.0
+
 
 def _blocked_fingerprint(blocked: set[str]) -> str:
     """屏蔽标签集合的短指纹，用于把"屏蔽标签变了"反映到缓存键里。
@@ -527,15 +627,15 @@ def clear_search_cache() -> None:
 
 # ── 公共流水线 ──
 
-def _mark_favorites(db: Any, results: list[dict]) -> list[dict]:
-    """按'我的收藏'收藏夹为结果集填充 is_favorite（复用调用方的 session）。"""
-    if not results:
-        return results
-    fav = get_favorite_pids(db)
-    for r in results:
-        if r.get('pixiv_id') in fav:
-            r['is_favorite'] = True
-    return results
+def _mark_favorite(result: dict, fav: set[int]) -> dict:
+    """按收藏集合给**单条**结果打标。
+
+    只做"命中就置 True"：没命中时保持 `to_dict()` 给的 False，绝不写别的否定值 ——
+    前端把缺失/未知与"明确未收藏"当成同一件事，写进去只会制造第二种含义。
+    """
+    if result.get('pixiv_id') in fav:
+        result['is_favorite'] = True
+    return result
 
 
 def _insert_new_illusts(db, illusts: list[Illust]) -> dict[int, Illust]:
@@ -560,10 +660,27 @@ def _insert_new_illusts(db, illusts: list[Illust]) -> dict[int, Illust]:
     return {i.pixiv_id: i for i in rows}
 
 
+class _ProcessedItems(list):
+    """`_process_items` 的结果列表，另带"本批是否被全局限流截断"。
+
+    继承 list 是为了既有调用方零改动（迭代 / `==` 比较 / JSON 输出 / 测试下标访问
+    照旧）；`rate_limited` 单独作属性，让调用方在 `safe_commit` 之后决定要不要以
+    可重试状态收尾。不用 `None` 或空列表表达限流：那两者都已经是合法结果了
+    （没有匹配 / 没有输入）。
+    注意 `rate_limited` 只挂在这个对象上：切片/拷贝（`results[:n]`、`results + [...]`、
+    `copy()`）都返回普通 list 并丢掉该标记，所以只在 `search_by_*` 边界读它才有意义。
+    """
+
+    def __init__(self, items=(), *, rate_limited: bool = False):
+        super().__init__(items)
+        self.rate_limited = rate_limited
+
+
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
                    min_bookmarks: int = 0, hide_r18: bool = False, defer_details: bool = False,
-                   max_results: int = 0, limiter: _TokenBucket | None = None) -> list[dict]:
-    """去重 → 过滤 → 并行拉取详情 → 存储。
+                   max_results: int = 0, limiter: _TokenBucket | None = None,
+                   progress: Callable[[dict], None] | None = None) -> _ProcessedItems:
+    """去重 → 过滤 → 并行拉取详情 → 存储，并逐条发布已通过过滤的结果。
 
     Args:
         db: SQLAlchemy 会话
@@ -580,17 +697,75 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             用于搜索流式过滤，凑够一页就停，避免拉取整页详情拖慢搜索。
         limiter: 详情请求限速器；不传用前台高速桶（搜索）。后台任务应传
             对应的低速桶（如 `pixiv_client._fill_limiter`），避免抢占交互搜索带宽。
+        progress: 可选的逐条进度回调，在**调用线程**上调用，事件形态固定三种：
+            {"type": "examined", "pixiv_id": pid}      每个输入 PID 恰好一次
+            {"type": "detail_failed", "pixiv_id": pid} 请求完成但没拿到详情
+            {"type": "result", "result": dict}         已通过该路径全部过滤的展示 dict
+            回调只是"预览"：候选仍可能在最终批量入库时因并发冲突落空，也可能因为
+            `_cancelled()`（旧任务已被新搜索取代）被跳过；可用的最终列表以返回值为准。
+            回调里不碰 SQLAlchemy session，favorite 状态用调用线程一次性取到的
+            收藏集合标记。
 
-    Returns: 可直接用于 API 响应的 illust 字典列表
+    Returns: `_ProcessedItems`（可直接用于 API 响应的 illust 字典列表）。
     """
     results: list[dict] = []
     if not items:
-        return results
+        return _ProcessedItems()
 
     fetch_stats = {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0}
     fetch_start = time.time()
 
-    pixiv_ids = [id_extractor(item) for item in items]
+    # 收藏集合在调用线程取一次：进度回调会在任意详情完成的瞬间发布结果，每条都
+    # 查一次收藏夹就是 N 次查询；回调里也不该再碰 session（见 progress 的说明）。
+    fav_pids = get_favorite_pids(db)
+    published_pids: set[int] = set()
+    examined_pids: set[int] = set()
+    rate_limited = False
+
+    def _emit(event: dict) -> None:
+        if progress is None or _cancelled():
+            # 取消之后继续发布，只会给已被取代的旧任务刷进度（前端靠搜索代数丢弃它）；
+            # 作品的入库语义不受影响，仍按原有事务收尾。
+            return
+        progress(event)
+
+    def _publish(result: dict) -> None:
+        """发布一条已通过过滤的结果；同一 PID 只发布一次。"""
+        pid = result.get('pixiv_id')
+        if progress is None or pid in published_pids:
+            return
+        published_pids.add(pid)
+        _emit({'type': 'result', 'result': result})
+
+    def _append_result(result: dict) -> None:
+        """把一条已通过过滤的结果加入结果列表，并**当场**发布预览。
+
+        为什么必须当场发布而不是等收尾统一兜底：已入库且通过过滤的记录（作者搜索
+        里最常见的情形）不花任何网络请求就能定稿，若拖到收尾，它就得排在整页无关
+        作品的详情请求后面（作者搜索一页 24 条 ≈ 30 秒）才出现在前端 —— 缓存命中
+        反而变成最慢的一条，正好抹掉这条流水线渐进显示的意义。
+        `_publish` 的 PID 去重保证详情回调路径已经发过的不再重发。
+        """
+        results.append(result)
+        _publish(_mark_favorite(result, fav_pids))
+
+    def _note_detail(pid: int, detail: dict | None) -> None:
+        """详情完成的统一回调（collector 线程）：只记失败，成功由各路径自行发布。
+
+        "没拿到详情"与"全局限流"是两件事：后者连请求都没发出，不会走到这里。
+        """
+        if detail is None:
+            _emit({'type': 'detail_failed', 'pixiv_id': pid})
+
+    # 条目按 pid 索引一次，供详情回调按 pid 找回原始条目造预览（重复输入取第一条，
+    # 与原先前向查找 `next(...)` 的语义一致）
+    pixiv_ids: list[int] = []
+    items_by_pid: dict[int, Any] = {}
+    for item in items:
+        pid = id_extractor(item)
+        pixiv_ids.append(pid)
+        items_by_pid.setdefault(pid, item)
+
     existing_list = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
     existing_map = {i.pixiv_id: i for i in existing_list}
 
@@ -603,6 +778,11 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
     for item in items:
         pixiv_id = id_extractor(item)
+        if pixiv_id not in examined_pids:
+            examined_pids.add(pixiv_id)
+            # 每个输入 PID 恰好一次：放在判定之前，这样详情没拉到的（限流/取消）
+            # 也仍然算"检查过"，进度计数不会漏。
+            _emit({'type': 'examined', 'pixiv_id': pixiv_id})
         existing = existing_map.get(pixiv_id)
         if existing:
             stale = _is_bookmark_stale(existing)
@@ -618,10 +798,10 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                     # 用户设了最低收藏但条目无收藏数 → 同步重新拉详情判断
                     to_refetch.append(pixiv_id)
                     continue
-            if not _is_blocked(existing.tags_list, blocked) \
-               and existing.bookmark_count >= min_bookmarks \
-               and not (hide_r18 and _is_r18(existing.tags_list)):
-                results.append(existing.to_dict())
+            if not _rejected(existing.tags_list, existing.bookmark_count,
+                             blocked, min_bookmarks, hide_r18):
+                # 已存在且通过全部过滤：这一件不花任何网络请求，立即发布
+                _append_result(existing.to_dict())
                 # 缺原图或收藏数过期 → 后台补全刷新（非 defer 且设了最低收藏的批量
                 # 路径除外，避免干扰其同步过滤语义；该路径失败记录另行兜底）
                 if (not existing.original_urls_list or stale) \
@@ -644,7 +824,10 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
     # 处理需要重新拉取详情的已有记录
     if to_refetch:
-        details, attempted = _fetch_details_parallel(to_refetch, limiter=limiter)
+        refetch_batch = _fetch_details_parallel(
+            to_refetch, limiter=limiter, on_detail=_note_detail)
+        rate_limited = rate_limited or refetch_batch.rate_limited
+        details, attempted = refetch_batch.details, refetch_batch.attempted
         _budget_consume(attempted)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
@@ -654,16 +837,16 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
                 # 详情拉取失败：不静默丢弃，排入后台补全，下次命中时再判断
                 to_fill.append(pixiv_id)
                 continue
-            if _is_blocked(detail.get('tags', []), blocked) \
-               or detail.get('bookmark_count', 0) < min_bookmarks \
-               or (hide_r18 and _is_r18(detail.get('tags', []))):
+            if _rejected(detail.get('tags', []), detail.get('bookmark_count', 0),
+                         blocked, min_bookmarks, hide_r18):
                 continue
             existing = existing_map[pixiv_id]
             existing.bookmark_count = detail.get('bookmark_count', existing.bookmark_count)
             existing.bookmark_updated_at = now_utc
             if detail.get('original_urls'):
                 existing.original_urls_list = detail['original_urls']
-            results.append(existing.to_dict())
+            # 详情刚到手就发布：这条记录已经完整，没理由再等本页其余作品
+            _append_result(existing.to_dict())
 
     if new_illusts:
         # 冲突容忍写入：并发/本批重复 pid 不炸整批（见 _insert_new_illusts）；
@@ -674,14 +857,10 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             pid = illust.pixiv_id
             if pid in winners and pid not in seen_pids:
                 seen_pids.add(pid)
-                results.append(winners[pid].to_dict())
+                _append_result(winners[pid].to_dict())
 
     if to_fill:
         _kick_background_fill(to_fill)
-    if defer_details:
-        if max_results > 0:
-            _last_fetch_stats.update(fetch_stats)
-        return _mark_favorites(db, results)
 
     if to_fetch:
         # 流式过滤：拉取过程中直接判定过滤条件，凑够 max_results 条即提前终止
@@ -690,16 +869,31 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         def _early_stop(detail: dict | None) -> bool:
             if max_results <= 0 or detail is None:
                 return False
-            if _is_blocked(detail.get('tags', []), blocked) \
-               or detail.get('bookmark_count', 0) < min_bookmarks \
-               or (hide_r18 and _is_r18(detail.get('tags', []))):
+            if _rejected(detail.get('tags', []), detail.get('bookmark_count', 0),
+                         blocked, min_bookmarks, hide_r18):
                 return False
             passed[0] += 1
             return passed[0] >= max_results
 
-        details, attempted = _fetch_details_parallel(
+        def _publish_detail(pid: int, detail: dict | None) -> None:
+            """新作品详情完成的回调（collector 线程）：通过过滤就立刻发布预览。"""
+            _note_detail(pid, detail)
+            if detail is None or progress is None:
+                return
+            if _rejected(detail.get('tags', []), detail.get('bookmark_count', 0),
+                         blocked, min_bookmarks, hide_r18):
+                return
+            item = items_by_pid.get(pid)
+            if item is None:
+                return
+            # 只是预览：正式结果仍走下面的批量冲突容忍写入（并发窗口里可能落空）
+            _publish(_mark_favorite(illust_factory(item, detail).to_dict(), fav_pids))
+
+        fetch_batch = _fetch_details_parallel(
             to_fetch, early_stop=_early_stop if max_results > 0 else None,
-            limiter=limiter)
+            limiter=limiter, on_detail=_publish_detail)
+        rate_limited = rate_limited or fetch_batch.rate_limited
+        details, attempted = fetch_batch.details, fetch_batch.attempted
         _budget_consume(attempted)
         fetch_stats['detail_fetched'] += len(details)
         fetch_stats['detail_failed'] += attempted - len(details)
@@ -715,12 +909,11 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             detail = details.get(pixiv_id)
             if detail is None:
                 continue
-            if _is_blocked(detail.get('tags', []), blocked) \
-               or detail.get('bookmark_count', 0) < min_bookmarks \
-               or (hide_r18 and _is_r18(detail.get('tags', []))):
+            if _rejected(detail.get('tags', []), detail.get('bookmark_count', 0),
+                         blocked, min_bookmarks, hide_r18):
                 continue
 
-            item = next((i for i in items if id_extractor(i) == pixiv_id), None)
+            item = items_by_pid.get(pixiv_id)
             if item is None:
                 continue
 
@@ -733,13 +926,21 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             winners = _insert_new_illusts(db, batch_illusts)
             for pid in batch_pids:
                 if pid in winners:
-                    results.append(winners[pid].to_dict())
+                    # 通常已在 `_publish_detail` 里发过（PID 去重会吞掉这次）；
+                    # 走到这里仍未发布的（on_detail 没回调的实现）当场补发
+                    _append_result(winners[pid].to_dict())
+
+    # 收尾安全网：每条结果在加入列表的那一刻就已发布（见 `_append_result`），这里
+    # 只兜住绕过 `_append_result` 进入 `results` 的路径（被 mock 的 seam、未来重构），
+    # 保证结果列表里每条至少对应一个 result 事件（靠 published_pids 去重，不会重复发）。
+    for r in results:
+        _publish(_mark_favorite(r, fav_pids))
 
     if max_results > 0:
         fetch_stats['seconds'] = time.time() - fetch_start
         _last_fetch_stats.update(fetch_stats)
 
-    return _mark_favorites(db, results)
+    return _ProcessedItems(results, rate_limited=rate_limited)
 
 
 def _illust_from_item(item: dict, detail: dict | None = None) -> Illust:
@@ -793,17 +994,26 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
                   tag_mode: str = 'or', r18_mode: str = 'all',
                   defer_details: bool = False,
                   max_results: int = 0,
-                  limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
+                  limiter: _TokenBucket | None = None,
+                  progress: Callable[[dict], None] | None = None) -> tuple[list[dict], bool]:
     """按标签搜索 Pixiv。tag_mode: 'or' = 任一标签, 'and' = 全部标签。
 
     max_results: 流式过滤目标数量，凑够即提前停止拉取详情（0 = 不限制）。
     limiter: 详情请求限速器；不传用前台高速桶（搜索）。
+    progress: 逐条进度回调（见 `_process_items`）；本页被限流截断时以
+        `SearchRateLimitedError` 收尾，此时不写成功缓存。
+
+    结果缓存用 `_TAG_SEARCH_CACHE_TTL`（120 秒）：它比发现/关注页的 30 秒长，
+    因为命中与否只差"多等一次上游往返"；缓存键不含屏蔽标签指纹，屏蔽标签增删
+    靠 `clear_search_cache()` 整体清空生效。
     """
     if page > max_pages:
         return [], False
 
     cache_key = f'tag|q={keyword}|p={page}|s={sort_order}|tm={tag_mode}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
-    cached = _cache_get(cache_key)
+    # TTL 由**写入时**存进缓存条目（`_cache_put(ttl=)`），读取只认那一条：
+    # 这里传 ttl 是为了让"这条路径该用哪个 TTL"在调用点一眼可见，与 search_by_user 同款。
+    cached = _cache_get(cache_key, ttl=_TAG_SEARCH_CACHE_TTL)
     if cached is not None:
         # 缓存命中：本次未拉取详情，清零统计避免把上次搜索的耗时/失败归属到本次
         _last_fetch_stats.update({'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0})
@@ -819,7 +1029,11 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
         sort_order=sort_order, r18_mode=r18_mode, page=page)
 
     if not illusts_data:
-        _cache_put(cache_key, ([], False))
+        # 空结果**不**跟随 120 秒的标签 TTL，仍按 `_SEARCH_CACHE_TTL`（30 秒）缓存：
+        # Cookie 过期时 Pixiv 会静默返回空页，而同条件重试命中同一个缓存键 ——
+        # 把窗口拉到 120 秒等于让"换个关键词再搜还是空"多持续 90 秒，用户无法把
+        # "真的没结果"和"凭据失效"分开。`search_by_user` 出于同一理由干脆不缓存空结果。
+        _cache_put(cache_key, ([], False), ttl=_SEARCH_CACHE_TTL)
         return [], False
 
     defer = defer_details or (min_bookmarks == 0)
@@ -834,12 +1048,25 @@ def search_by_tag(keyword: str, min_bookmarks: int = 0, page: int = 1,
             defer_details=defer,
             max_results=max_results,
             limiter=limiter,
+            progress=progress,
         )
         safe_commit(db)
 
+    if results.rate_limited:
+        # 限流是全局状态，不是"这些作品不匹配"：本页残缺，既不能写成功缓存
+        #（下次命中还是这份残缺页），也不能让调用方以为筛选已经结束。
+        raise SearchRateLimitedError(
+            f'标签搜索「{keyword}」详情请求被限流，已确认的 {len(results)} 件结果不完整')
+
     total_pages = min((total + PER_PAGE - 1) // PER_PAGE, max_pages) if total else max_pages
     has_more = page < total_pages
-    _cache_put(cache_key, (results, has_more))
+    # 预算中途耗尽时本页还有条目没判定完（结果残缺、has_more 也随之失真），
+    # 不能写成功缓存 —— 否则下次命中会拿到同一份残缺页，并把它固化满 120 秒。
+    # 当前只有作者搜索会启用详情预算（routes_search 的 _user_fn），这条是防
+    # "哪天给标签路径也开预算"时不静默退化的护栏。
+    if budget_exhausted():
+        return results, has_more
+    _cache_put(cache_key, (results, has_more), ttl=_TAG_SEARCH_CACHE_TTL)
     return results, has_more
 
 
@@ -847,8 +1074,12 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
                      min_bookmarks: int = 0, r18_mode: str = 'all',
                      defer_details: bool = False,
                      max_results: int = 0,
-                     limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
-    """浏览 Pixiv 发现页（全部作品），无需指定标签。"""
+                     limiter: _TokenBucket | None = None,
+                     progress: Callable[[dict], None] | None = None) -> tuple[list[dict], bool]:
+    """浏览 Pixiv 发现页（全部作品），无需指定标签。
+
+    被限流截断时抛 `SearchRateLimitedError`，且不写成功缓存（与 `search_by_tag` 同）。
+    """
     cache_key = f'disc|p={page}|s={sort_order}|r={r18_mode}|mb={min_bookmarks}|mr={max_results}'
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -880,9 +1111,18 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
             defer_details=defer,
             max_results=max_results,
             limiter=limiter,
+            progress=progress,
         )
         safe_commit(db)
 
+    if results.rate_limited:
+        # 与 search_by_tag 同理：残缺页不进缓存，交由调用方以可重试状态收尾
+        raise SearchRateLimitedError(
+            f'发现页 p={page} 详情请求被限流，已确认的 {len(results)} 件结果不完整')
+
+    # 预算耗尽 = 本页条目没判定完，同 search_by_tag：不把残缺页固化进 30 秒缓存
+    if budget_exhausted():
+        return results, has_more
     _cache_put(cache_key, (results, has_more))
     return results, has_more
 
@@ -890,7 +1130,8 @@ def browse_discovery(page: int = 1, sort_order: str = 'popular_d',
 def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
                    hide_r18: bool = False,
                    max_results: int = 0,
-                   limiter: _TokenBucket | None = None) -> tuple[list[dict], bool]:
+                   limiter: _TokenBucket | None = None,
+                   progress: Callable[[dict], None] | None = None) -> tuple[list[dict], bool]:
     """按用户 ID 搜索。page 从 1 开始。返回 (results, has_more)。
 
     与 search_by_tag 的两处关键差异，改动前务必先读：
@@ -944,8 +1185,16 @@ def search_by_user(user_id: str, min_bookmarks: int = 0, page: int = 1,
             hide_r18=hide_r18,
             max_results=max_results,
             limiter=limiter,
+            progress=progress,
         )
         safe_commit(db)
+
+    if results.rate_limited:
+        # 限流截断：本页还有 id 没判定。与预算耗尽同理不缓存，但更进一步 ——
+        # 必须让调用方知道"这不是完整页"，所以抛出去（游标不许前移）。
+        raise SearchRateLimitedError(
+            f'画师 {user_id} 第 {page} 页详情请求被限流，'
+            f'已确认的 {len(results)} 件结果不完整')
 
     max_pages = (total + page_size - 1) // page_size
     has_more = page < max_pages
@@ -1017,6 +1266,9 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
         )
         safe_commit(db)
 
+    # 关注页不需要"残缺页不进缓存"的守卫：它恒走 defer 路径且不传 min_bookmarks，
+    # `_process_items` 里会消耗预算的 to_fetch / 会因限流截断的 to_refetch 两条分支
+    # 都不会进（后者要求 min_bookmarks > 0），上游异常在到达这里之前就已抛出。
     _cache_put(cache_key, (results, has_next))
     return results, has_next
 
