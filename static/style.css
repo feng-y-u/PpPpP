@@ -179,19 +179,6 @@ input[type="number"] { -moz-appearance: textfield; }
 /* ── Badge base ── */
 .badge { font-weight: 500; border-radius: var(--radius-badge); }
 
-/* ── Collection Picker ── */
-.collection-check-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 4px; cursor: pointer; border-radius: 6px;
-  transition: background 0.1s;
-}
-.collection-check-item:hover { background: var(--accent-subtle); }
-.collection-check-item input[type="checkbox"] {
-  width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
-}
-.collection-check-item span { flex: 1; font-size: 0.85rem; color: var(--text-primary); }
-.collection-check-count { font-size: 0.72rem; color: var(--text-muted); text-align: right; min-width: 40px; }
-
 /* ── Footer ── */
 .site-footer {
   border-top: 1px solid var(--border-subtle);
@@ -226,7 +213,6 @@ input[type="number"] { -moz-appearance: textfield; }
   .form-control, .form-select { min-height: 40px; font-size: 16px; } /* 16px 防止 iOS 聚焦自动缩放 */
   input[type="checkbox"] { width: 20px; height: 20px; }
   .card-checkbox { width: 22px; height: 22px; }
-  .card-fav-btn { width: 36px; height: 36px; font-size: 1rem; }
 
   /* 页头工具栏：换行 + 控件自适应占满 */
   .toolbar-actions { width: 100%; margin-left: 0 !important; flex-wrap: wrap; }
@@ -254,14 +240,10 @@ input[type="number"] { -moz-appearance: textfield; }
   /* 注：此规则被 gallery.html 内联 .batch-float-bar.hidden 同权遮蔽（内联后加载）；
      保留作为移动端意图文档，视觉效果由内联规则提供 */
   .batch-float-bar.hidden { transform: translateY(12px); }
-  .batch-float-bar .batch-collection-select { max-width: 140px; }
 
   /* 详情页：图片区域更高、信息区 padding 加大 */
   .image-area { min-height: 45vh; }
   .info-area { padding: 16px 14px; }
-
-  /* 收藏夹选择弹窗：紧凑 */
-  .collection-check-item { padding: 10px 4px; }
 }
 
 @media (max-width: 480px) {
@@ -387,7 +369,6 @@ img.img-fade.img-loaded {
 }
 .lightbox-btn:hover { background: rgba(226, 87, 126, .16); }
 .lightbox-btn:disabled { opacity: .35; cursor: default; }
-.lightbox-btn.lb-fav-on { background: var(--accent); color: #fff; }
 .lightbox-counter { font-size: 0.75rem; color: var(--text-secondary); min-width: 64px; text-align: center; }
 .lightbox-spacer { flex: 1; }
 @media (max-width: 640px) {

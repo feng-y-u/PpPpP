@@ -2,9 +2,8 @@ const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribut
 
 let deleteTarget = null, deleteMode = 'single', activeTag = '';
 let selectedPids = new Set();
-let galleryCurrentPage = 1, galleryTotal = 0, galleryTotalPages = 0, galleryFavTotal = 0;
+let galleryCurrentPage = 1, galleryTotal = 0, galleryTotalPages = 0;
 let allTags = [];
-let activeCollectionId = '';
 let sortOrder = 'downloaded';
 let galleryR18 = 'safe';   // R18 过滤：默认隐藏（与缓存页/搜索页一致）
 let currentResults = [];
@@ -16,17 +15,15 @@ function invalidateGalleryCache() {
 }
 const deleteModal = new bootstrap.Modal($('#deleteModal'));
 
-// Read ?tag= and ?collection_id from URL on load
+// Read ?tag= from URL on load
 const urlParams = new URLSearchParams(location.search);
 if (urlParams.has('tag')) {
   activeTag = urlParams.get('tag');
 }
-activeCollectionId = urlParams.get('collection_id') || '';
 
 $('#sortSelect').value = 'downloaded';
 loadGallery(1);
 loadTags();
-loadCollections();
 
 if (activeTag) {
   const el = $('#tagFilterActive');
@@ -72,7 +69,7 @@ $('#tagFilterActive')?.addEventListener('click', function(e) {
 
 function loadGallery(pageNum) {
   const offset = (pageNum - 1) * PAGE_SIZE;
-  const cacheKey = `pv_gallery_${activeTag || ''}_${activeCollectionId || ''}_${sortOrder}_${galleryR18}_${pageNum}`;
+  const cacheKey = `pv_gallery_${activeTag || ''}_${sortOrder}_${galleryR18}_${pageNum}`;
   const cached = pvCache.get(cacheKey, GALLERY_CACHE_TTL);
   if (cached) {
     renderGalleryData(cached, pageNum);
@@ -81,7 +78,6 @@ function loadGallery(pageNum) {
   showGallerySkeleton();
   const params = new URLSearchParams();
   if (activeTag) params.set('tag', activeTag);
-  if (activeCollectionId) params.set('collection_id', activeCollectionId);
   params.set('sort', sortOrder);
   params.set('r18', galleryR18);
   params.set('limit', PAGE_SIZE);
@@ -121,13 +117,8 @@ function renderGalleryData(data, pageNum) {
     $('#emptyState').style.display = 'block';
     $('#stats').style.display = 'none';
     $('#paginationBar').style.display = 'none';
-    if (activeCollectionId) {
-      $('#emptyTitle').textContent = '暂无收藏作品';
-      $('#emptyDesc').textContent = '在作品详情页点击 ♥ 收藏添加到此处';
-    } else {
-      $('#emptyTitle').textContent = '暂无已下载作品';
-      $('#emptyDesc').textContent = '搜索作品并下载后在此查看';
-    }
+    $('#emptyTitle').textContent = '暂无已下载作品';
+    $('#emptyDesc').textContent = '搜索作品并下载后在此查看';
     return;
   }
   $('#emptyState').style.display = 'none';
@@ -146,13 +137,11 @@ function renderGalleryData(data, pageNum) {
   galleryCurrentPage = pageNum;
   galleryTotal = data.total;
   galleryTotalPages = Math.ceil(galleryTotal / PAGE_SIZE);
-  galleryFavTotal = data.favorite_total || 0;
   $('#stats').style.display = 'block';
   const start = offset + 1;
   const end = Math.min(galleryTotal, offset + data.data.length);
   let statsText = `${start}-${end} / ${galleryTotal} 个作品，总大小 ${fmtSize(totalSize)}`;
   if (activeTag) statsText += ` · 标签: ${activeTag}`;  // textContent 赋值天然安全，无需 escHtml
-  if (!activeCollectionId && galleryFavTotal > 0) statsText += ` · ❤ ${galleryFavTotal}`;
   $('#stats').textContent = statsText;
   renderGalleryPagination();
 }
@@ -238,7 +227,6 @@ function buildDetailUrl(r, idx) {
   const params = new URLSearchParams();
   params.set('ctx', 'gallery');
   params.set('sort', sortOrder);
-  if (activeCollectionId) params.set('collection_id', activeCollectionId);
   if (activeTag) params.set('tag', activeTag);
   params.set('pos', pos);
   params.set('page', galleryCurrentPage);
@@ -251,36 +239,11 @@ function saveDetailSeq() {
     sessionStorage.setItem('pv_detail_seq', JSON.stringify({
       v: 1,
       sort: sortOrder,
-      collection_id: activeCollectionId || '',
       tag: activeTag || '',
       total: galleryTotal,
       pages: { [galleryCurrentPage]: currentResults.map(x => x.pixiv_id) },
     }));
   } catch (e) { /* sessionStorage 不可用（隐私模式等）时详情页自动降级 */ }
-}
-
-async function moveCard(pid, direction, btn) {
-  btn.classList.add('loading');
-  try {
-    const resp = await fetch(`/api/collections/${activeCollectionId}/items/${pid}/move`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({ direction })
-    });
-    if (resp.ok) {
-      invalidateGalleryCache();
-      loadGallery(galleryCurrentPage);
-    } else if (resp.status === 400) {
-      showToast('已在边界位置', true);
-    } else if (resp.status === 409) {
-      showToast('位置已被修改，正在刷新', true);
-      invalidateGalleryCache();
-      loadGallery(galleryCurrentPage);
-    } else {
-      showToast('移动失败', true);
-    }
-  } catch { showToast('网络错误', true); }
-  finally { btn.classList.remove('loading'); }
 }
 
 function renderCard(r) {
@@ -296,17 +259,15 @@ function renderCard(r) {
     <div class="gallery-card" data-pid="${r.pixiv_id}" style="cursor:pointer;">
       <div class="card-img-wrap">
         <input type="checkbox" class="card-checkbox" data-pid="${r.pixiv_id}">
-        <button class="card-fav-btn${r.is_favorite ? ' favorited' : ''}" data-pid="${r.pixiv_id}" title="${r.is_favorite ? '取消收藏' : '收藏'}">${r.is_favorite ? '❤' : '♡'}</button>
         <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23ecece7'%3E%3C/svg%3E"
              data-src="${escAttr(thumbUrl)}" loading="lazy" class="img-fade" alt="">
         <span class="page-badge">${r.file_count || r.page_count || 1} 张</span><span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
       <div class="card-body">
-        <div class="card-title" title="${escAttr(r.title)}">${r.is_favorite ? '❤ ' : ''}${escHtml(r.title)}</div>
+        <div class="card-title" title="${escAttr(r.title)}">${escHtml(r.title)}</div>
         <div class="card-info">#${r.pixiv_id} · ${escHtml(r.user_name)} · ${r.file_count || 1} 文件</div>
         <div class="tags-wrap">${tags}</div>
         <div class="d-flex gap-1 mt-1">
-          ${activeCollectionId ? `<button class="card-move-btn move-up-btn" data-pid="${r.pixiv_id}" title="上移">▲</button><button class="card-move-btn move-down-btn" data-pid="${r.pixiv_id}" title="下移">▼</button>` : ''}
           <button class="btn btn-outline-danger btn-sm flex-fill delete-btn" data-pid="${r.pixiv_id}">删除</button>
           <a href="/download_file/${r.pixiv_id}" class="btn btn-soft btn-sm dl-file-btn" onclick="event.stopPropagation()">下载</a>
         </div>
@@ -314,7 +275,7 @@ function renderCard(r) {
     </div>`;
 
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
-    if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a') || e.target.closest('.card-fav-btn') || e.target.closest('.card-move-btn')) return;
+    if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a')) return;
     const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
     if (e.target.closest('.card-body')) {
       location.href = buildDetailUrl(r, idx >= 0 ? idx : 0);
@@ -323,63 +284,8 @@ function renderCard(r) {
     lightbox.open(currentResults.map(x => ({
       pixiv_id: x.pixiv_id,
       thumbUrl: proxyThumb(x.thumb_url),
-      isFav: !!x.is_favorite,
-      collectionView: !!activeCollectionId,
     })), idx >= 0 ? idx : 0);
   });
-
-  col.querySelector('.card-fav-btn').addEventListener('click', async function(e) {
-    e.stopPropagation();
-    const btn = this;
-    const pid = parseInt(btn.dataset.pid);
-    btn.classList.add('loading');
-    try {
-      let resp;
-      if (activeCollectionId) {
-        // 收藏夹视图下：此处的作品已在收藏夹中，直接移除
-        resp = await fetch(`/api/collections/${activeCollectionId}/items/${pid}`, {
-          method: 'DELETE',
-          headers: { 'X-CSRF-Token': csrfToken },
-        });
-      } else {
-        // 全部作品视图下：操作默认"我的收藏"
-        resp = await fetch(`/api/favorite/${pid}`, {
-          method: 'POST',
-          headers: { 'X-CSRF-Token': csrfToken },
-        });
-      }
-      if (resp.ok) {
-        invalidateGalleryCache();
-        if (activeCollectionId) {
-          loadGallery(galleryCurrentPage);
-        } else {
-          const data = await resp.json();
-          const isFav = data.is_favorite;
-          if (window.__lbSyncFav) window.__lbSyncFav(pid, isFav);
-          else {
-            btn.classList.toggle('favorited', isFav);
-            btn.innerHTML = isFav ? '❤' : '♡';
-          }
-        }
-      } else {
-        showToast('操作失败', true);
-      }
-    } catch { showToast('网络错误', true); }
-    finally { btn.classList.remove('loading'); }
-  });
-
-  if (activeCollectionId) {
-    const upBtn = col.querySelector('.move-up-btn');
-    const downBtn = col.querySelector('.move-down-btn');
-    if (upBtn) upBtn.addEventListener('click', async function(e) {
-      e.stopPropagation();
-      await moveCard(r.pixiv_id, 'up', this);
-    });
-    if (downBtn) downBtn.addEventListener('click', async function(e) {
-      e.stopPropagation();
-      await moveCard(r.pixiv_id, 'down', this);
-    });
-  }
 
   col.querySelector('.delete-btn').addEventListener('click', function() {
     deleteTarget = r.pixiv_id;
@@ -487,16 +393,6 @@ function updateFloatBar() {
   void c.offsetWidth;  // 重触发
   c.classList.add('bounce');
   $('#btnFloatDelete').textContent = `删除 (${count})`;
-  $('#btnFloatRemoveColl').style.display = activeCollectionId ? '' : 'none';
-}
-
-function clearSelection() {
-  selectedPids.clear();
-  document.querySelectorAll('.card-checkbox').forEach(cb => {
-    cb.checked = false;
-    cb.closest('.gallery-card')?.classList.remove('card-selected');
-  });
-  updateFloatBar();
 }
 
 $('#btnFloatSelectAll').addEventListener('click', () => {
@@ -516,88 +412,6 @@ $('#btnFloatDelete').addEventListener('click', () => {
   deleteModal.show();
 });
 
-$('#batchCollectionSelect').addEventListener('change', async function() {
-  const cid = parseInt(this.value);
-  if (!cid || selectedPids.size === 0) { this.value = ''; return; }
-  this.disabled = true;
-  try {
-    const resp = await fetch(`/api/collections/${cid}/items/batch`, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pixiv_ids: Array.from(selectedPids) }),
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      showToast(`已添加 ${data.added} 个作品到收藏夹`);
-      invalidateGalleryCache();
-      clearSelection();
-      loadGallery(galleryCurrentPage);
-    } else {
-      const err = await resp.json().catch(() => ({}));
-      showToast(err.error || '操作失败', true);
-    }
-  } catch { showToast('网络错误', true); }
-  finally { this.value = ''; this.disabled = false; }
-});
-
-$('#btnFloatRemoveColl').addEventListener('click', async () => {
-  if (!activeCollectionId || selectedPids.size === 0) return;
-  const btn = $('#btnFloatRemoveColl');
-  btn.disabled = true;
-  btn.textContent = '移除中...';
-  try {
-    const resp = await fetch(`/api/collections/${activeCollectionId}/items/batch`, {
-      method: 'DELETE',
-      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pixiv_ids: Array.from(selectedPids) }),
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      showToast(`已移出 ${data.removed} 个作品`);
-      invalidateGalleryCache();
-      clearSelection();
-      loadGallery(galleryCurrentPage);
-    } else {
-      const err = await resp.json().catch(() => ({}));
-      showToast(err.error || '操作失败', true);
-    }
-  } catch { showToast('网络错误', true); }
-  finally { btn.disabled = false; btn.textContent = '移出收藏夹'; }
-});
-
-// ── Collection Filter ──
-
-function loadCollections() {
-  fetch('/api/collections')
-    .then(r => r.json())
-    .then(collections => {
-      const sel = $('#collectionSelect');
-      sel.innerHTML = '<option value="">全部作品</option>' +
-        collections.map(c => `<option value="${c.id}">${escHtml(c.name)} (${c.item_count})</option>`).join('');
-      if (activeCollectionId) sel.value = activeCollectionId;
-      // 也填充浮动工具栏的收藏夹下拉
-      const batchSel = $('#batchCollectionSelect');
-      batchSel.innerHTML = '<option value="">添加到收藏夹...</option>' +
-        collections.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
-    })
-    .catch(() => showToast('加载收藏夹失败', true));
-}
-
-$('#collectionSelect').addEventListener('change', function() {
-  activeCollectionId = this.value;
-  activeTag = '';
-  // setActiveTag 已有同标签幂等守卫（无标签时对 '' 直接跳过），不能再依赖它触发加载；
-  // 这里直接清空标签 UI，并只做一次失效 + 加载
-  const tagActiveEl = $('#tagFilterActive');
-  if (tagActiveEl) tagActiveEl.style.display = 'none';
-  $('#tagFilter').value = '';
-  const name = this.options[this.selectedIndex]?.text || '';
-  $('#pageTitle').textContent = activeCollectionId ? `${name} - 收藏夹` : '已下载作品';
-  clearSelection();
-  invalidateGalleryCache();
-  loadGallery(1);
-});
-
 $('#sortSelect').addEventListener('change', function() {
   sortOrder = this.value;
   invalidateGalleryCache();
@@ -609,26 +423,3 @@ $('#r18Filter').addEventListener('change', function() {
   invalidateGalleryCache();
   loadGallery(1);
 });
-
-// lightbox 内收藏后同步卡片 ♥ + currentResults/画廊缓存（不重载页面）
-window.__lbSyncFav = (pid, isFav) => {
-  const it = currentResults.find(x => x.pixiv_id === pid);
-  if (it) it.is_favorite = !!isFav;
-  invalidateGalleryCache();
-  const card = document.querySelector(`.gallery-card[data-pid="${pid}"]`);
-  if (!card) return;
-  const btn = card.querySelector('.card-fav-btn');
-  if (btn) {
-    btn.classList.toggle('favorited', !!isFav);
-    btn.innerHTML = isFav ? '❤' : '♡';
-    btn.title = isFav ? '取消收藏' : '收藏';
-  }
-  const titleEl = card.querySelector('.card-title');
-  if (titleEl) {
-    const titleNode = titleEl.childNodes[0];
-    if (titleNode) {
-      const t = titleNode.textContent || '';
-      titleNode.textContent = (isFav ? '❤ ' : '') + t.replace(/^❤ /, '');
-    }
-  }
-};

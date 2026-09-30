@@ -116,7 +116,7 @@ document.addEventListener('keydown', e => {
 })();
 
 // ── 跨作品翻页（仅图库上下文 ctx=gallery 启用）──
-// 顺序跟随图库当前视图（排序/收藏夹/标签筛选）。序列来源：图库跳转时写入的
+// 顺序跟随图库当前视图（排序/标签筛选）。序列来源：图库跳转时写入的
 // sessionStorage（pv_detail_seq）；新标签页直接粘贴 URL 时按 URL 参数现拉
 // /api/gallery 定位。两者都失败则不渲染翻页 UI。
 const PAGE_SIZE = 50;
@@ -126,7 +126,6 @@ const navCtx = (() => {
   if (q.get('ctx') !== 'gallery') return null;
   return {
     sort: q.get('sort') || 'downloaded',
-    collectionId: q.get('collection_id') || '',
     tag: q.get('tag') || '',
     pos: parseInt(q.get('pos'), 10),
     page: Math.max(1, parseInt(q.get('page'), 10) || 1),
@@ -140,8 +139,7 @@ function loadStoredSeq() {
   try {
     const s = JSON.parse(sessionStorage.getItem(DETAIL_SEQ_KEY) || 'null');
     if (!s || s.v !== 1) return null;
-    if (s.sort !== navCtx.sort || (s.collection_id || '') !== navCtx.collectionId
-        || (s.tag || '') !== navCtx.tag) return null;
+    if (s.sort !== navCtx.sort || (s.tag || '') !== navCtx.tag) return null;
     return s;
   } catch { return null; }
 }
@@ -153,7 +151,6 @@ function saveSeq() {
 function galleryParams(pageNo) {
   const p = new URLSearchParams();
   p.set('sort', navCtx.sort);
-  if (navCtx.collectionId) p.set('collection_id', navCtx.collectionId);
   if (navCtx.tag) p.set('tag', navCtx.tag);
   p.set('limit', PAGE_SIZE);
   p.set('offset', (pageNo - 1) * PAGE_SIZE);
@@ -175,7 +172,7 @@ async function fetchPage(pageNo) {
 
 async function resolveSeq() {
   if (!navCtx || isNaN(navCtx.pos)) return;
-  seq = loadStoredSeq() || { v: 1, sort: navCtx.sort, collection_id: navCtx.collectionId,
+  seq = loadStoredSeq() || { v: 1, sort: navCtx.sort,
                              tag: navCtx.tag, total: 0, pages: {} };
   // 当前页必须包含本作品（sessionStorage 可能已过期或被其他筛选覆盖）
   if (!seq.pages[navCtx.page] || !seq.pages[navCtx.page].includes(illust.pixiv_id)) {
@@ -200,7 +197,7 @@ async function pidAt(pos) {
 
 async function navTo(delta) {
   if (!navReady || navPending) return;
-  if (document.querySelector('.modal.show')) return;   // 收藏夹选择弹窗等打开时不翻页
+  if (document.querySelector('.modal.show')) return;   // 弹窗打开时不翻页
   navPending = true;
   try {
     const target = navCtx.pos + delta;
@@ -228,81 +225,6 @@ function renderIllustNav() {
 // 屏幕按钮绑定：上一作/下一作，与键盘 ←→、触摸滑动共用 navTo
 $('#prevIllustBtn').addEventListener('click', () => navTo(-1));
 $('#nextIllustBtn').addEventListener('click', () => navTo(1));
-
-// ── Collection Picker ──
-let savedCollectionIds = new Set();
-
-$('#favBtn').addEventListener('click', async function() {
-  if (this.disabled) return;
-  // Fetch collections and current membership
-  try {
-    const [collectionsResp, membershipResp] = await Promise.all([
-      fetch('/api/collections'),
-      fetch(`/api/illust/${illust.pixiv_id}/collections`),
-    ]);
-    if (!collectionsResp.ok || !membershipResp.ok) { showToast('加载收藏夹失败', true); return; }
-    const collections = await collectionsResp.json();
-    const membership = await membershipResp.json();
-    savedCollectionIds = new Set(membership);
-
-    const body = $('#collectionPickerBody');
-    if (collections.length === 0) {
-      body.innerHTML = '<div style="color:var(--text-muted);padding:0.5rem 0;">暂无收藏夹，请先在设置页创建</div>';
-    } else {
-      body.innerHTML = collections.map(c => `
-        <label class="collection-check-item">
-          <input type="checkbox" value="${c.id}" ${savedCollectionIds.has(c.id) ? 'checked' : ''}>
-          <span>${escHtml(c.name)}</span>
-          <span class="collection-check-count">${c.item_count} 件</span>
-        </label>
-      `).join('');
-    }
-    new bootstrap.Modal($('#collectionPickerModal')).show();
-  } catch { showToast('网络错误', true); }
-});
-
-$('#saveCollectionBtn').addEventListener('click', async function() {
-  if (this.disabled) return;
-  this.disabled = true;
-  const checkboxes = $$('#collectionPickerBody input[type="checkbox"]');
-  const newIds = new Set();
-  checkboxes.forEach(cb => { if (cb.checked) newIds.add(parseInt(cb.value)); });
-
-  try {
-    // Remove uncheck, add newly checked
-    const toRemove = [...savedCollectionIds].filter(id => !newIds.has(id));
-    const toAdd = [...newIds].filter(id => !savedCollectionIds.has(id));
-    const promises = [];
-    for (const cid of toRemove) {
-      promises.push(fetch(`/api/collections/${cid}/items/${illust.pixiv_id}`, {
-        method: 'DELETE', headers: { 'X-CSRF-Token': csrfToken },
-      }));
-    }
-    for (const cid of toAdd) {
-      promises.push(fetch(`/api/collections/${cid}/items`, {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pixiv_id: illust.pixiv_id }),
-      }));
-    }
-    await Promise.all(promises);
-    savedCollectionIds = newIds;
-
-    // Update fav button state
-    const isFav = newIds.size > 0;
-    const btn = $('#favBtn');
-    if (isFav) {
-      btn.className = 'btn btn-dl-done';
-      btn.textContent = '❤ 已收藏';
-    } else {
-      btn.className = 'btn btn-primary-accent';
-      btn.textContent = '♥ 收藏';
-    }
-    bootstrap.Modal.getInstance($('#collectionPickerModal')).hide();
-    if (toRemove.length || toAdd.length) showToast('收藏已更新');
-  } catch { showToast('保存失败', true); }
-  finally { this.disabled = false; }
-});
 
 // ── Download ──
 $('#downloadBtn')?.addEventListener('click', async function() {

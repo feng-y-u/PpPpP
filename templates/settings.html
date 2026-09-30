@@ -163,34 +163,6 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
-    <div class="card-header py-2 fw-semibold small">收藏夹管理</div>
-    <div class="card-body">
-      <div class="d-flex gap-2 mb-3">
-        <input class="form-control form-control-sm" id="newCollectionName" placeholder="新建收藏夹名称..." style="max-width:250px;">
-        <button class="btn btn-primary-accent btn-sm" id="createCollectionBtn">创建</button>
-      </div>
-      <div id="collectionList"></div>
-    </div>
-  </div>
-
-  <!-- Collection Delete Confirm Modal -->
-  <div class="modal fade" id="deleteCollectionModal" tabindex="-1">
-    <div class="modal-dialog modal-sm">
-      <div class="modal-content">
-        <div class="modal-header py-2">
-          <h6 class="modal-title">确认删除</h6>
-          <button class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body small" id="deleteCollectionModalBody"></div>
-        <div class="modal-footer py-1">
-          <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
-          <button class="btn btn-danger btn-sm" id="confirmDeleteCollectionBtn">删除</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <div class="d-flex gap-2 mb-4">
     <button class="btn btn-primary" id="saveBtn">保存设置</button>
     <span id="saveStatus" class="small" style="color:var(--text-muted);align-self:center;display:none;"></span>

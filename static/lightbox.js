@@ -1,6 +1,6 @@
 // ── 共享 Lightbox 预览组件 ──
 // 用法：lightbox.open(items, index)
-//   items: [{ pixiv_id, thumbUrl, isFav, collectionView }]
+//   items: [{ pixiv_id, thumbUrl }]
 //   index: 初始显示下标（作品级）
 // 键盘 ←→ 切换 / Esc 关闭；触摸左右滑动；遮罩点击关闭。
 // 图源策略：先用缩略图即时渲染，后台静默调 /api/detail/<id> 探测页源——
@@ -8,7 +8,7 @@
 //   未下载但有 stored 原图 URL → medium_urls（master1200 中图，逐页）；
 //   都没有 → 保持缩略图（单张）。
 // 导航是"扁平图片级"：←/→ 在图片之间移动，跨过作品边界自动进入下一个/上一个
-// 作品；操作条按钮（下载/收藏/打开详情）始终作用于当前作品 items[index]。
+// 作品；操作条按钮（下载 / 打开详情）始终作用于当前作品 items[index]。
 
 const lightbox = (() => {
   let items = [];
@@ -17,7 +17,7 @@ const lightbox = (() => {
   let loadedPids = new Set();       // 已探测过页源的作品（每次 open 清空，避免陈旧）
   let activePollPid = null;         // 正在轮询下载状态的作品：保护其下载按钮不被渲染重置
   let root = null, imgEl = null, prevBtn = null, nextBtn = null,
-      closeBtn = null, counter = null, favBtn = null,
+      closeBtn = null, counter = null,
       detailBtn = null, dlBtn = null;
   let touchX = 0;
   let pollTimer = null, closeTimer = null;
@@ -71,7 +71,6 @@ const lightbox = (() => {
           <span class="lightbox-counter" id="lbCounter"></span>
           <button type="button" class="lightbox-btn" id="lbNext">→</button>
           <span class="lightbox-spacer"></span>
-          <button type="button" class="lightbox-btn lb-fav" id="lbFav" hidden>♥ 收藏</button>
           <button type="button" class="lightbox-btn" id="lbDl">下载</button>
           <button type="button" class="lightbox-btn" id="lbDetail">打开详情</button>
           <button type="button" class="lightbox-btn" id="lbClose">✕</button>
@@ -82,7 +81,6 @@ const lightbox = (() => {
     prevBtn = root.querySelector('#lbPrev');
     nextBtn = root.querySelector('#lbNext');
     counter = root.querySelector('#lbCounter');
-    favBtn = root.querySelector('#lbFav');
     dlBtn = root.querySelector('#lbDl');
     detailBtn = root.querySelector('#lbDetail');
     closeBtn = root.querySelector('#lbClose');
@@ -131,7 +129,6 @@ const lightbox = (() => {
         }, 300000);
       }).catch(() => { dlBtn.disabled = false; dlBtn.textContent = '下载'; activePollPid = null; });
     });
-    if (favBtn) favBtn.addEventListener('click', toggleFav);
 
     document.addEventListener('keydown', onKey);
     imgEl.parentElement.addEventListener('touchstart', (e) => { touchX = e.touches[0].clientX; }, { passive: true });
@@ -161,12 +158,6 @@ const lightbox = (() => {
     prevBtn.disabled = flat === 0;
     nextBtn.disabled = flat >= total - 1;
     counter.textContent = `第 ${flat + 1} / ${total} 张`;
-    const showFav = typeof it.isFav === 'boolean' && !it.collectionView;
-    favBtn.hidden = !showFav;
-    if (showFav) {
-      favBtn.textContent = it.isFav ? '♥ 已收藏' : '♡ 收藏';
-      favBtn.classList.toggle('lb-fav-on', !!it.isFav);
-    }
     if (it.pixiv_id !== activePollPid) {
       dlBtn.disabled = false;
       dlBtn.textContent = '下载';
@@ -204,25 +195,6 @@ const lightbox = (() => {
           render();
         }
       }).catch(() => { loadedPids.delete(pid); });  // 网络抖动：不锁定，下次访问重试
-  }
-
-  async function toggleFav() {
-    const it = items[index];
-    if (!it) return;
-    const resp = await fetch(`/api/favorite/${it.pixiv_id}`, {
-      method: 'POST',
-      headers: {
-        'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
-        'Content-Type': 'application/json',
-      },
-    });
-    if (!resp.ok) return;
-    const d = await resp.json();
-    it.isFav = d.is_favorite;
-    favBtn.textContent = it.isFav ? '♥ 已收藏' : '♡ 收藏';
-    favBtn.classList.toggle('lb-fav-on', !!it.isFav);
-    // 同步网格卡片上的 ♥ 状态（页面 JS 提供卡片更新钩子）
-    if (window.__lbSyncFav) window.__lbSyncFav(it.pixiv_id, d.is_favorite);
   }
 
   function open(list, startIndex) {

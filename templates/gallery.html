@@ -91,35 +91,6 @@
 .gallery-card:hover .card-checkbox,
 .card-checkbox:checked { opacity: 1; }
 
-/* ── Card Fav Button ── */
-.card-fav-btn {
-  position: absolute;
-  top: 6px; right: 6px;
-  z-index: 3;
-  background: rgba(255,255,255,.82);
-  backdrop-filter: blur(8px);
-  border: none;
-  border-radius: 50%;
-  width: 28px; height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  font-size: 0.85rem;
-  padding: 0;
-  line-height: 1;
-  color: #999;
-  transition: transform 0.15s, color 0.15s;
-}
-.card-fav-btn:hover { transform: scale(1.2); }
-.card-fav-btn.favorited { color: var(--accent); }
-.card-fav-btn.loading { pointer-events: none; opacity: 0.5; }
-
-.card-move-btn { border: none; background: transparent; color: var(--text-muted); cursor: pointer; padding: 0 4px; font-size: 0.78rem; line-height: 1; }
-.card-move-btn:hover { color: var(--accent); }
-.card-move-btn[hidden] { display: none !important; }
-.card-move-btn.loading { opacity: 0.5; pointer-events: none; }
-
 /* ── Batch Float Bar ── */
 .batch-float-bar {
   position: fixed;
@@ -151,15 +122,6 @@
   0% { transform: scale(1.15); }
   100% { transform: scale(1); }
 }
-.batch-collection-select {
-  font-size: 0.78rem;
-  border-radius: 6px;
-  border: 1px solid var(--border-input);
-  padding: 3px 8px;
-  background: var(--bg-page);
-  color: var(--text-primary);
-}
-
 /* ── Tag Filter ── */
 .tag-filter-wrap {
   position: relative;
@@ -237,10 +199,6 @@
         <option value="created">按收录时间</option>
         <option value="downloaded">按下载时间</option>
       </select>
-      <select id="collectionSelect" class="form-select form-select-sm" style="width:auto;">
-        <option value="">全部作品</option>
-      </select>
-      <a href="/settings" class="btn btn-outline-secondary btn-sm" id="btnManageCollections">管理收藏夹</a>
     </div>
   </div>
   <div class="tag-filter-wrap">
@@ -272,10 +230,6 @@
 <div id="batchFloatBar" class="batch-float-bar hidden">
   <span id="batchFloatCount"></span>
   <button id="btnFloatSelectAll" class="btn btn-sm btn-soft">全选</button>
-  <select id="batchCollectionSelect" class="batch-collection-select">
-    <option value="">添加到收藏夹...</option>
-  </select>
-  <button id="btnFloatRemoveColl" class="btn btn-sm btn-outline-warning" style="display:none;">移出收藏夹</button>
   <button id="btnFloatDelete" class="btn btn-sm btn-outline-danger">删除</button>
 </div>
 
