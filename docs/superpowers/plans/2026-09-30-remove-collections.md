@@ -126,6 +126,32 @@ Task 1（迁移）独立可先做；Task 2（保护判定）必须早于 Task 3�
 - [ ] **Step 3: 全量复跑 + 提交**：commit `docs: 记录收藏夹功能移除与验证结果`。
 - [ ] Step 4: 收尾：确认工作树干净；把 worktree 的 venv junction 摘掉后再删除 worktree；报告遗留（见下）。
 
+## 实施记录与勘误（Task 1–4，2026-09-30）
+
+分支 `refactor/remove-collections`（worktree `E:\pixiv\.worktrees\remove-collections`，基线 `fbbc12b`）。基线全量 **688 passed / 2 skipped / 4 failed(env)**。
+
+| 任务 | commit | 交付 |
+|---|---|---|
+| Task 2 | `627dcb1` | `background._is_user_owned()` 只认用户操作类 DownloadLog；`_prefetch_capacity_cleanup` 去掉 `fav_ids` 快照；`_refresh_bookmarks_pass` 去掉死变量；注释/日志文案改为新语义 |
+| Task 1 | `ba34348` | 迁移 v5 `drop_collection_tables`（子表先删、`IF EXISTS`）+ v1 存在性守卫 + 迁移测试 |
+| Task 3 | `8fef717` | 删 `routes_collections.py` 与蓝图布线（7→6）；删 `/api/favorite`、`/api/illust/<pid>/collections`、`/api/gallery` 的 `favorites`/`collection_id`；删 `Collection`/`CollectionItem`/`get_favorite_pids`/`to_dict(favorite=)`/`_next_collection_position`/`_mark_favorite`；新增 13 条 404 断言 |
+| Task 4 | `663e445` | 前端 8 文件移除收藏入口与状态（`.card-fav-btn`、`#favBtn`、收藏夹选择弹窗、`lbFav`、`activeCollectionId`、`collection_id` 导航上下文、`galleryFavTotal`、`__lbSyncFav`、孤立 CSS） |
+
+**执行中的三处勘误（计划/侦察的漏洞，均已修）**
+
+1. **任务顺序**：实际先做 Task 2 再做 Task 1。`tests/conftest.py::clean_db` 会 `DELETE FROM collection_items`，而 v5 在同一个 session 级测试库里把表删掉 ⇒ **v5 一旦进树，所有用 clean_db 的用例都会报 `no such table`**（实测 HEAD `ba34348` 时为 `4 failed / 413 passed / 280 errors`）。因此 Task 2 的 RED→GREEN 必须在 v5 之前完成，且 **v5 必须与"删掉两张表的所有消费者"（Task 3）同批或紧邻落地**——这是"每个提交都绿"的硬约束，计划里的 Task 1 独立前置是错的。
+2. **v1 迁移需要存在性守卫（计划完全没预见到）**：模型删除后 `create_all()` 不再创建 `collection_items`，于是**全新库**（`user_version=0`）跑已发布的 v1 `ALTER TABLE collection_items ADD COLUMN position` 会抛 `no such table: collection_items`，直接让 `init_db()` 失败（每个测试的临时库都是全新库 ⇒ 实测 3 errors）。修法：v1 里加 4 行存在性判断——**表不存在时 no-op，表存在时与原版逐字节相同**，因此对任何已升级过的库行为不变；并补回归测试 `test_fresh_database_skips_legacy_collection_migration`。这触碰了"不得修改已发布版本"的边界，按"只对缺表的新库放行、对存量库零变化"处理。
+3. **两处内联 `CollectionItem` 判定是侦察漏项**：`routes_search.py::cache_item_delete` 与 `routes_prefetch.py::prefetch_tags_delete` 各自内联了收藏夹保护（不是走 `_is_user_owned`）。前者不删会 `ImportError` 导致 `import app` 与整套用例失败。删后"已下载作品仍受保护"的语义保留。
+
+**计数核对**：688 → 676 passed = 删 23 个测试函数 − 9 条 CSRF 矩阵参数 + 13 条新 404 参数 + 1 条蓝图数断言 + 1 条新迁移测试。`venv\Scripts\python -c "import app"` 通过，蓝图列表为 `download/gallery/middleware/prefetch/search/settings`（6 个）。
+
+**Task 5 待办（实施中发现的遗留）**
+
+1. `scripts/_inspect_db.py` 仍把 `collections` / `collection_items` 列在检查表里，现在运行会报错（表已不存在）。
+2. `helpers._compute_move_position` 已成死代码（唯一消费者是 `routes_collections.py`）；删它需同步清掉 `architecture.md` / `technical-documentation.md` 里的引用。
+3. `templates/settings.html` 的预取说明文案里「…删除未下载未收藏作品（未完成最终刷新的暂不淘汰）」中的「未收藏」已过时（保护判定已不含收藏），需改写成"未下载且无用户下载意图"；该句里的「最终收藏数」必须保留。
+4. 浏览器手工验收**未执行**（本环境无浏览器）；前端只做了 `node --check`、零命中 grep 与一次性 Node `vm` + 假 DOM 探针（71 断言通过），可照做的验收步骤见 Task 4 Step 4。
+
 ## 遗留与已知风险
 
 1. **不可逆的数据删除**：v5 会真的删掉 `collections` / `collection_items`。迁移前 runner 会自动备份（`backups/pixiv.db.<UTC 时间戳>.bak` + 必要时 `-wal`/`-shm`），部署时请确认该目录可写。
