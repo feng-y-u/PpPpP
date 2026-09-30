@@ -20,7 +20,7 @@ from config import (
     FETCH_DETAIL_WORKERS, CURSOR_SECRET,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from models import Illust, BlockedTag, get_session, get_favorite_pids, safe_commit
+from models import Illust, BlockedTag, get_session, safe_commit
 
 import pixiv_client
 # ── 适配层再导出（历史调用方 + 测试补丁 seam）──
@@ -627,17 +627,6 @@ def clear_search_cache() -> None:
 
 # ── 公共流水线 ──
 
-def _mark_favorite(result: dict, fav: set[int]) -> dict:
-    """按收藏集合给**单条**结果打标。
-
-    只做"命中就置 True"：没命中时保持 `to_dict()` 给的 False，绝不写别的否定值 ——
-    前端把缺失/未知与"明确未收藏"当成同一件事，写进去只会制造第二种含义。
-    """
-    if result.get('pixiv_id') in fav:
-        result['is_favorite'] = True
-    return result
-
-
 def _insert_new_illusts(db, illusts: list[Illust]) -> dict[int, Illust]:
     """批量写新作品，撞 UNIQUE（pixiv_id 已存在）时静默跳过，返回赢家 pid→行 映射。
 
@@ -703,8 +692,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             {"type": "result", "result": dict}         已通过该路径全部过滤的展示 dict
             回调只是"预览"：候选仍可能在最终批量入库时因并发冲突落空，也可能因为
             `_cancelled()`（旧任务已被新搜索取代）被跳过；可用的最终列表以返回值为准。
-            回调里不碰 SQLAlchemy session，favorite 状态用调用线程一次性取到的
-            收藏集合标记。
+            回调在 collector 线程上执行，因此里面不碰 SQLAlchemy session。
 
     Returns: `_ProcessedItems`（可直接用于 API 响应的 illust 字典列表）。
     """
@@ -715,9 +703,6 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
     fetch_stats = {'detail_fetched': 0, 'detail_failed': 0, 'seconds': 0.0}
     fetch_start = time.time()
 
-    # 收藏集合在调用线程取一次：进度回调会在任意详情完成的瞬间发布结果，每条都
-    # 查一次收藏夹就是 N 次查询；回调里也不该再碰 session（见 progress 的说明）。
-    fav_pids = get_favorite_pids(db)
     published_pids: set[int] = set()
     examined_pids: set[int] = set()
     rate_limited = False
@@ -747,7 +732,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         `_publish` 的 PID 去重保证详情回调路径已经发过的不再重发。
         """
         results.append(result)
-        _publish(_mark_favorite(result, fav_pids))
+        _publish(result)
 
     def _note_detail(pid: int, detail: dict | None) -> None:
         """详情完成的统一回调（collector 线程）：只记失败，成功由各路径自行发布。
@@ -887,7 +872,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             if item is None:
                 return
             # 只是预览：正式结果仍走下面的批量冲突容忍写入（并发窗口里可能落空）
-            _publish(_mark_favorite(illust_factory(item, detail).to_dict(), fav_pids))
+            _publish(illust_factory(item, detail).to_dict())
 
         fetch_batch = _fetch_details_parallel(
             to_fetch, early_stop=_early_stop if max_results > 0 else None,
@@ -934,7 +919,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
     # 只兜住绕过 `_append_result` 进入 `results` 的路径（被 mock 的 seam、未来重构），
     # 保证结果列表里每条至少对应一个 result 事件（靠 published_pids 去重，不会重复发）。
     for r in results:
-        _publish(_mark_favorite(r, fav_pids))
+        _publish(r)
 
     if max_results > 0:
         fetch_stats['seconds'] = time.time() - fetch_start

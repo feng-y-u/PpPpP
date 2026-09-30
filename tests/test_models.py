@@ -63,7 +63,7 @@ class TestIllustToDict:
             'id', 'pixiv_id', 'title', 'user_id', 'user_name', 'tags',
             'page_count', 'bookmark_count', 'upload_date', 'thumb_url',
             'original_urls', 'download_status',
-            'downloaded_at', 'file_size', 'is_favorite', 'created_at',
+            'downloaded_at', 'file_size', 'created_at',
         }
         assert set(d.keys()) == expected_keys
 
@@ -75,7 +75,6 @@ class TestIllustToDict:
         assert d['page_count'] == 3
         assert d['bookmark_count'] == 1500
         assert d['download_status'] is None
-        assert d['is_favorite'] is False
 
     def test_to_dict_omits_local_paths(self, clean_db, sample_illust):
         """回归：磁盘绝对路径不应出现在序列化输出中（仅模型属性保留）。"""
@@ -104,59 +103,6 @@ class TestIllustDownloadStatus:
         sample_illust.download_status = None
         safe_commit(clean_db)
         assert sample_illust.download_status is None
-
-
-class TestPositionMigration:
-    def test_position_column_exists(self, clean_db):
-        import models
-        with models.engine.connect() as conn:
-            cols = [r[1] for r in conn.exec_driver_sql('PRAGMA table_info(collection_items)').fetchall()]
-        assert 'position' in cols
-
-    def test_migration_assigns_positions_by_created_at(self, clean_db):
-        import models as m
-        from datetime import datetime, timezone, timedelta
-        base = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        coll = m.Collection(name='test-coll-mig')
-        clean_db.add(coll); clean_db.commit()
-        for i in range(3):
-            ci = m.CollectionItem(collection_id=coll.id, pixiv_id=10000 + i)
-            ci.created_at = base + timedelta(seconds=i)
-            ci.position = 0.0
-            clean_db.add(ci)
-        clean_db.commit()
-        with m.engine.connect() as conn:
-            conn.exec_driver_sql('PRAGMA user_version = 0')
-            conn.commit()
-        m.init_db()
-        with m.get_session() as s:
-            items = s.query(m.CollectionItem).filter(
-                m.CollectionItem.collection_id == coll.id
-            ).order_by(m.CollectionItem.position).all()
-        assert [it.position for it in items] == [1000.0, 2000.0, 3000.0]
-        assert [it.pixiv_id for it in items] == [10000, 10001, 10002]
-
-    def test_migration_is_idempotent_on_restart(self, clean_db):
-        import models as m
-        coll = m.Collection(name='test-coll-idem')
-        clean_db.add(coll); clean_db.commit()
-        ci = m.CollectionItem(collection_id=coll.id, pixiv_id=20000, position=42.0)
-        clean_db.add(ci); clean_db.commit()
-        m.init_db()
-        with m.get_session() as s:
-            it = s.query(m.CollectionItem).filter(m.CollectionItem.pixiv_id == 20000).one()
-        assert it.position == 42.0
-
-
-class TestIllustToDictFavoriteOverride:
-    def test_to_dict_uses_provided_favorite(self, clean_db):
-        from models import Illust
-        il = Illust(pixiv_id=808, title='t')
-        clean_db.add(il); clean_db.commit()
-        d = il.to_dict(favorite=True)
-        assert d['is_favorite'] is True
-        d2 = il.to_dict(favorite=False)
-        assert d2['is_favorite'] is False
 
 
 class TestIsRemoved:

@@ -24,7 +24,7 @@ config.PREFETCH_INTERVAL = 0
 
 import pytest
 
-from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, Collection, CollectionItem, SearchCache
+from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, SearchCache
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def db(app):
 @pytest.fixture
 def clean_db(db):
     """Clean all tables before the test."""
-    for table in [BlockedTag, DownloadLog, CollectionItem, Collection, Illust, SearchCache]:
+    for table in [BlockedTag, DownloadLog, Illust, SearchCache]:
         db.query(table).delete()
     db.commit()
     # 重置图库性能缓存（目录扫描 / 孤儿全表 pid），避免测试间脏数据残留

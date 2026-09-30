@@ -13,7 +13,7 @@ import requests
 import fetcher
 import pixiv_client
 from config import ITEMS_PER_PAGE, PER_PAGE
-from models import BlockedTag, Collection, CollectionItem, Illust
+from models import BlockedTag, Illust
 
 
 class TestDetailRateLimiter:
@@ -431,12 +431,6 @@ class TestDetailProgressPublication:
 
     def test_process_items_publishes_only_filter_matches(self, clean_db, _cookie_file):
         """result 事件只发通过屏蔽标签/收藏数/R18 的记录；详情失败只发 detail_failed。"""
-        clean_db.add(Collection(name='我的收藏'))
-        clean_db.commit()
-        fav = clean_db.query(Collection).filter(Collection.name == '我的收藏').first()
-        clean_db.add(CollectionItem(collection_id=fav.id, pixiv_id=11))
-        clean_db.commit()
-
         def fake_detail(session, pixiv_id, limiter=None):
             if pixiv_id == 15:                              # 详情失败：不该发 result
                 return None
@@ -462,7 +456,7 @@ class TestDetailProgressPublication:
         assert results.rate_limited is False
         published = [e['result'] for e in events if e['type'] == 'result'][0]
         assert published['bookmark_count'] == 600
-        assert published['is_favorite'] is True, '收藏状态要按调用线程取到的收藏集合打标'
+        assert 'is_favorite' not in published, '本地收藏已移除，结果里不该再出现 is_favorite'
 
     def test_defer_path_publishes_summary_without_detail_requests(self, clean_db):
         """defer 路径（标签/发现/关注）直接用条目摘要发布，不为进度多拉一次详情。"""

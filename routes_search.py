@@ -19,7 +19,7 @@ from config import ITEMS_PER_PAGE, MAX_BOOKMARKS_DEFAULT
 from fetcher import PixivAuthError, decode_cursor, fetch_following
 from helpers import _safe_int, query_cached_tag
 from middleware import _csrf_required
-from models import CollectionItem, Illust, SearchCache, get_session, safe_commit
+from models import Illust, SearchCache, get_session, safe_commit
 from runtime import _search_tasks, _search_tasks_lock
 
 logger = logging.getLogger(__name__)
@@ -489,8 +489,6 @@ def cache_item_delete(pixiv_id: int) -> Response:
             return jsonify({'error': '作品不在预取缓存中'}), 404
         if illust.download_status in ('done', 'downloading') or illust.local_paths_list:
             return jsonify({'error': '已下载/下载中的作品请在图库中处理'}), 400
-        if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).first():
-            return jsonify({'error': '已收藏的作品不能从缓存删除'}), 400
         _remove_pids_from_search_caches(db, [pixiv_id])
         db.delete(illust)
         safe_commit(db)

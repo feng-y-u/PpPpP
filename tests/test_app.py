@@ -35,8 +35,8 @@ class TestIndexRoute:
 def _route_shape(route: str) -> str:
     """把路由占位符（`<int:pixiv_id>`）与具体 id 都抹掉，便于矩阵与源码对账。
 
-    `/api/collections/<int:collection_id>` 与矩阵里的 `/api/collections/999999`
-    归一后都是 `/api/collections/`。
+    `/api/gallery/<int:pixiv_id>` 与矩阵里的 `/api/gallery/999999`
+    归一后都是 `/api/gallery/`。
     """
     return re.sub(r'\d+', '', re.sub(r'<[^>]+>', '', route))
 
@@ -54,7 +54,7 @@ class TestCsrfProtection:
         assert len(data['token']) == 32
 
     # 全部修改型端点（POST/PUT/DELETE）必须挂 @_csrf_required。
-    # 参数是"有副作用的真实请求"：漏挂装饰器的端点会真的执行下去（例如删掉收藏夹、
+    # 参数是"有副作用的真实请求"：漏挂装饰器的端点会真的执行下去（例如删除已下载作品、
     # 写 settings.json），所以用例只用必然无效的 ID/空 body —— 万一哪天装饰器被摘掉，
     # 这里会变成 404/400 而不是 403，测试失败且不会造成破坏。
     MUTATING_ENDPOINTS = [
@@ -64,14 +64,6 @@ class TestCsrfProtection:
         ('POST', '/api/blocked-tags'),
         ('DELETE', '/api/blocked-tags/999999'),
         ('POST', '/api/auto-follow/config'),
-        ('POST', '/api/collections'),
-        ('PUT', '/api/collections/999999'),
-        ('DELETE', '/api/collections/999999'),
-        ('POST', '/api/collections/999999/items'),
-        ('DELETE', '/api/collections/999999/items/999999'),
-        ('POST', '/api/collections/999999/items/batch'),
-        ('DELETE', '/api/collections/999999/items/batch'),
-        ('POST', '/api/collections/999999/items/999999/move'),
         ('POST', '/download/999999'),
         ('POST', '/api/download/batch'),
         ('POST', '/download/cancel/999999'),
@@ -80,7 +72,6 @@ class TestCsrfProtection:
         ('POST', '/api/gallery/batch-delete'),
         ('DELETE', '/api/thumb/redirect-hosts'),
         ('POST', '/api/open-dir'),
-        ('POST', '/api/favorite/999999'),
         ('POST', '/api/prefetch/config'),
         ('POST', '/api/prefetch/tags'),
         ('DELETE', '/api/prefetch/tags/999999'),
@@ -827,284 +818,45 @@ class TestSessionFactory:
         assert 'PHPSESSID=test' in s.headers['Cookie']
 
 
-class TestCollectionItemPositionAssignment:
-    def _token(self, client):
-        return client.get('/csrf-token').get_json()['token']
+class TestCollectionApiRemoved:
+    """收藏夹端点整体移除后必须 404（不是 500/403/302）。
 
-    def _create_coll(self, client):
-        token = self._token(client)
-        r = client.post('/api/collections',
-                        data=json.dumps({'name': 'pos-test'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        return r.get_json()['id'], token
+    只断言"某个 URL 不通"证明不了路由删干净了：忘注册蓝图是 404，但视图内部引用
+    已删模型会变成 500，装饰器/中间件拦下会变成 403 —— 后两者都会掩盖"端点还在"。
+    这里按 spec 的端点清单逐条钉住方法+路径，并断言蓝图不再注册。
+    """
 
-    def test_first_item_gets_1000(self, client, clean_db):
-        cid, token = self._create_coll(client)
-        r = client.post(f'/api/collections/{cid}/items',
-                        data=json.dumps({'pixiv_id': 70001}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 201
-        assert r.get_json()['position'] == 1000.0
+    REMOVED_ENDPOINTS = [
+        ('GET', '/api/collections'),
+        ('POST', '/api/collections'),
+        ('PUT', '/api/collections/999999'),
+        ('DELETE', '/api/collections/999999'),
+        ('GET', '/api/collections/999999/items'),
+        ('POST', '/api/collections/999999/items'),
+        ('DELETE', '/api/collections/999999/items/999999'),
+        ('POST', '/api/collections/999999/items/batch'),
+        ('DELETE', '/api/collections/999999/items/batch'),
+        ('POST', '/api/collections/999999/items/999999/move'),
+        ('GET', '/api/illust/999999/collections'),
+        ('GET', '/api/favorite/999999'),
+        ('POST', '/api/favorite/999999'),
+    ]
 
-    def test_second_item_gets_2000(self, client, clean_db):
-        cid, token = self._create_coll(client)
-        client.post(f'/api/collections/{cid}/items',
-                    data=json.dumps({'pixiv_id': 70001}),
-                    content_type='application/json',
-                    headers={'X-CSRF-Token': token})
-        r = client.post(f'/api/collections/{cid}/items',
-                        data=json.dumps({'pixiv_id': 70002}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 201
-        assert r.get_json()['position'] == 2000.0
-
-    def test_batch_add_increments(self, client, clean_db):
-        cid, token = self._create_coll(client)
-        r = client.post(f'/api/collections/{cid}/items/batch',
-                        data=json.dumps({'pixiv_ids': [70010, 70011, 70012]}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200
-        import models
-        with models.get_session() as s:
-            items = s.query(models.CollectionItem).filter(
-                models.CollectionItem.collection_id == cid
-            ).order_by(models.CollectionItem.pixiv_id).all()
-        assert sorted(it.position for it in items) == [1000.0, 2000.0, 3000.0]
-
-    def test_list_returns_by_position(self, client, clean_db):
-        import models
-        coll = models.Collection(name='list-order-test')
-        clean_db.add(coll); clean_db.commit()
-        for pid, pos in [(30100, 3000.0), (30101, 1000.0), (30102, 2000.0)]:
-            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
-        clean_db.commit()
-        r = client.get(f'/api/collections/{coll.id}/items?limit=10')
-        assert r.status_code == 200
-        data = r.get_json()
-        assert [d['pixiv_id'] for d in data['data']] == [30101, 30102, 30100]
-
-
-class TestGalleryPositionOrder:
-    def test_gallery_orders_by_position_when_collection(self, client, clean_db):
-        import models
-        coll = models.Collection(name='gallery-pos')
-        clean_db.add(coll); clean_db.commit()
-        pids = [40001, 40002, 40003]
-        for pid in pids:
-            il = models.Illust(pixiv_id=pid, title=f'p{pid}', download_status='done')
-            clean_db.add(il)
-        clean_db.commit()
-        positions = {40001: 3000.0, 40002: 1000.0, 40003: 2000.0}
-        for pid, pos in positions.items():
-            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
-        clean_db.commit()
-        r = client.get(f'/api/gallery?collection_id={coll.id}&limit=10')
-        assert r.status_code == 200
-        data = r.get_json()
-        returned_pids = [item['pixiv_id'] for item in data['data'] if item.get('pixiv_id') in pids]
-        assert returned_pids == [40002, 40003, 40001]
-
-
-class TestCollectionItemMove:
-    def _token(self, client):
-        return client.get('/csrf-token').get_json()['token']
-
-    def _setup(self, client, clean_db, n=3):
-        import models
-        coll = models.Collection(name='move-test')
-        clean_db.add(coll); clean_db.commit()
-        token = self._token(client)
-        for i in range(n):
-            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=50000 + i,
-                                               position=(i + 1) * 1000.0))
-        clean_db.commit()
-        return coll.id, token
-
-    def test_move_up_inserts_midpoint(self, client, clean_db):
-        cid, token = self._setup(client, clean_db)  # [50000@1000, 50001@2000, 50002@3000]
-        r = client.post(f'/api/collections/{cid}/items/50002/move',
-                        data=json.dumps({'direction': 'up'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200
-        assert r.get_json()['position'] == 1500.0
-        assert r.get_json()['rebalanced'] is False
-        import models
-        with models.get_session() as s:
-            order = [it.pixiv_id for it in s.query(models.CollectionItem)
-                     .filter(models.CollectionItem.collection_id == cid)
-                     .order_by(models.CollectionItem.position).all()]
-        assert order == [50000, 50002, 50001]
-
-    def test_move_up_to_top_when_second(self, client, clean_db):
-        cid, token = self._setup(client, clean_db, n=2)
-        r = client.post(f'/api/collections/{cid}/items/50001/move',
-                        data=json.dumps({'direction': 'up'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200
-        assert r.get_json()['position'] == 0.0
-
-    def test_move_up_on_first_returns_400(self, client, clean_db):
-        cid, token = self._setup(client, clean_db)
-        r = client.post(f'/api/collections/{cid}/items/50000/move',
-                        data=json.dumps({'direction': 'up'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 400
-
-    def test_move_down_on_last_returns_400(self, client, clean_db):
-        cid, token = self._setup(client, clean_db)
-        r = client.post(f'/api/collections/{cid}/items/50002/move',
-                        data=json.dumps({'direction': 'down'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 400
-
-    def test_move_down_two_items(self, client, clean_db):
-        cid, token = self._setup(client, clean_db, n=2)
-        r = client.post(f'/api/collections/{cid}/items/50000/move',
-                        data=json.dumps({'direction': 'down'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200
-        assert r.get_json()['position'] == 3000.0
-
-    def test_optimistic_lock_valid(self, client, clean_db):
-        cid, token = self._setup(client, clean_db)
-        import models
-        with models.engine.connect() as conn:
-            r = conn.execute(text(
-                'UPDATE collection_items SET position=:np WHERE collection_id=:c AND pixiv_id=:p AND position=:op'
-            ), {'np': 555.0, 'c': cid, 'p': 50002, 'op': 3000.0})
-            conn.commit()
-            assert r.rowcount == 1
-        with models.engine.connect() as conn:
-            r = conn.execute(text(
-                'UPDATE collection_items SET position=:np WHERE collection_id=:c AND pixiv_id=:p AND position=:op'
-            ), {'np': 555.0, 'c': cid, 'p': 50002, 'op': 9999.0})
-            conn.commit()
-            assert r.rowcount == 0
-
-    def test_move_rebalance_uses_refreshed_position(self, client, clean_db):
-        """回归：重排后条目位置已变化时，乐观锁须用重排后的新位置（曾误报 409）。"""
-        import models
-        coll = models.Collection(name='reb-test2')
-        clean_db.add(coll); clean_db.commit()
-        # 三个紧密间距（gap<1.0）→ 移动必触发 rebalance，且 70003 重排后位置会变化
-        for pid, pos in [(70001, 1000.0), (70002, 1000.4), (70003, 1000.8)]:
-            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
-        clean_db.commit()
-        token = self._token(client)
-        r = client.post(f'/api/collections/{coll.id}/items/70003/move',
-                        data=json.dumps({'direction': 'up'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200, r.get_json()
-        assert r.get_json()['rebalanced'] is True
-        with models.get_session() as s:
-            items = s.query(models.CollectionItem).filter(
-                models.CollectionItem.collection_id == coll.id
-            ).order_by(models.CollectionItem.position).all()
-        assert [it.pixiv_id for it in items] == [70001, 70003, 70002]
-
-        import models
-        coll = models.Collection(name='reb-test')
-        clean_db.add(coll); clean_db.commit()
-        for pid, pos in [(70001, 1000.0), (70002, 1000.4), (70003, 3000.0)]:
-            clean_db.add(models.CollectionItem(collection_id=coll.id, pixiv_id=pid, position=pos))
-        clean_db.commit()
-        token = self._token(client)
-        r = client.post(f'/api/collections/{coll.id}/items/70003/move',
-                        data=json.dumps({'direction': 'up'}),
-                        content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200
-        assert r.get_json()['rebalanced'] is True
-        with models.get_session() as s:
-            items = s.query(models.CollectionItem).filter(
-                models.CollectionItem.collection_id == coll.id
-            ).order_by(models.CollectionItem.position).all()
-        assert [it.pixiv_id for it in items] == [70001, 70003, 70002]
-        assert [it.position for it in items] == [1000.0, 1500.0, 2000.0]
-
-
-class TestFavoriteMembershipContract:
-    def _default_coll(self, clean_db):
-        import models
-        c = models.Collection(name='我的收藏')
-        clean_db.add(c); clean_db.commit()
-        return c.id
-
-    def test_gallery_favorites_only_returns_membership(self, client, clean_db):
-        import models
-        default_id = self._default_coll(clean_db)
-        for pid in [90001, 90002, 90003]:
-            clean_db.add(models.Illust(pixiv_id=pid, title=f'p{pid}', download_status='done'))
-        clean_db.commit()
-        clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90002, position=1000.0))
-        clean_db.commit()
-        r = client.get('/api/gallery?favorites=true&limit=10')
-        assert r.status_code == 200
-        data = r.get_json()
-        returned = {item['pixiv_id'] for item in data['data']}
-        assert 90002 in returned
-        assert 90001 not in returned
-        assert 90003 not in returned
-        assert data['favorite_total'] > 0
-
-    def test_detail_page_reflects_favorite_membership(self, client, clean_db):
-        """回归：详情页收藏按钮初始状态须反映'我的收藏'归属（曾恒为未收藏）。"""
-        import models
-        default_id = self._default_coll(clean_db)
-        # 必须预置 original_urls：/detail 在该列为空时会惰性调
-        # _fetch_original_urls() 走真实网络，离线时单次 60s+ 把整轮套件拖到 140s。
-        for pid, title in ((90060, 'fav-item'), (90061, 'plain-item')):
-            item = models.Illust(pixiv_id=pid, title=title, download_status='done')
-            item.original_urls_list = [f'https://i.pximg.net/img-original/img/x/{pid}_p0.jpg']
-            clean_db.add(item)
-        clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90060, position=1000.0))
-        clean_db.commit()
-
-        fav = client.get('/detail/90060')
-        assert fav.status_code == 200
-        assert 'is_favorite": true' in fav.get_data(as_text=True) or '"is_favorite": true' in fav.get_data(as_text=True)
-        plain = client.get('/detail/90061')
-        assert plain.status_code == 200
-        assert '"is_favorite": false' in plain.get_data(as_text=True)
-
-    def test_favorite_get_returns_membership(self, client, clean_db):
-        import models
-        default_id = self._default_coll(clean_db)
-        clean_db.add(models.Illust(pixiv_id=90050, title='t', download_status='done'))
-        clean_db.commit()
-        r = client.get('/api/favorite/90050')
-        assert r.status_code == 200
-        assert r.get_json()['is_favorite'] is False
-        clean_db.add(models.CollectionItem(collection_id=default_id, pixiv_id=90050, position=1000.0))
-        clean_db.commit()
-        r2 = client.get('/api/favorite/90050')
-        assert r2.get_json()['is_favorite'] is True
-
-    def test_favorite_post_toggles_membership(self, client, clean_db):
-        import models
-        self._default_coll(clean_db)
+    @pytest.mark.parametrize('method,path', REMOVED_ENDPOINTS,
+                             ids=[f'{m} {p}' for m, p in REMOVED_ENDPOINTS])
+    def test_removed_collection_endpoints_return_404(self, client, method, path):
+        # 带合法 CSRF token 与 body：403/400 都不算通过，只有"路由不存在"才是 404
         token = client.get('/csrf-token').get_json()['token']
-        clean_db.add(models.Illust(pixiv_id=90080, title='t', download_status='done'))
-        clean_db.commit()
-        r = client.post('/api/favorite/90080',
-                        data='{}', content_type='application/json',
-                        headers={'X-CSRF-Token': token})
-        assert r.status_code == 200
-        assert r.get_json()['is_favorite'] is True
-        r2 = client.post('/api/favorite/90080',
-                         data='{}', content_type='application/json',
-                         headers={'X-CSRF-Token': token})
-        assert r2.get_json()['is_favorite'] is False
+        resp = client.open(path, method=method, json={},
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 404, f'{method} {path} 仍被注册'
+
+    def test_collections_blueprint_not_registered(self, app):
+        """蓝图数 7 → 6：collections 蓝图必须整块摘掉，而不是留着空蓝图。"""
+        assert 'collections' not in app.blueprints
+        assert sorted(app.blueprints) == [
+            'download', 'gallery', 'middleware', 'prefetch', 'search', 'settings',
+        ]
 
 
 class TestGalleryTriggersBookmarkFill:
@@ -1166,32 +918,6 @@ class TestGalleryR18Filter:
         assert resp.status_code == 200
         pids = [d['pixiv_id'] for d in resp.get_json()['data']]
         assert 95001 in pids and 95002 in pids and 95003 in pids
-
-    def test_gallery_r18_filter_applies_to_collection_view(self, client, clean_db):
-        coll = models.Collection(name='col-r18')
-        clean_db.add(coll)
-        clean_db.commit()
-        r18 = models.Illust(pixiv_id=95011, title='r18', download_status='done')
-        r18.tags_list = ['R-18']
-        safe = models.Illust(pixiv_id=95012, title='safe', download_status='done')
-        safe.tags_list = ['original']
-        clean_db.add_all([r18, safe])
-        clean_db.commit()
-        clean_db.add_all([
-            models.CollectionItem(collection_id=coll.id, pixiv_id=95011, position=1000.0),
-            models.CollectionItem(collection_id=coll.id, pixiv_id=95012, position=2000.0),
-        ])
-        clean_db.commit()
-
-        resp = client.get(f'/api/gallery?collection_id={coll.id}&limit=10')
-        assert resp.status_code == 200
-        pids = [d['pixiv_id'] for d in resp.get_json()['data']]
-        assert pids == [95012]
-
-        resp = client.get(f'/api/gallery?collection_id={coll.id}&limit=10&r18=all')
-        assert resp.status_code == 200
-        pids = [d['pixiv_id'] for d in resp.get_json()['data']]
-        assert pids == [95011, 95012]
 
 
 class TestFollowingRouteR18:

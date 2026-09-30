@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import create_engine, event, Boolean, Float, Integer, String, Text, DateTime, Index, ForeignKey, UniqueConstraint
+from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, Index
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -121,7 +121,7 @@ class Illust(Base):
         else:
             self.local_paths = json.dumps(value, ensure_ascii=False)
 
-    def to_dict(self, favorite: bool = False) -> dict:
+    def to_dict(self) -> dict:
         return {
             'id': self.id,
             'pixiv_id': self.pixiv_id,
@@ -139,7 +139,6 @@ class Illust(Base):
             'download_status': self.download_status,
             'downloaded_at': self.downloaded_at.isoformat() if self.downloaded_at else None,
             'file_size': self.file_size,
-            'is_favorite': favorite,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -182,47 +181,6 @@ class SearchCache(Base):
     total: Mapped[int] = mapped_column(Integer, default=0)
 
 
-class Collection(Base):
-    __tablename__ = 'collections'
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    description: Mapped[str] = mapped_column(String, default='')
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    def to_dict(self) -> dict:
-        return {
-            'id': self.id,
-            'name': self.name,
-            'description': self.description,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-        }
-
-
-class CollectionItem(Base):
-    __tablename__ = 'collection_items'
-    __table_args__ = (
-        UniqueConstraint('collection_id', 'pixiv_id', name='uq_collection_item'),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    collection_id: Mapped[int] = mapped_column(Integer, ForeignKey('collections.id'), nullable=False)
-    pixiv_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    position: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-    def to_dict(self) -> dict:
-        return {
-            'id': self.id,
-            'collection_id': self.collection_id,
-            'pixiv_id': self.pixiv_id,
-            'position': self.position,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-        }
-
-
 def _rebuild_illusts_table(drop_cols: set[str]) -> None:
     """重建 illusts 表以删除列（SQLite < 3.35），保留完整 schema（PK/NOT NULL/DEFAULT）。"""
     from migrations.versions import rebuild_illusts_table
@@ -247,12 +205,3 @@ def init_db() -> None:
 
 def get_session() -> Session:
     return Session(engine)
-
-
-def get_favorite_pids(session: Session) -> set[int]:
-    """'我的收藏'收藏夹中的全部 pixiv_id（is_favorite 语义的唯一来源）。"""
-    dc = session.query(Collection).filter(Collection.name == '我的收藏').first()
-    if not dc:
-        return set()
-    return {p[0] for p in session.query(CollectionItem.pixiv_id)
-            .filter(CollectionItem.collection_id == dc.id).all()}

@@ -15,7 +15,7 @@ from sqlalchemy.exc import OperationalError
 
 import config
 from config import DOWNLOAD_DIR, MEDIUM_IMAGE_SIZE
-from models import get_session, get_favorite_pids, Illust, BlockedTag, SearchCache
+from models import get_session, Illust, BlockedTag, SearchCache
 import pixiv_client
 import runtime
 
@@ -268,7 +268,6 @@ def _build_orphan_dicts(pixiv_ids: list[int], local_items: dict[int, list[str]])
             'download_status': 'done',
             'downloaded_at': None,
             'file_size': total_size,
-            'is_favorite': False,
             'created_at': None,
         })
     return results
@@ -365,12 +364,6 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
         id_order = {id_: i for i, id_ in enumerate(pk_ids)}
         illusts.sort(key=lambda x: id_order.get(x.id, 0))
         page_dicts = [i.to_dict() for i in illusts]
-
-    if page_dicts:
-        with get_session() as fav_db:
-            fav = get_favorite_pids(fav_db)
-        for d in page_dicts:
-            d['is_favorite'] = d.get('pixiv_id') in fav
 
     has_more = (offset + limit) < total
     next_offset = offset + limit if has_more else 0
@@ -472,7 +465,7 @@ def _fmt_num(n: int | str) -> str:
     return f'{n/10000:.1f}w' if n >= 10000 else str(n)
 
 
-# ── 文件删除与收藏夹位置 ──
+# ── 文件删除与位置计算 ──
 
 def _delete_illust_files(illust: Illust) -> int:
     """删除作品的已下载文件及目录。返回删除的文件数。"""
@@ -522,13 +515,6 @@ def _delete_orphan_files(pixiv_id: int) -> int:
     except OSError:
         pass
     return deleted
-
-
-def _next_collection_position(db, collection_id: int) -> float:
-    """计算收藏夹下一个可用位置：当前最大位置 + 1000（单语句，统一三处调用）。"""
-    return float(db.execute(text(
-        'SELECT COALESCE(MAX(position), 0) + 1000.0 FROM collection_items WHERE collection_id = :cid'
-    ), {'cid': collection_id}).scalar() or 1000.0)
 
 
 def _compute_move_position(items: list, idx: int, direction: str):

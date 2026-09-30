@@ -45,7 +45,7 @@ from background import (
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
     _start_prefetch_thread, reset_prefetch_refresh,
 )
-# 路由 Blueprint（搜索/缓存/关注 + 图库/详情/图片/收藏 + 下载/预取/收藏夹/设置）；
+# 路由 Blueprint（搜索/缓存/关注 + 图库/详情/图片 + 下载/预取/设置）；
 # _cleanup_search_tasks 经 from-import 保持在 app 命名空间（tests/test_app.py 直接调用 app._cleanup_search_tasks()）；
 # _SETTINGS_PATH/_load_settings 同样保持在 app 命名空间：test_prefetch_api.py 夹具
 # monkeypatch('app._SETTINGS_PATH') 重定向 settings.json，routes_prefetch.prefetch_config_post
@@ -54,7 +54,6 @@ from routes_search import bp as search_bp, _cleanup_search_tasks
 from routes_gallery import CACHE_DIR, bp as gallery_bp
 from routes_download import bp as download_bp
 from routes_prefetch import bp as prefetch_bp
-from routes_collections import bp as collections_bp
 from routes_settings import bp as settings_bp, _SETTINGS_PATH, _load_settings
 
 logging.basicConfig(
@@ -94,7 +93,6 @@ app.register_blueprint(search_bp)
 app.register_blueprint(gallery_bp)
 app.register_blueprint(download_bp)
 app.register_blueprint(prefetch_bp)
-app.register_blueprint(collections_bp)
 app.register_blueprint(settings_bp)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)

@@ -213,6 +213,31 @@ def test_version_one_database_runs_remaining_schema_upgrade():
     assert _user_version(engine) == LATEST_SCHEMA_VERSION
 
 
+def test_fresh_database_skips_legacy_collection_migration():
+    """全新库（没有 collection_items）跑完整迁移串必须是 no-op，不能抛 "no such table"。
+
+    回归：收藏夹模型删除后 `create_all()` 不再建这两张表，v1
+    `migrate_collection_positions` 的 `ALTER TABLE collection_items` 会直接炸掉
+    `init_db()`（全新安装 + 每个测试的临时库都会起不来）。v1 因此加了存在性检查，
+    无表可迁移时直接返回；本用例把这条件钉死。
+    """
+    engine = create_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE illusts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pixiv_id INTEGER NOT NULL UNIQUE,
+                title VARCHAR DEFAULT ''
+            )
+            """
+        )
+
+    run_migrations(engine, MIGRATIONS)
+
+    assert _user_version(engine) == LATEST_SCHEMA_VERSION
+
+
 def test_collection_drop_migration_removes_tables_and_keeps_illusts(tmp_path):
     """v5：带收藏夹数据的旧库升级后两张表消失、illusts 不动、可重复执行、有备份。"""
     database = tmp_path / "pixiv.db"

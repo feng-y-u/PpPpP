@@ -14,8 +14,7 @@ from background import _collect_other_tag_pids, get_background_health
 from fetcher import get_detail_error_samples
 from helpers import _atomic_write_json
 from middleware import _csrf_required, _get_json_body
-from models import (CollectionItem, Illust, SearchCache, get_session,
-                    safe_commit)
+from models import Illust, SearchCache, get_session, safe_commit
 from runtime import _prefetch_state
 
 bp = Blueprint('prefetch', __name__)
@@ -125,8 +124,6 @@ def prefetch_tags_delete(tag: str) -> Response:
             if illust is None or not illust.prefetch_source:
                 continue
             if illust.download_status in ('done', 'downloading') or illust.local_paths_list:
-                continue
-            if db.query(CollectionItem).filter(CollectionItem.pixiv_id == pid).first():
                 continue
             deletable.append(pid)
 

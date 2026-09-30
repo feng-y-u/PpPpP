@@ -69,6 +69,15 @@ def _drop_illust_columns(conn: Connection, columns: set[str]) -> None:
 
 
 def migrate_collection_positions(conn: Connection) -> None:
+    # 表不存在就跳过：收藏夹移除后 `create_all()` 不再建 `collection_items`，于是
+    # 全新库（user_version=0）与已跑过 v5 的库都没有这张表，原来的 ALTER 会直接抛
+    # "no such table" 让 init_db() 起不来。对**仍然存在该表的旧库**本函数行为与发布
+    # 时逐字一致 —— 存在性检查只影响"无表可迁移"这一种调用方。
+    if conn.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_items'"
+    ).first() is None:
+        return
+
     columns = _column_names(conn, "collection_items")
     if "position" not in columns:
         conn.exec_driver_sql(

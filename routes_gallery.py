@@ -1,6 +1,6 @@
-# ── 图库 / 详情 / 图片 / 收藏 路由 ──
-# /thumb、/api/image、/detail、/gallery、/api/gallery*、/api/favorite、
-# /api/open-dir、/api/illust/<pid>/collections 路由。
+# ── 图库 / 详情 / 图片 路由 ──
+# /thumb、/api/image、/detail、/gallery、/api/gallery*、
+# /api/open-dir 路由。
 from __future__ import annotations
 
 import hashlib
@@ -23,12 +23,10 @@ from config import IMAGE_HOST_ALLOWLIST, THUMB_REDIRECT_DISCOVERY, _instance_dir
 from fetcher import PixivAuthError, get_pooled_session, reset_pooled_session
 from helpers import (_build_orphan_dicts, _delete_illust_files, _delete_orphan_files,
                      _extract_ext, _fetch_original_urls, _fmt_num, _get_download_dir,
-                     _next_collection_position, _original_to_resized,
-                     _page_sort_key, _proxy_thumb, _scan_local_downloads,
-                     check_image_url, enforce_image_cache_limit)
+                     _original_to_resized, _page_sort_key, _proxy_thumb,
+                     _scan_local_downloads, check_image_url, enforce_image_cache_limit)
 from middleware import _csrf_required, _get_csrf_token, _get_json_body
-from models import (BlockedTag, Collection, CollectionItem, DownloadLog,
-                    Illust, get_favorite_pids, get_session, safe_commit)
+from models import (BlockedTag, DownloadLog, Illust, get_session, safe_commit)
 from runtime import (_DB_PIDS_CACHE_TTL, _THUMB_FAIL_COOLDOWN, _db_pids_cache,
                      _scan_cache, _thumb_failed, _thumb_failed_lock, _thumb_sem)
 
@@ -254,7 +252,7 @@ def detail_page(pixiv_id: int) -> str:
         if not illust:
             abort(404)
 
-        data = illust.to_dict(favorite=(pixiv_id in get_favorite_pids(db)))
+        data = illust.to_dict()
         paths = illust.local_paths_list or []
         local_urls = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
 
@@ -336,8 +334,6 @@ def api_gallery() -> Response:
     tag_filter = request.args.get('tag', '').strip()
     limit = request.args.get('limit', 50, type=int)
     offset = request.args.get('offset', 0, type=int)
-    favorites_only = request.args.get('favorites', '').lower() == 'true'
-    collection_id = request.args.get('collection_id', type=int)
     sort = request.args.get('sort', 'created')
     if sort not in ('created', 'downloaded'):
         sort = 'created'
@@ -349,25 +345,12 @@ def api_gallery() -> Response:
     if r18_mode not in ('all', 'safe'):
         r18_mode = 'safe'
 
-    is_collection_view = collection_id is not None
-
     # 扫描本地 downloads 目录
     local_items = _scan_local_downloads()
     local_pids = sorted(local_items.keys(), reverse=True)
 
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
-
-        default_cid = None
-        default_fav_set: set[int] = set()
-        if not collection_id:
-            dc = db.query(Collection).filter(Collection.name == '我的收藏').first()
-            if dc:
-                default_cid = dc.id
-                pids = db.query(CollectionItem.pixiv_id).filter(
-                    CollectionItem.collection_id == dc.id
-                ).all()
-                default_fav_set = {p[0] for p in pids}
 
         if local_pids:
             # 本地 pid 可能数千：分片拼 IN，避免超过 SQLite 绑定变量上限
@@ -400,56 +383,28 @@ def api_gallery() -> Response:
         if tag_filter:
             wheres.append('EXISTS (SELECT 1 FROM json_each(illusts.tags) AS je WHERE je.value = :tag_filter)')
             params['tag_filter'] = tag_filter
-        if favorites_only:
-            if default_cid is not None:
-                wheres.append('illusts.pixiv_id IN (SELECT pixiv_id FROM collection_items WHERE collection_id = :default_cid)')
-                params['default_cid'] = default_cid
-            else:
-                wheres.append('0 = 1')
 
         where_clause = ' AND '.join(wheres)
 
         total: int = 0
-        fav_total: int = 0
         pk_ids: list[int] = []
 
         # 查询执行闭包：COUNT + 本页 pk_ids。
         # json_each(illusts.tags) 遇到单条非法 JSON 会抛 OperationalError，
         # 外层捕获后降级去掉标签相关过滤重试（数据损坏兜底，不让整页 500）。
         def _run_gallery_queries(wc: str, p: dict) -> None:
-            nonlocal total, fav_total, pk_ids
+            nonlocal total, pk_ids
             page_params = {**p, 'lim': limit, 'off': offset}
-            if is_collection_view:
-                p['collection_id'] = collection_id
-                page_params['collection_id'] = collection_id
-                row = db.execute(
-                    text(f'SELECT COUNT(*) FROM illusts '
-                         f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
-                         f'WHERE collection_items.collection_id = :collection_id AND {wc}'),
-                    p
-                ).one()
-                total = row[0] or 0
-                fav_total = 0
-                pk_ids = db.execute(
-                    text(f'SELECT illusts.id FROM illusts '
-                         f'JOIN collection_items ON collection_items.pixiv_id = illusts.pixiv_id '
-                         f'WHERE collection_items.collection_id = :collection_id AND {wc} '
-                         f'ORDER BY collection_items.position ASC '
-                         f'LIMIT :lim OFFSET :off'),
-                    page_params
-                ).scalars().all()
-            else:
-                row = db.execute(
-                    text(f'SELECT COUNT(*) AS total FROM illusts WHERE {wc}'),
-                    p
-                ).one()
-                total = row[0] or 0
-                fav_total = 0
-                order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
-                pk_ids = db.execute(
-                    text(f'SELECT id FROM illusts WHERE {wc} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
-                    page_params
-                ).scalars().all()
+            row = db.execute(
+                text(f'SELECT COUNT(*) AS total FROM illusts WHERE {wc}'),
+                p
+            ).one()
+            total = row[0] or 0
+            order_col = 'downloaded_at DESC' if sort == 'downloaded' else 'created_at DESC'
+            pk_ids = db.execute(
+                text(f'SELECT id FROM illusts WHERE {wc} ORDER BY {order_col} LIMIT :lim OFFSET :off'),
+                page_params
+            ).scalars().all()
 
         try:
             _run_gallery_queries(where_clause, params)
@@ -472,7 +427,7 @@ def api_gallery() -> Response:
                 total_size = sum(os.path.getsize(p) for p in paths if os.path.isfile(p))
                 if total_size:
                     i.file_size = total_size
-            d = i.to_dict(favorite=(i.pixiv_id in default_fav_set))
+            d = i.to_dict()
             d['file_count'] = len(paths)
             d['local_urls'] = [f'/api/image/{i.pixiv_id}/{n}' for n in range(len(paths))]
             results.append(d)
@@ -487,30 +442,26 @@ def api_gallery() -> Response:
         # 或未通过过滤条件的 DB 作品会被误判为孤儿，生成"只有作品号"的简陋卡片，
         # 与正常卡片重复展示（同一作品两张卡片），且 total 被重复计算。
         # 全表 pid 集合带 TTL 缓存：illusts 表总量通常远大于已下载数，避免每请求全表加载。
-        if not collection_id and not favorites_only:
-            now = time.time()
-            if now - _db_pids_cache['ts'] >= _DB_PIDS_CACHE_TTL:
-                with get_session() as cache_db:
-                    pids = {r[0] for r in cache_db.query(Illust.pixiv_id).all()}
-                # 先 data 后 ts，且两者都放在查询完成之后：旧写法在查询期间就把
-                # ts 推新，那段时间里并发请求会读到"新鲜的 ts + 旧（甚至空的）
-                # data"，把所有已下载作品误判成孤儿 —— 同一作品渲染出两张卡片、
-                # total 翻倍。这个窗口是整条查询的耗时，不是几微秒。
-                _db_pids_cache['data'] = pids
-                _db_pids_cache['ts'] = now
-            orphan_pids = sorted(set(local_pids) - _db_pids_cache['data'], reverse=True)
-            orphan_results = _build_orphan_dicts(orphan_pids, local_items)
-            total += len(orphan_results)
-            results.extend(orphan_results[:max(0, limit - len(results))])
-
-        fav_total = total if favorites_only else sum(1 for r in results if r.get('pixiv_id') in default_fav_set)
+        now = time.time()
+        if now - _db_pids_cache['ts'] >= _DB_PIDS_CACHE_TTL:
+            with get_session() as cache_db:
+                pids = {r[0] for r in cache_db.query(Illust.pixiv_id).all()}
+            # 先 data 后 ts，且两者都放在查询完成之后：旧写法在查询期间就把
+            # ts 推新，那段时间里并发请求会读到"新鲜的 ts + 旧（甚至空的）
+            # data"，把所有已下载作品误判成孤儿 —— 同一作品渲染出两张卡片、
+            # total 翻倍。这个窗口是整条查询的耗时，不是几微秒。
+            _db_pids_cache['data'] = pids
+            _db_pids_cache['ts'] = now
+        orphan_pids = sorted(set(local_pids) - _db_pids_cache['data'], reverse=True)
+        orphan_results = _build_orphan_dicts(orphan_pids, local_items)
+        total += len(orphan_results)
+        results.extend(orphan_results[:max(0, limit - len(results))])
 
         safe_commit(db)
 
         return jsonify({
             'data': results,
             'total': total,
-            'favorite_total': fav_total,
             'has_more': offset + limit < total,
         })
 
@@ -600,14 +551,7 @@ def batch_delete_gallery() -> Response:
     })
 
 
-# ── 收藏与打开目录 ──
-
-@bp.route('/api/illust/<int:pixiv_id>/collections')
-def illust_collections(pixiv_id: int) -> Response:
-    with get_session() as db:
-        items = db.query(CollectionItem).filter(CollectionItem.pixiv_id == pixiv_id).all()
-        return jsonify([item.collection_id for item in items])
-
+# ── 重定向观测与打开目录 ──
 
 @bp.route('/api/thumb/redirect-hosts')
 def thumb_redirect_hosts_get() -> Response:
@@ -659,44 +603,3 @@ def api_open_dir() -> Response:
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
-@bp.route('/api/favorite/<int:pixiv_id>', methods=['GET'])
-def api_favorite_get(pixiv_id: int) -> Response:
-    with get_session() as db:
-        default = db.query(Collection).filter(Collection.name == '我的收藏').first()
-        if not default:
-            return jsonify({'is_favorite': False})
-        exists = db.query(CollectionItem).filter(
-            CollectionItem.collection_id == default.id,
-            CollectionItem.pixiv_id == pixiv_id,
-        ).first() is not None
-        return jsonify({'is_favorite': exists})
-
-
-@bp.route('/api/favorite/<int:pixiv_id>', methods=['POST'])
-@_csrf_required
-def api_favorite_post(pixiv_id: int) -> Response:
-    """切换'我的收藏'收藏夹中的归属。"""
-    with get_session() as db:
-        illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-        if not illust:
-            return jsonify({'error': '作品不存在'}), 404
-        default = db.query(Collection).filter(Collection.name == '我的收藏').first()
-        if not default:
-            return jsonify({'error': '默认收藏夹不存在'}), 500
-        existing = db.query(CollectionItem).filter(
-            CollectionItem.collection_id == default.id,
-            CollectionItem.pixiv_id == pixiv_id,
-        ).first()
-        if existing:
-            db.delete(existing)
-            safe_commit(db)
-            return jsonify({'is_favorite': False})
-        else:
-            db.add(CollectionItem(
-                collection_id=default.id, pixiv_id=pixiv_id,
-                position=_next_collection_position(db, default.id),
-            ))
-            safe_commit(db)
-            return jsonify({'is_favorite': True})
