@@ -603,11 +603,12 @@ graph LR
 - 缓存：7 天（`LOCAL_IMAGE_MAX_AGE`，路由画廊单点定义，routes_gallery.py:129）。
 - 源码：`routes_gallery.py::serve_image`（132-152）。
 
-#### GET /detail/<pixiv_id> — 详情页 HTML；`original_urls` 为空时惰性拉取（失败降级不 500）；相关作品 6 件。源码：`routes_gallery.py::detail_page`（155-215）。
+#### GET /detail/<pixiv_id> — 详情页 HTML；`original_urls` 为空时惰性拉取（失败降级不 500）；相关作品 6 件。**库里查不到该 pid 时回退到运行中搜索任务的内存快照**（`runtime.find_running_preview`，见 `docs/superpowers/specs/2026-09-30-search-preview-viewable-design.md`）：这是"搜索已筛出、整页 `safe_commit` 还没到"的预览态，渲染预览提示条并禁用下载按钮。源码：`routes_gallery.py::detail_page`。
 
 #### GET /api/detail/<pixiv_id>
 
 - 功能：详情 JSON。响应：`Illust.to_dict()` 追加 `local_urls: ["/api/image/<pid>/<n>", ...]`、`medium_urls`（/thumb 代理中图）、`file_count`。404 作品不存在。
+- `medium_urls` 由 `helpers._original_to_resized` 从原图地址推导，**扩展名恒为 `.jpg`**（master1200 是图床统一重编码的 JPEG；拼成原图的 `.png` 会 404 —— 详见该函数 docstring）。
 - 源码：`routes_gallery.py::detail_api`（218-229）。
 
 #### GET /api/gallery
