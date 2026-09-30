@@ -112,6 +112,9 @@
   color: var(--text-secondary);
   margin: 0;
   font-size: 0.72rem;
+  /* 与控件用**同一个绝对行高**：标签比取值小 0.06rem，若各行其是，两段文字的行盒
+     高度就不同、垂直居中后基线会错开约 1px，整行看起来「不在一条水平线上」。 */
+  line-height: 1rem;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -123,6 +126,7 @@
   border-radius: 999px;
   padding: 0.3rem 0.4rem;
   font-size: 0.78rem;
+  line-height: 1rem;   /* 与 label 一致，见 .filter-box label 的说明 */
   width: auto;
   min-width: 0;
   -webkit-appearance: none;
@@ -142,7 +146,6 @@
   padding-right: 1.1rem !important;
 }
 .filter-box select option, .filter-box .form-select option { background: #fff; color: #2b2b2b; }
-.filter-box .r18-notice { color: var(--text-muted); font-size: 0.75rem; padding-right: 0.3rem; cursor: help; }
 
 /* ── Toolbar ── */
 .toolbar {
@@ -366,7 +369,6 @@
           <option value="safe" selected>隐藏R18</option>
           <option value="all">显示全部</option>
         </select>
-        <span class="r18-notice" title="R18选项是没用的，因为我压根就没有打开账号的显示R18内容设置，嘿嘿">⚠</span>
       </div>
     </div>
   </div>
