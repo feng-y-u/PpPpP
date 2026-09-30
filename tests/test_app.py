@@ -18,6 +18,7 @@ import helpers
 import models
 import pixiv_client
 import routes_download
+import runtime
 from config import ITEMS_PER_PAGE
 
 # error / cancelled 等"结果不可信"的终态响应的计数器必须全零（与 results=[] 一致）：
@@ -765,6 +766,221 @@ class TestSearchTaskSnapshot:
         assert data['progress'] == _ZERO_PROGRESS
 
 
+# ── 搜索预览可查看（/detail 的内存快照兜底）──
+# 背景：搜索的提交粒度是**整页**（`safe_commit` 在 `search_by_*` 里，整页详情拉完之后），
+# 而预览事件在每条详情到手时就发出。不兜底的话，用户在整页筛完之前点开预览卡只有 404
+#（作者搜索一页 24 条详情 ≈30s）。详见 docs/superpowers/specs/2026-09-30-search-preview-viewable-design.md。
+
+@pytest.fixture
+def preview_task():
+    """往 `runtime._search_tasks` 装搜索任务快照，用例结束自动摘掉。
+
+    为什么必须清理：`_search_tasks` 是进程级内存状态，**不在** conftest 的 `clean_db`
+    覆盖范围内（那里只清表）—— 残留的 running 任务会让后续用例的 `/detail` 兜底命中。
+    """
+    installed: list[str] = []
+
+    def _install(results, *, status='running', created_at=1.0, task_id=None):
+        tid = task_id or f'preview-task-{len(installed)}'
+        with runtime._search_tasks_lock:
+            runtime._search_tasks[tid] = {
+                'status': status,
+                'results': [dict(r) for r in results],
+                'cursor': None,
+                'has_more': False,
+                'error': None,
+                'fetch_stats': {},
+                'created_at': created_at,
+                'finished_at': None,
+                'cancel_event': threading.Event(),
+                'input_cursor': None,
+                'revision': 1,
+                'progress': {'examined': len(results), 'accepted': len(results),
+                             'detail_failed': 0},
+                'complete': False,
+                'warning': None,
+            }
+        installed.append(tid)
+        return tid
+
+    yield _install
+
+    with runtime._search_tasks_lock:
+        for tid in installed:
+            runtime._search_tasks.pop(tid, None)
+
+
+def _preview_result(pixiv_id: int, **overrides) -> dict:
+    """一条 `Illust.to_dict()` 形状的预览。
+
+    **必须**带 `original_urls`：详情页在快照没有原图地址时会真的去拉 `_fetch_original_urls`
+    （见仓库约定"详情/下载类用例必须预置 original_urls"），离线环境下一次请求就拖慢几十秒。
+    """
+    data = {
+        'id': None,
+        'pixiv_id': pixiv_id,
+        'title': f'预览作品 {pixiv_id}',
+        'user_id': 777,
+        'user_name': '预览画师',
+        'tags': ['preview-tag'],
+        'page_count': 2,
+        'bookmark_count': 321,
+        'upload_date': '2026-01-01T00:00:00+00:00',
+        'thumb_url': f'https://i.pximg.net/c/250x250/img/{pixiv_id}.jpg',
+        'original_urls': [
+            f'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/{pixiv_id}_p0.jpg',
+        ],
+        'download_status': 'pending',
+        'downloaded_at': None,
+        'file_size': None,
+        'created_at': None,
+    }
+    data.update(overrides)
+    return data
+
+
+class TestFindRunningPreview:
+    """`runtime.find_running_preview`：只认 running、取最新、返回副本。"""
+
+    def test_returns_copy_of_snapshot(self, clean_db, preview_task):
+        """详情页会往返回的 dict 里补展示字段，绝不能污染任务快照。
+
+        快照还要供 `/api/search/status` 轮询与 `done` 时的 canonical 替换使用 ——
+        被详情页塞进 `local_urls` 之类的字段就是数据污染。
+        """
+        pid = 92001
+        preview_task([_preview_result(pid, title='原始标题')])
+
+        found = runtime.find_running_preview(pid)
+        assert found is not None
+        assert found['title'] == '原始标题'
+
+        found['title'] = '被详情页改过'
+        found['local_urls'] = [f'/api/image/{pid}/0']
+
+        again = runtime.find_running_preview(pid)
+        assert again['title'] == '原始标题'
+        assert 'local_urls' not in again
+
+    def test_terminal_task_is_not_a_source(self, clean_db, preview_task):
+        """终态任务不返回：done/partial 的行已提交，error/cancelled 的行已回滚。"""
+        for n, status in enumerate(('done', 'partial', 'cancelled', 'error')):
+            pid = 92100 + n
+            preview_task([_preview_result(pid)], status=status)
+            assert runtime.find_running_preview(pid) is None, f'{status} 不该被当成预览来源'
+
+    def test_unknown_pid_returns_none(self, clean_db):
+        assert runtime.find_running_preview(92099) is None
+
+    def test_newest_running_task_wins(self, clean_db, preview_task):
+        """旧任务在自己的线程察觉取消之前仍是 running，此时它的快照已被取代。"""
+        pid = 92002
+        preview_task([_preview_result(pid, title='旧任务')], created_at=1.0, task_id='old')
+        preview_task([_preview_result(pid, title='新任务')], created_at=2.0, task_id='new')
+        assert runtime.find_running_preview(pid)['title'] == '新任务'
+
+
+class TestDetailPagePreviewFallback:
+    """`/detail/<pid>` 对"运行中搜索已确认但未落库"的预览做内存快照兜底。
+
+    没有这层兜底，预览卡就是"看得见点不开"：用户必须等整页详情拉完（作者搜索 ≈30s，
+    `safe_commit` 在 `search_by_*` 里）才能进入详情页。
+    """
+
+    def test_running_preview_renders_without_db_row(self, client, clean_db, preview_task):
+        pid = 91001
+        preview_task([_preview_result(pid, title='内存里的预览标题')])
+
+        # 快照自带 original_urls → 不该发起任何原图拉取（离线可跑；这条"零网络请求"
+        # 的属性本身也要钉住：将来有人把预置 URL 去掉，这里会立刻炸成几十秒的挂起）
+        with patch('routes_gallery._fetch_original_urls',
+                   side_effect=AssertionError('预览快照自带 original_urls，不该发网络请求')):
+            resp = client.get(f'/detail/{pid}')
+
+        assert resp.status_code == 200, '已筛出的预览作品必须能打开详情页'
+        html = resp.get_data(as_text=True)
+        assert '内存里的预览标题' in html
+        assert '预览画师' in html
+        assert '<div class="preview-notice">' in html, '预览态必须显式提示"筛选中"'
+        # 未落库 → 下载必然 404，入口必须禁用（按钮态由模板按 preview 决定）
+        assert re.search(r'<button[^>]*id="downloadBtn"[^>]*disabled', html), \
+            '预览态的下载按钮必须 disabled'
+        assert clean_db.query(models.Illust).filter(models.Illust.pixiv_id == pid).first() is None, \
+            '本用例前提：库里没有这行（兜底才是唯一数据来源）'
+
+    @pytest.mark.parametrize('status', ['done', 'partial', 'cancelled', 'error'])
+    def test_fallback_only_for_running_task(self, status, client, clean_db, preview_task):
+        """终态任务兜底 = 渲染出"不可信的结果"：done/partial 查库即命中，
+        error/cancelled 的行已随事务回滚（快照清空），都不该走内存快照。"""
+        pid = 91002
+        preview_task([_preview_result(pid)], status=status)
+        assert client.get(f'/detail/{pid}').status_code == 404
+
+    def test_no_task_and_no_row_is_404(self, client, clean_db):
+        assert client.get('/detail/91003').status_code == 404
+
+    def test_preview_from_real_publisher_is_viewable(self, client, clean_db):
+        """端到端：**真实 publisher** 发布的预览 → 详情页兜底渲染。
+
+        为什么不能只靠 `preview_task` 夹具装的快照：那是手工构造的任务字典。publisher
+        把预览存在哪个键、任务字典长什么样，都由它决定 —— 夹具与详情页各写一份"约定"，
+        两边一起写错也能同时通过（仓库里那条"接线通过、测试全绿、端到端零事件"的陷阱）。
+        这条用例让 `routes_search._make_search_publisher` 与 `runtime.find_running_preview`
+        真对接一次：只有发布侧的存储形态与读取侧一致，断言才会绿。
+        """
+        pid = 91005
+        published = threading.Event()
+        released = threading.Event()
+
+        def fake_search_by_tag(*args, **kwargs):
+            kwargs['progress']({'type': 'result', 'result': _preview_result(pid)})
+            published.set()
+            assert released.wait(10), '测试未放行 worker'
+            return ([], False)
+
+        try:
+            with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+                client.get('/search?type=tag&query=preview-e2e')
+                assert published.wait(5), 'worker 应已发布预览'
+                # 此刻任务仍是 running，库里没有这行 —— 详情页只能靠快照渲染
+                assert clean_db.query(models.Illust).filter(
+                    models.Illust.pixiv_id == pid).first() is None
+                with patch('routes_gallery._fetch_original_urls',
+                           side_effect=AssertionError('快照自带 original_urls，不该发网络请求')):
+                    resp = client.get(f'/detail/{pid}')
+        finally:
+            released.set()
+
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert f'预览作品 {pid}' in html
+        assert '<div class="preview-notice">' in html
+
+    def test_committed_row_wins_over_preview_snapshot(self, client, clean_db, preview_task):
+        """DB 是权威数据源：同一 pid 既有行又有运行中预览时，渲染的是行。"""
+        pid = 91004
+        illust = models.Illust(
+            pixiv_id=pid, title='数据库里的标题', user_id=1, user_name='db画师',
+            page_count=1, bookmark_count=5,
+            thumb_url=f'https://i.pximg.net/c/250x250/img/{pid}.jpg',
+        )
+        illust.tags_list = ['db-tag']
+        illust.original_urls_list = [
+            f'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/{pid}_p0.jpg',
+        ]
+        clean_db.add(illust)
+        models.safe_commit(clean_db)
+
+        preview_task([_preview_result(pid, title='过期的预览标题')])
+
+        resp = client.get(f'/detail/{pid}')
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert '数据库里的标题' in html
+        assert '过期的预览标题' not in html
+        assert '<div class="preview-notice">' not in html, '行已落库，不是预览态'
+
+
 class TestRoutes:
     def test_csrf_token(self, client):
         resp = client.get('/csrf-token')
@@ -1246,3 +1462,54 @@ class TestDetailApiMediumUrls:
             encoded = u[len('/thumb/'):]
             decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
             assert '/img-master/' in decoded and decoded.endswith('_master1200.jpg')
+
+    def test_png_original_maps_to_jpg_master(self, client, clean_db):
+        """PNG 原图的中图也必须是 `_master1200.jpg`（拼成 `.png` 在图床上必然 404）。
+
+        回归用例：这正是"很多作品的中图加载不出来"的根因 —— 中图 404 → 失败冷却 →
+        退到 1~5MB 的原图（常超过 /thumb 的 30s 读超时）→ 只剩缩略图兜底。
+        """
+        illust = models.Illust(pixiv_id=92002, title='png-original', page_count=1)
+        illust.original_urls_list = [
+            'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/92002_p0.png',
+        ]
+        clean_db.add(illust)
+        clean_db.commit()
+
+        r = client.get('/api/detail/92002')
+        assert r.status_code == 200
+        [proxied] = r.get_json()['medium_urls']
+        encoded = proxied[len('/thumb/'):]
+        decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
+        assert decoded == (
+            'https://i.pximg.net/c/600x600/img-master/img/2026/08/29/17/21/55/'
+            '92002_p0_master1200.jpg'), '中图扩展名必须固定 .jpg，不能沿用原图的 .png'
+
+
+class TestDetailPageMediumUrls:
+    """详情页嵌入给前端的 `mediumUrls`（`page-detail.js` 的图源候选链第一档）。"""
+
+    def test_png_original_yields_jpg_medium_source(self, client, clean_db):
+        """PNG 原图的作品，详情页首图源必须是可用的中图地址（能直接请求到 200）。"""
+        illust = models.Illust(pixiv_id=92003, title='png-original', page_count=1,
+                               thumb_url='https://i.pximg.net/c/250x250_80_a2/img-master/'
+                                         'img/2026/08/29/17/21/55/92003_p0_square1200.jpg')
+        illust.original_urls_list = [
+            'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/92003_p0.png',
+        ]
+        clean_db.add(illust)
+        models.safe_commit(clean_db)
+
+        resp = client.get('/detail/92003')
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        blob = re.search(r'<script type="application/json" id="detailData">(.*?)</script>',
+                         html, re.S)
+        assert blob, '详情页必须把图源以 JSON 块交给前端'
+        data = json.loads(blob.group(1))
+        assert data['mediumUrls'], 'PNG 原图的作品也必须有中图候选（否则首图只能退到缩略图）'
+        [proxied] = data['mediumUrls']
+        encoded = proxied[len('/thumb/'):]
+        decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
+        assert decoded.endswith('92003_p0_master1200.jpg')
+        assert data['originalProxied'], '原图档作为兜底仍在'

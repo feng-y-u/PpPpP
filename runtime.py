@@ -208,3 +208,41 @@ _rate_limit_store: dict[str, list[float]] = {}
 _search_tasks: dict[str, dict] = {}
 _search_tasks_lock = threading.Lock()
 SEARCH_TASK_TTL = 600.0  # 完成 10 分钟后清理
+
+
+def find_running_preview(pixiv_id: int) -> dict | None:
+    """在**运行中**搜索任务的快照里找一条已确认但尚未落库的预览；找不到返回 None。
+
+    预览是"已通过筛选、还没 `safe_commit`"的行（见 `fetcher._publish_detail` 与
+    `routes_search._make_search_publisher`），只活在任务快照里。详情页据此兜底渲染，
+    用户不必等整页详情拉完（作者搜索一页 ≈30s）才能点开看图。
+
+    为什么**只认** `running`：
+      - `done` / `partial` 的预览行已经提交（`safe_commit` 在 `raise
+        SearchRateLimitedError` **之前**），详情页查库必然命中，这里再兜底是死代码；
+      - `error` / `cancelled` 的行已随事务回滚、快照也已清空，兜底会渲染出"不存在
+        的结果"——正是 `_zero_progress` / `results=[]` 那条收尾纪律要防的事。
+
+    同一 pid 出现在多个运行中任务里时取 `created_at` 最新的那个：提交新搜索会取消旧
+    任务，但旧任务在自己的线程察觉取消之前仍是 `running`，此时它的快照已被取代。
+
+    返回 `dict` 副本：调用方（详情页）会往这个 dict 里补 `local_urls` 等展示字段，
+    绝不能污染任务快照 —— 那份快照还要供 `/api/search/status` 轮询与 `done` 替换使用。
+
+    返回值**不是**"这条作品已入库"的证明：调用方不得据此放行按 pid 写库的操作（下载）。
+    """
+    best_item: dict | None = None
+    best_created: float = -1.0
+    with _search_tasks_lock:
+        for task in _search_tasks.values():
+            if task.get('status') != 'running':
+                continue
+            created = task.get('created_at') or 0
+            if created <= best_created:
+                continue
+            for item in task.get('results') or []:
+                if item.get('pixiv_id') == pixiv_id:
+                    best_item = item
+                    best_created = created
+                    break
+        return dict(best_item) if best_item is not None else None

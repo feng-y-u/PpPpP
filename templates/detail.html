@@ -162,6 +162,15 @@
 .related-overlay-title { font-size: 0.68rem; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .related-overlay-artist { font-size: 0.6rem; color: rgba(255,255,255,.7); }
 
+/* ── 搜索预览态提示（作品已筛出但尚未落库，见 routes_gallery.detail_page）── */
+.preview-notice {
+  margin: 0 0 14px; padding: 10px 12px;
+  border: 1px dashed var(--accent); border-radius: 10px;
+  background: var(--accent-subtle);
+  color: var(--text-secondary); font-size: 0.76rem; line-height: 1.55;
+}
+.preview-notice b { color: var(--accent); font-weight: 600; }
+
 /* ── Responsive ── */
 @media (max-width: 768px) {
   .detail-wrap { flex-direction: column; }
@@ -256,8 +265,19 @@
       {% endif %}
     </div>
 
+    {% if preview %}
+    <div class="preview-notice">
+      <b>筛选中</b>：本作品来自进行中的搜索，还没写入数据库。图与标签可以正常查看，
+      <b>下载</b>要等本次筛选结束（详情页刷新后仍可打开）。
+    </div>
+    {% endif %}
+
     <div class="info-actions">
-      {% if has_images %}
+      {% if preview %}
+        {# 未落库的行 POST /download/<pid> 必然 404：给一个点了必然报错的按钮比不给更糟 #}
+        <button class="btn btn-soft" id="downloadBtn" data-pid="{{ illust.pixiv_id }}" disabled
+                title="作品仍在筛选中，尚未写入数据库，暂时无法下载">⬇ 下载原图（筛选中）</button>
+      {% elif has_images %}
         <a href="/download_file/{{ illust.pixiv_id }}" class="btn btn-dl-done" id="downloadBtn">⬇ 下载原图</a>
       {% else %}
         <button class="btn btn-soft" id="downloadBtn" data-pid="{{ illust.pixiv_id }}">⬇ 下载原图</button>

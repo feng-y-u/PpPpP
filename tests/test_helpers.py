@@ -262,3 +262,52 @@ class TestAtomicWriteText:
         assert target.read_text(encoding='utf-8') == original
         assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
         assert list(tmp_path.iterdir()) == [target]
+
+
+class TestOriginalToResized:
+    """原图 URL → 中图 URL（`_original_to_resized`）。
+
+    回归来源：中图扩展名曾经沿用**原图的**扩展名，于是 PNG 原图的作品被拼成
+    `_master1200.png` —— 图床对这种地址一律 404（master1200 是统一重编码的 JPEG，
+    `.jpg` 才是唯一有效形式）。实测同一作品 `.png` → 404、`.jpg` → 200。
+    库里 PNG 原图是多数（实测 2120 条原图地址里 1375 条是 `.png`），所以症状是
+    "**很多**作品的中图加载不出来"，而不是边缘情况。
+    """
+
+    def test_png_original_maps_to_jpg_master(self):
+        """核心回归：PNG 原图的中图地址必须是 `.jpg`。"""
+        url = 'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/149022521_p0.png'
+        assert helpers._original_to_resized(url) == (
+            f'https://i.pximg.net/c/{config.MEDIUM_IMAGE_SIZE}x{config.MEDIUM_IMAGE_SIZE}'
+            '/img-master/img/2026/08/29/17/21/55/149022521_p0_master1200.jpg')
+
+    @pytest.mark.parametrize('ext', ['jpg', 'jpeg', 'png', 'gif', 'webp'])
+    def test_extension_is_always_jpg(self, ext):
+        """任何原图扩展名都产出 `.jpg` 中图（不是"jpg 才转、其它照抄"）。"""
+        out = helpers._original_to_resized(
+            f'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.{ext}')
+        assert out.endswith('_master1200.jpg'), f'{ext} 原图的中图也必须是 .jpg'
+
+    def test_query_string_is_dropped(self):
+        out = helpers._original_to_resized(
+            'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.png?foo=1')
+        assert out == ('https://i.pximg.net/c/600x600/img-master/img/2026/01/01/00/00/00/'
+                       '123_p0_master1200.jpg')
+
+    def test_uses_configured_medium_size(self, monkeypatch):
+        monkeypatch.setattr(helpers, 'MEDIUM_IMAGE_SIZE', 540)
+        out = helpers._original_to_resized(
+            'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.jpg')
+        assert out.startswith('https://i.pximg.net/c/540x540/img-master/')
+
+    @pytest.mark.parametrize('url', [
+        # 已经是中图/缩略图形态：没有 img-original 段，原样返回
+        'https://i.pximg.net/img-master/img/2026/01/01/00/00/00/123_p0_master1200.jpg',
+        'https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/123_p0_square1200.jpg',
+        # 非白名单主机
+        'https://example.com/img-original/img/2026/01/01/00/00/00/123_p0.jpg',
+        '',
+    ])
+    def test_non_original_url_is_returned_unchanged(self, url):
+        """不匹配就原样返回：调用方的候选链本就有"原图"这一档，别造出畸形地址。"""
+        assert helpers._original_to_resized(url) == url

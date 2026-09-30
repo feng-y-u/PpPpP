@@ -247,26 +247,44 @@ def serve_image(pixiv_id: int, index: int) -> Response:
 
 @bp.route('/detail/<int:pixiv_id>')
 def detail_page(pixiv_id: int) -> str:
+    # `preview_mode`：库里查不到这行，但它是一条**运行中搜索**里已确认、尚未
+    # `safe_commit` 的预览（见 `runtime.find_running_preview`）。搜索的提交粒度是整页
+    # （作者搜索一页 24 条详情 ≈30s），而预览卡一有结果就画出来了 —— 不兜底的话用户
+    # 点开只有 404，只能干等整页筛完。此分支只渲染内存快照里的字段：本地图与文件大小
+    # 一律为空，下载按钮由模板按 `preview` 禁用（未落库的行 `/download/<pid>` 必然 404）。
+    preview_mode = False
     with get_session() as db:
         illust = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
-        if not illust:
-            abort(404)
+        if illust is not None:
+            data = illust.to_dict()
+            paths = illust.local_paths_list or []
+            file_size = illust.file_size or None
+            owner_id = illust.user_id
+            stored_urls = illust.original_urls_list or []
+        else:
+            snapshot = runtime.find_running_preview(pixiv_id)
+            if snapshot is None:
+                abort(404)
+            preview_mode = True
+            data = snapshot
+            paths = []
+            file_size = None
+            owner_id = data.get('user_id')
+            # 快照字段来自 `Illust.to_dict()`，理论上都是字符串；脏值一律丢掉 ——
+            # 它们会被拼进 /thumb 代理地址，非字符串会把代理 URL 拼坏
+            stored_urls = [u for u in (data.get('original_urls') or []) if isinstance(u, str)]
 
-        data = illust.to_dict()
-        paths = illust.local_paths_list or []
         local_urls = [f'/api/image/{pixiv_id}/{n}' for n in range(len(paths))]
-
-        file_size = illust.file_size or None
 
         # 相关作品：同一画师，排除自身
         related = db.query(Illust).filter(
-            Illust.user_id == illust.user_id,
+            Illust.user_id == owner_id,
             Illust.pixiv_id != pixiv_id,
             Illust.download_status == 'done',
         ).order_by(Illust.created_at.desc()).limit(6).all()
         related = [r.to_dict() for r in related]
 
-        need_fetch_urls = not illust.original_urls_list
+        need_fetch_urls = not stored_urls
 
     # 网络请求放到 DB session 之外（避免事务随网络往返长时间占用连接）
     if need_fetch_urls:
@@ -282,11 +300,13 @@ def detail_page(pixiv_id: int) -> str:
         if urls:
             with get_session() as db:
                 row = db.query(Illust).filter(Illust.pixiv_id == pixiv_id).first()
+                # 预览态下这行可能刚被搜索任务提交（也可能还没有）—— 有就顺手补上
                 if row:
                     row.original_urls_list = urls
                     safe_commit(db)
     else:
-        urls = illust.original_urls_list or []
+        # 必须用**进 session 之前**取好的值：预览分支里根本没有 illust 对象
+        urls = stored_urls
 
     medium_urls = []
     original_proxied = []
@@ -302,6 +322,7 @@ def detail_page(pixiv_id: int) -> str:
         original_proxied=original_proxied,
         file_size=file_size,
         related=related,
+        preview=preview_mode,
         proxy_thumb=_proxy_thumb,
         fmt_num=_fmt_num,
         csrf_token=_get_csrf_token(),

@@ -430,12 +430,29 @@ def _safe_int(value, default: int = 0) -> int:
 
 
 def _original_to_resized(url: str) -> str:
-    """Pixiv 原图 URL → 中图（尺寸可配）。"""
+    """Pixiv 原图 URL → 中图（尺寸可配）。
+
+    ⚠️ **中图的扩展名必须固定为 `.jpg`，绝不能沿用原图的扩展名。** master1200 是
+    Pixiv 统一重编码的 JPEG，与原图格式无关：原图是 PNG 的作品，`_master1200.png`
+    这个地址在图床上一律 **404**（实测同一作品 `.png` → 404 / `.jpg` → 200，
+    150~230KB）。曾经的实现用 `m.group(3)` 拼扩展名，于是"原图是 PNG"的作品中图全挂，
+    症状是"很多作品的中图加载不出来"：
+      ① 中图 404 → /thumb 记失败冷却 30s → 前端候选链退到原图代理；
+      ② PNG 原图动辄 1~5MB，经代理要几秒到几十秒（实测有一张 65s），
+         超过 /thumb 的 (10, 30) 读超时就直接失败；
+      ③ 最后只剩 250px 缩略图兜底（第 1 页之外连兜底都没有，显示"图片加载失败"）。
+    而库里 PNG 原图是多数（实测某实例 2120 条原图地址里 1375 条是 `.png`），
+    所以这不是边缘情况。
+
+    非 `img-original`（或没有扩展名）的 URL 原样返回 —— 调用方拿到的中图地址等于
+    原图地址，仍可显示（前端候选链本就有原图这一档）。
+    """
     m = re.match(r'(https://i\.pximg\.net/)img-original/img/(.+)\.(\w+)(\?.*)?$', url)
     if not m:
         return url
     size = MEDIUM_IMAGE_SIZE
-    return f'{m.group(1)}c/{size}x{size}/img-master/img/{m.group(2)}_master1200.{m.group(3)}'
+    # 扩展名硬编码 .jpg：`m.group(3)`（原图扩展名）**故意不用**，原因见 docstring
+    return f'{m.group(1)}c/{size}x{size}/img-master/img/{m.group(2)}_master1200.jpg'
 
 
 def _proxy_thumb(url: str) -> str:

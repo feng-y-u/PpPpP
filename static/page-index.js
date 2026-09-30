@@ -15,6 +15,9 @@ let searchGeneration = 0;
 //（见 routes_search._make_search_publisher），未定稿的行可能随事务回滚，
 // 写进分页状态就等于把不确定的数据提交成"页"。预览只在网格里额外展示，
 // done 时被 canonical 页整体替换，partial 保留，失败/取消时清空。
+// 预览卡**可以点开详情页**：/detail/<pid> 在库里查不到时会回退到进行中搜索任务的内存
+// 快照（见 runtime.find_running_preview），所以不必等整页筛完就能看图；但那份快照不是
+// "已入库"的证明 —— 下载仍只在行落库后可用，预览卡因此不渲染下载入口。
 let searchPreview = [];
 let lastSearchRevision = 0;        // 已处理到的最新快照版本号（revision 每次事件都自增）
 
@@ -580,20 +583,22 @@ $('#r18Mode').addEventListener('change', () => {
 // ── Render Card ──
 // opts.preview：预览卡（搜索中已确认、但服务端**还没 safe_commit** 的作品，见 routes_search
 // 的 _make_search_publisher）。这一步之差有用户可见的后果：该 pid 的行可能随后随事务回滚，
-// 此时 /detail/<pid> 会 abort(404)、下载接口返回 404 作品不存在（routes_download）——
-// 作者搜索一页要 1.33s/件，最长几十秒都能点到这种"还不存在的作品"。
-// 选择的组合（最小且稳妥）：
-//   ① 渲染层不打行为：预览卡不渲染下载按钮、卡片点击只弹"仍在筛选中"，不跳详情；
-//   ② 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
+// 此时 /detail/<pid> 会 abort(404)、下载接口返回 404 作品不存在（routes_download）。
+// 选择的组合：
+//   ① **详情页可看**：预览卡点击与普通卡一样跳 /detail/<pid> —— 路由在查不到行时会回退到
+//      进行中搜索任务的内存快照（runtime.find_running_preview），所以不必等整页筛完；
+//   ② 渲染层不打**下载**行为：预览卡不渲染下载按钮（未落库的 pid 下载必然 404），
+//      卡片上写明"可预览 · 暂不可下载"；
+//   ③ 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
 //      .photo-card-actions）往预览卡塞回下载按钮，点击也到不了它自己的监听器；
-//   ③ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
+//   ④ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
 // 不传 opts 时（canonical 路径）行为与从前逐字一致 —— 已提交卡照旧下载、跳详情、开灯箱。
 function renderCard(r, opts) {
   const preview = !!(opts && opts.preview);
   const isDone = r.download_status === 'done';
   const isDl = r.download_status === 'downloading';
   let btnHtml;
-  if (preview) btnHtml = '<span class="preview-hint" style="font-size:0.68rem;color:var(--text-muted);">筛选中…</span>';
+  if (preview) btnHtml = '<span class="preview-hint" style="font-size:0.68rem;color:var(--text-muted);">可预览 · 暂不可下载</span>';
   else if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
   else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
   else btnHtml = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>`;
@@ -645,8 +650,8 @@ function renderCard(r, opts) {
   // Card click → detail page
   item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
-    // 预览卡不跳详情：行可能还没提交，/detail/<pid> 此时是 404。给个短提示优于静默无反应。
-    if (preview) { showToast('该作品仍在筛选中'); return; }
+    // 预览卡与普通卡一样跳详情：路由会在库里查不到行时回退到进行中搜索的内存快照
+    //（runtime.find_running_preview），所以"已筛出的作品"不必等整页筛完就能看。
     window.location.href = `/detail/${r.pixiv_id}`;
   });
 
@@ -677,12 +682,13 @@ function renderCard(r, opts) {
 // 但 app.js 的 updateDlDone / resetDlBtn 会按 pid 重写 .photo-card-actions 的 innerHTML ——
 // 将来任何新路径都可能往预览卡里塞回一个可点的下载按钮。捕获阶段拦下，按钮自身的
 // 监听器（含将来新加的）就不会执行，这条保证不依赖"渲染时不放按钮"这个巧合。
+// 注意这里拦的只是**下载**：点开详情页是允许的（详情页会回退到内存快照）。
 document.addEventListener('click', (e) => {
   const btn = e.target.closest?.('.dl-btn, .dl-file-btn');
   if (!btn || !btn.closest('[data-preview-pid]')) return;
   e.stopPropagation();
   e.preventDefault();
-  showToast('该作品仍在筛选中');
+  showToast('该作品仍在筛选中，等本次筛选完成后再下载');
 }, true);
 
 // ── Batch Download ──
