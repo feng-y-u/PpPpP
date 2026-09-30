@@ -515,34 +515,3 @@ def _delete_orphan_files(pixiv_id: int) -> int:
     except OSError:
         pass
     return deleted
-
-
-def _compute_move_position(items: list, idx: int, direction: str):
-    """返回 (new_pos, needs_rebalance, error_code)。
-    items 是 [(id, position), ...] 元组列表，按 position ASC 排序。
-    error_code 为 None（成功）或 400（边界）。"""
-    n = len(items)
-    if direction == 'up':
-        if idx == 0:
-            return None, False, 400
-        prev = items[idx - 1]
-        prev_pos = prev[1]
-        if idx == 1:
-            return prev_pos - 1000.0, False, None
-        prev_of_prev = items[idx - 2]
-        pop_pos = prev_of_prev[1]
-        if prev_pos - pop_pos < 1.0:
-            return None, True, None
-        return (pop_pos + prev_pos) / 2.0, False, None
-    else:  # down
-        if idx == n - 1:
-            return None, False, 400
-        nxt = items[idx + 1]
-        nxt_pos = nxt[1]
-        if idx + 1 == n - 1:
-            return nxt_pos + 1000.0, False, None
-        next_of_next = items[idx + 2]
-        non_pos = next_of_next[1]
-        if non_pos - nxt_pos < 1.0:
-            return None, True, None
-        return (nxt_pos + non_pos) / 2.0, False, None

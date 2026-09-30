@@ -284,6 +284,13 @@ def _remove_pids_from_search_caches(db, pids: list[int]) -> None:
                 sc.illust_ids = json.dumps(new_ids, ensure_ascii=False)
 
 
+# 视为"用户主动下载过"的 DownloadLog.action 取值。
+# `_is_user_owned()`（单条保护判定）与 `_prefetch_capacity_cleanup()`（整轮快照）必须共用
+# 这一份取值：两处各写一份时，将来只改其一就会让两条清理路径的保护口径分叉 ——
+# 用户点过下载的作品可能被另一条路径当缓存垃圾清掉。
+_USER_DOWNLOAD_ACTIONS = ('start', 'failed', 'cancelled', 'done', 'deleted')
+
+
 def _is_user_owned(db, pixiv_id: int) -> bool:
     """用户"拥有"这件作品：有用户操作类下载日志（含失败/取消待重试）。
 
@@ -295,7 +302,7 @@ def _is_user_owned(db, pixiv_id: int) -> bool:
     """
     return db.query(DownloadLog).filter(
         DownloadLog.pixiv_id == pixiv_id,
-        DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
+        DownloadLog.action.in_(_USER_DOWNLOAD_ACTIONS),
     ).first() is not None
 
 
@@ -552,7 +559,7 @@ def _prefetch_capacity_cleanup() -> None:
         # DownloadLog 查询 —— 容量清理要遍历全部预取作品，逐行查是 N+1。
         dl_pids = {
             p[0] for p in db.query(DownloadLog.pixiv_id).filter(
-                DownloadLog.action.in_(('start', 'failed', 'cancelled', 'done', 'deleted')),
+                DownloadLog.action.in_(_USER_DOWNLOAD_ACTIONS),
             ).distinct().all()
         }
         evict_cutoff = _naive_utc(datetime.now(timezone.utc)) - timedelta(

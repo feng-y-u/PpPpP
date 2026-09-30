@@ -138,7 +138,7 @@ let navPending = false;   // 防并发：pidAt 现拉相邻页期间忽略后续
 function loadStoredSeq() {
   try {
     const s = JSON.parse(sessionStorage.getItem(DETAIL_SEQ_KEY) || 'null');
-    if (!s || s.v !== 1) return null;
+    if (!s || s.v !== 2) return null;
     if (s.sort !== navCtx.sort || (s.tag || '') !== navCtx.tag) return null;
     return s;
   } catch { return null; }
@@ -172,7 +172,9 @@ async function fetchPage(pageNo) {
 
 async function resolveSeq() {
   if (!navCtx || isNaN(navCtx.pos)) return;
-  seq = loadStoredSeq() || { v: 1, sort: navCtx.sort,
+  // v: 2 —— 本期删除了序列里承载视图归属的那个字段，递增版本号以作废升级前写入的
+  // 旧序列：否则 sort/tag 匹配的旧序列会被复用一次，给出错误的相邻作品，直到邻页现拉才自愈。
+  seq = loadStoredSeq() || { v: 2, sort: navCtx.sort,
                              tag: navCtx.tag, total: 0, pages: {} };
   // 当前页必须包含本作品（sessionStorage 可能已过期或被其他筛选覆盖）
   if (!seq.pages[navCtx.page] || !seq.pages[navCtx.page].includes(illust.pixiv_id)) {

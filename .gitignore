@@ -32,3 +32,7 @@ progress.md
 # 曾有一条被 `git add -A` 暂存进索引、差一步就随提交带走（已移出并删除），故加通配。
 # 目录名按进程号命名（pixiv_test_instance_<pid>），所以必须用通配而不是固定名。
 pixiv_test_instance_*/
+# 不经 run_tests.ps1 直接跑 pytest / 一次性探针时落在仓库根的产物与草稿目录
+backups/
+pixiv_test_*.db
+.review_tmp/
