@@ -2,16 +2,45 @@ import shutil
 import sqlite3
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 
 from migrations import runner
 from migrations.runner import backup_database, run_migrations
 from migrations.versions import LATEST_SCHEMA_VERSION, MIGRATIONS
 
+# v5 会删掉两张收藏夹表，所以"v1 回填 position"这类断言必须在 v5 之前跑。
+# 按版本号取而不是 MIGRATIONS[:4]：将来追加 v6 也不会把 v5 的删表带进来。
+MIGRATIONS_BEFORE_V5 = tuple(m for m in MIGRATIONS if m[0] < 5)
+
 
 def _user_version(engine):
     with engine.connect() as conn:
         return conn.exec_driver_sql("PRAGMA user_version").scalar()
+
+
+def _table_names(engine):
+    with engine.connect() as conn:
+        return {
+            row[0]
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+
+
+def _fk_engine(database):
+    """建一个开启外键约束的文件库。
+
+    SQLite 默认不校验外键（`PRAGMA foreign_keys` 默认 0），只有显式打开才让
+    "先删子表"成为可验证的约束：反序 DROP 父表会抛 FOREIGN KEY constraint failed。
+    """
+    engine = create_engine(f"sqlite:///{database}")
+
+    def _enable_foreign_keys(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    event.listen(engine, "connect", _enable_foreign_keys)
+    return engine
 
 
 def test_backup_database_copies_existing_database_with_unique_timestamp(tmp_path):
@@ -113,7 +142,9 @@ def test_legacy_database_upgrades_without_losing_data():
             """
         )
 
-    run_migrations(engine, MIGRATIONS)
+    # 只跑到 v4：本用例要验证的是"旧库升级不丢数据 + v1 回填 position"，
+    # 而 v5 会把 collection_items 整表删掉（那部分由下面的 v5 用例覆盖）。
+    run_migrations(engine, MIGRATIONS_BEFORE_V5)
 
     with engine.connect() as conn:
         illust_columns = {
@@ -130,7 +161,7 @@ def test_legacy_database_upgrades_without_losing_data():
             "SELECT pixiv_id, position FROM collection_items ORDER BY pixiv_id"
         ).all()
 
-    assert _user_version(engine) == LATEST_SCHEMA_VERSION
+    assert _user_version(engine) == 4
     assert {"file_size", "downloaded_at", "bookmark_updated_at"}.issubset(
         illust_columns
     )
@@ -180,6 +211,84 @@ def test_version_one_database_runs_remaining_schema_upgrade():
         }
     assert "prefetch_refresh_at" in columns
     assert _user_version(engine) == LATEST_SCHEMA_VERSION
+
+
+def test_collection_drop_migration_removes_tables_and_keeps_illusts(tmp_path):
+    """v5：带收藏夹数据的旧库升级后两张表消失、illusts 不动、可重复执行、有备份。"""
+    database = tmp_path / "pixiv.db"
+    engine = _fk_engine(database)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE illusts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pixiv_id INTEGER NOT NULL UNIQUE,
+                title VARCHAR DEFAULT ''
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO illusts (pixiv_id, title) "
+            "VALUES (123, 'kept'), (456, 'also-kept')"
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE collections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR NOT NULL
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE collection_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES collections(id),
+                pixiv_id INTEGER NOT NULL,
+                position REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.exec_driver_sql("INSERT INTO collections (name) VALUES ('我的收藏')")
+        conn.exec_driver_sql(
+            "INSERT INTO collection_items (collection_id, pixiv_id, position) "
+            "VALUES (1, 123, 1000.0)"
+        )
+        conn.exec_driver_sql("PRAGMA user_version = 4")
+
+    run_migrations(engine, MIGRATIONS)
+
+    # ① 两表消失（外键打开着，说明确实是先删子表再删父表）
+    tables = _table_names(engine)
+    assert "collection_items" not in tables
+    assert "collections" not in tables
+    # ② illusts 行数与内容不变
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT pixiv_id, title FROM illusts ORDER BY pixiv_id"
+        ).all() == [(123, "kept"), (456, "also-kept")]
+    # ③ 版本推进到 5
+    assert _user_version(engine) == 5
+
+    # ④ 重复执行不抛错：runner 再跑一次是 no-op；直接重放 v5 函数也必须是 no-op
+    run_migrations(engine, MIGRATIONS)
+    drop_collection_tables = dict(MIGRATIONS)[5]
+    with engine.begin() as conn:
+        drop_collection_tables(conn)
+
+    # ⑤ 迁移前已备份，且备份里两张表的原始数据都还在（删除确实发生在备份之后）
+    backups = sorted((tmp_path / "backups").glob("pixiv.db.*.bak"))
+    assert len(backups) == 1
+    backup = sqlite3.connect(backups[0])
+    try:
+        assert backup.execute("SELECT name FROM collections").fetchall() == [
+            ("我的收藏",)
+        ]
+        assert backup.execute(
+            "SELECT pixiv_id, position FROM collection_items"
+        ).fetchall() == [(123, 1000.0)]
+    finally:
+        backup.close()
 
 
 # ── WAL 备份完整性（审计 S5）──

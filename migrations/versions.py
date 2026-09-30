@@ -130,10 +130,22 @@ def add_illust_refresh_failed_at(conn: Connection) -> None:
         )
 
 
+def drop_collection_tables(conn: Connection) -> None:
+    """v5：彻底移除本地收藏夹功能，删除其两张表。
+
+    子表先删：`collection_items.collection_id` 引用 `collections.id`，开启外键的库先删父表会失败。
+    `IF EXISTS` 让重复执行成为 no-op —— runner 靠 `PRAGMA user_version` 保证只跑一次，
+    但手工/异常重入时不应报错。
+    """
+    conn.exec_driver_sql("DROP TABLE IF EXISTS collection_items")
+    conn.exec_driver_sql("DROP TABLE IF EXISTS collections")
+
+
 MIGRATIONS = (
     (1, migrate_collection_positions),
     (2, migrate_illust_schema),
     (3, repair_illust_schema),
     (4, add_illust_refresh_failed_at),
+    (5, drop_collection_tables),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
