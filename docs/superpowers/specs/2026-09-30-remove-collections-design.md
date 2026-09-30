@@ -2,9 +2,9 @@
 
 ## 状态
 
-**设计中（2026-09-30）** —— 需求与决策已定，触点清单待本轮侦察确认后补齐，随后进入实施计划。
+**已实现并验证**（2026-09-30，分支 `refactor/remove-collections`）：收窄保护判定 `627dcb1` → 迁移 v5 `ba34348` → 后端移除 `8fef717` → 前端移除 `663e445` → 审查后收尾（本批）。实测全量收集 682 条 = **676 passed / 2 skipped / 4 failed(env)** 约 21s；4 个失败是 `tests/test_test_setup.py::test_temp_root_*` 的环境性失败（沙箱内子 `powershell.exe` 退出码非 0），基线同样失败，与本次改动无关。
 
-> 本设计尚未实现。实现完成后本节改为「已实现并验证」，并写入真实 commit 与实测结果。
+> ⚠️ **对不变式的一处显式偏离（必须记录）**：约定「迁移只追加新版本，不得修改已发布版本」，而 v1 `migrate_collection_positions` 加了 4 行存在性守卫 —— 模型删除后 `create_all()` 不再创建 `collection_items`，全新库（`user_version=0`）与已跑过 v5 的库跑 v1 的 `ALTER TABLE collection_items` 会抛 `no such table`、直接让 `init_db()` 起不来。守卫在**表不存在时 no-op**、**表存在时与原版逐字节一致**（只影响"原版本来就会崩"的调用方），并有回归测试 `test_fresh_database_skips_legacy_collection_migration`；替代方案（删掉 v1 / 重排 `MIGRATIONS`）会改变已发布版本号语义，更糟。
 
 ## 背景与问题
 

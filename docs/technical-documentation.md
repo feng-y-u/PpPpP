@@ -15,8 +15,8 @@
 | --- | --- |
 | 项目名称 | Pixiv Viewer |
 | 项目类型 | 单人自部署 Flask Web 应用（服务端渲染页面 + JSON API + 后台线程任务） |
-| 项目用途 | 通过 Pixiv **内部 Ajax API（非官方接口）** 搜索、浏览、下载 Pixiv 插画；提供本地预取缓存、收藏夹、自动关注与下载管理 |
-| 主要解决问题 | ① 不依赖第三方客户端即可在本地网页完成 Pixiv 检索与浏览（隐藏 R18/屏蔽标签）；② 原图批量下载与本地持久化；③ 标签预取构建本地缓存库（离线浏览）；④ 收藏/下载行为完全本地化记录 |
+| 项目用途 | 通过 Pixiv **内部 Ajax API（非官方接口）** 搜索、浏览、下载 Pixiv 插画；提供本地预取缓存、自动关注与下载管理 |
+| 主要解决问题 | ① 不依赖第三方客户端即可在本地网页完成 Pixiv 检索与浏览（隐藏 R18/屏蔽标签）；② 原图批量下载与本地持久化；③ 标签预取构建本地缓存库（离线浏览）；④ 下载/删除行为完全本地化记录（`download_logs` 审计） |
 | 使用场景 | 个人自用、本机或内网单实例部署（`AGENTS.md` 明示「单人自部署服务」「不做多实例/多用户扩展」） |
 | 运行形态 | 1 个 Flask 进程（生产 gunicorn 单 worker 多线程） + SQLite 数据库 + 磁盘目录（下载/缩略图缓存） |
 | 入口 | `app.py` 模块级构造 WSGI 对象 `app`（`app.py:68`），供 `gunicorn app:app` / `flask run` 使用；`python app.py` 走内置开发服务器（`app.py:151-152`） |
@@ -45,12 +45,11 @@
 | --- | --- | --- |
 | 搜索（标签 / 作者 / 发现） | `GET /search` 异步提交任务返回 `task_id`，后台线程抓取，前端轮询状态；支持游标翻页（HMAC 签名、24h 过期）、收藏数下限、R18 三元过滤、屏蔽标签 | `routes_search.py::search` / `fetcher.py::paginated_search` / `search_by_tag` / `search_by_user` / `browse_discovery` |
 | 异步搜索任务管理 | 提交新搜索即取消在途任务；任务 TTL 600s 自动清理；终态 done/error/cancelled | `routes_search.py::_submit_search_task` / `_cleanup_search_tasks` |
-| 图库 | 已下载作品浏览：本地目录扫描 + DB 过滤（屏蔽/R18/收藏数/标签），孤儿文件（无 DB 记录）补全展示，收藏状态标注，分页 | `routes_gallery.py::api_gallery` |
+| 图库 | 已下载作品浏览：本地目录扫描 + DB 过滤（屏蔽/R18/标签），孤儿文件（无 DB 记录）补全展示，分页 | `routes_gallery.py::api_gallery` |
 | 详情页 | 作品信息、中图/原图代理链接、相关作品（同画师已下载）、连续翻页（前端） | `routes_gallery.py::detail_page` |
 | 图片服务 | `/thumb/<b64>` 缩略图代理（白名单 + 磁盘缓存 7 天 + 1GB 上限淘汰）；`/api/image/<pid>/<index>` 本地已下载原图发送（ETag 7 天） | `routes_gallery.py::thumb_proxy` / `serve_image` |
 | 下载引擎 | 后台线程池（默认 2 worker）下载原图；锁去重、逐页间隔、取消/重置、失败删除部分文件、审计日志 | `background.py::_download_illust` |
 | 文件导出 | 单文件直发，多文件 ZIP（ZIP_STORED 内存缓冲） | `routes_download.py::download_file` |
-| 收藏夹 | 多收藏夹 CRUD；`position` 分数差值排序 + 上移/下移（乐观锁）；「我的收藏」为收藏语义唯一来源 | `routes_collections.py` / `models.py::Collection,CollectionItem` / `helpers.py::_compute_move_position` |
 | 标签预取 | 后台循环按周期抓取配置标签；`prefetch_source` 标记；最终收藏数刷新状态机（背压/退避/熔断/强制完成） | `background.py::_prefetch_loop` / `_prefetch_refresh_bookmarks` / `_prefetch_capacity_cleanup` |
 | 缓存浏览页 | `/cache` 页 + `/api/cache/*`：库内过滤/排序/分页，不请求 Pixiv | `routes_search.py::cache_items` / `helpers.py::query_cached_tag` |
 | 自动关注 | 后台按间隔拉取关注画师最新作品，可选自动下载 | `background.py::_auto_follow_worker` |
@@ -63,7 +62,7 @@
 | 类别 | 选型 | 版本（lock 文件实测） | 说明 |
 | --- | --- | --- | --- |
 | 语言 | Python | 3.13（venv 实测，`requirements-lock.txt` 配套）；语法下限 3.9+（全模块 `from __future__ import annotations`） | 无类型检查 |
-| Web 框架 | Flask | 3.1.3 | 传统多页 + Blueprint 路由（7 个） |
+| Web 框架 | Flask | 3.1.3 | 传统多页 + Blueprint 路由（6 个） |
 | ORM | SQLAlchemy 2.0 | 2.0.51 | Declarative 映射，原生 SQL（`text()`）用于性能热点 |
 | 数据库 | SQLite | 3.50.4（实测） | WAL 模式、`busy_timeout=10000`、`synchronous=NORMAL`（`models.py:23-29`） |
 | HTTP 客户端 | requests | 2.34.2 | 带 urllib3 `Retry(total=1, connect=0)`（`fetcher.py:312-319`） |
@@ -79,7 +78,7 @@
 
 ```mermaid
 graph TD
-    U[浏览器 / 单用户] -->|HTTP + CSRF Token| W[Web 层：Flask + 7 Blueprint + Middleware]
+    U[浏览器 / 单用户] -->|HTTP + CSRF Token| W[Web 层：Flask + 6 Blueprint + Middleware]
     subgraph MW["中间件横切（middleware.py）"]
         AUTH[认证墙 before_app_request]
         CSRF[CSRF 校验 POST]
@@ -104,7 +103,7 @@ graph TD
 
 要点：
 
-- **分层**：Web/路由层（`routes_*`，61 路由）→ 服务层（fetcher/background/helpers）→ 数据层（`models.py`）；中间件横切于请求前后；`runtime.py` 提供全部进程级共享状态。
+- **分层**：Web/路由层（`routes_*`，48 路由）→ 服务层（fetcher/background/helpers）→ 数据层（`models.py`）；中间件横切于请求前后；`runtime.py` 提供全部进程级共享状态。
 - **依赖单向无环**：`config/runtime/helpers(叶子) → middleware → background → routes_* → app.py`（`docs/architecture.md:25-37` 与源码 import 一致）。`routes_*` 之间互不导入；`middleware`/`background`/`routes_*` 内对「可能被测试补丁的符号」一律在**函数体内 `import app` 延迟引用**（测试契约，见 §24.4）。
 - **部署拓扑约束**：进程内存状态（下载队列/搜索任务/限流/预取/关注状态）**不支持多 worker**（`runtime.py:30-42`），生产必须 `gunicorn -w 1 --threads 8`（线程共享进程内存，提供并发）。
 
@@ -147,31 +146,30 @@ sequenceDiagram
 E:\pixiv\
 ├── AGENTS.md                      # 唯一工程入口文档（命令/架构/约定/测试契约/并发约定/性能基线）
 ├── app.py                         # 组装入口（152 行）：Flask app、ProxyFix、SECRET_KEY、Session 加固、
-│                                  #   注册 7 Blueprint、启动后台线程、4 个页面路由；app 命名空间补丁契约
+│                                  #   注册 6 Blueprint、启动后台线程、4 个页面路由；app 命名空间补丁契约
 ├── config.py                      # 常量 + .env（setdefault 手写解析）+ instance/settings.json import 时覆盖；
 │                                  #   SETTINGS_KEYS 是设置键唯一来源
-├── models.py                      # SQLAlchemy ORM（6 表）+ init_db / get_session / safe_commit / get_favorite_pids
+├── models.py                      # SQLAlchemy ORM（4 表）+ init_db / get_session / safe_commit
 ├── runtime.py                     # 进程内存状态（-w 1 语义）：扫描缓存/限流存储/搜索任务/下载队列/预取状态
-├── helpers.py                     # 纯工具与库内查询：缓存淘汰、下载目录扫描、URL 工具、query_cached_tag、收藏位置
+├── helpers.py                     # 纯工具与库内查询：缓存淘汰、下载目录扫描、URL 工具、query_cached_tag
 ├── middleware.py                  # 认证 / CSRF / 限流 / 安全头；app 级钩子随 middleware_bp 全局生效
 ├── background.py                  # 后台线程与下载引擎：自动关注、预取（含最终收藏数刷新状态机）、下载执行器、启动重置
 ├── fetcher.py                     # Pixiv API 封装（1373 行）：认证、搜索、详情、令牌桶、重试策略、预算、取消、入库
 ├── routes_search.py               # /search（异步任务）、/api/search/status、/api/cache/*、/api/following
-├── routes_gallery.py              # /gallery、/detail、/api/gallery*、/thumb、/api/image、/api/favorite、/api/open-dir
+├── routes_gallery.py              # /gallery、/detail、/api/gallery*、/thumb、/api/image、/api/open-dir
 ├── routes_download.py             # /download 系列、/api/downloads、/download_file、下载管理页
 ├── routes_prefetch.py             # /api/prefetch/{config,tags,status,refresh,refresh-reset}
-├── routes_collections.py          # /api/collections 全部（items/batch/move）
 ├── routes_settings.py             # /login、/settings、/api/settings、/api/blocked-tags、/api/auto-follow/*
 ├── migrations/
 │   ├── __init__.py                # 导出 MIGRATIONS / LATEST_SCHEMA_VERSION / run_migrations
 │   ├── runner.py                  # PRAGMA user_version 版本化迁移 + 迁移前自动备份（backup_database）
-│   └── versions.py                # v1-v4 迁移实现（含 SQLite<3.35 重建表兼容策略）
+│   └── versions.py                # v1-v5 迁移实现（v5 删除收藏夹两张表，v1 对缺表 no-op；含 SQLite<3.35 重建表兼容策略）
 ├── scripts/
 │   ├── run_tests.ps1              # pytest 包装：确定性临时根 + 沙箱 shim 条件加载 + 直调 venv python
 │   ├── sandbox_pytest_shim.py     # DSH 沙箱专用插件：剥 os.mkdir 的 mode（0o700 → ACL 问题）
 │   ├── pixiv-cleanup.sh           # 仅清理已下载原图（30 天前 + 收藏 <100），realpath 越界保护
-│   └── _inspect_db.py             # 巡检：打印表名与六表行数
-├── tests/                         # conftest + 12 个 pytest 文件 + test_cleanup_script.ps1（约 313 用例）
+│   └── _inspect_db.py             # 巡检：打印表名与硬编码表名行数（表名清单已同步 v5 删表）
+├── tests/                         # conftest + 测试文件（实测收集 682 条 = 676 passed / 2 skipped / 4 failed(env)）
 ├── templates/                     # 8 个 Jinja2 模板（index/gallery/detail/downloads/cache/settings/settings_unlock/login）
 ├── static/
 │   ├── app.js                     # 共享工具（$ / escHtml / proxyThumb / fmtSize / pvCache / showToast ...）
@@ -194,11 +192,11 @@ E:\pixiv\
 ├── cookies.txt                    # Pixiv 会话（gitignore，敏感文件）
 ├── opendesign/                    # 设计工作流产物（design-systems + mockups，不参与运行）
 ├── pixiv-api-http-main/           # 内置第三方 Node.js Pixiv API 参考实现（仅接口对照，不参与运行）
-├── PpPpP的收藏夹方案.md            # 收藏夹设计文档（项目 v1 迁移采纳其分数差值排序思想）
+├── PpPpP的收藏夹方案.md            # ⚠ 该文件已不在仓库中（历史收藏夹设计文档；v1 迁移曾采纳其分数差值排序思想，功能已于 v5 移除）
 └── 0001-fix-reset-stuck-prefetch-*.patch  # 外部补丁（引入 _reset_stuck_prefetch，已并入启动序列）
 ```
 
-分类：**核心代码**＝根目录 15 个 Python 模块 + templates/ + static/；**基础设施**＝migrations/ + scripts/；**配置**＝config.py + 3 个 requirements + pytest.ini + .gitignore；**测试**＝tests/；**工具**＝scripts/_inspect_db.py、scripts/pixiv-cleanup.sh；**入口**＝app.py（`app:app`）；**参考/可选**＝opendesign/、pixiv-api-http-main/、*.patch、方案文档；**运行数据**＝instance/、downloads/、cookies.txt（全部 gitignore）。
+分类：**核心代码**＝根目录 14 个 Python 模块 + templates/ + static/；**基础设施**＝migrations/ + scripts/；**配置**＝config.py + 3 个 requirements + pytest.ini + .gitignore；**测试**＝tests/；**工具**＝scripts/_inspect_db.py、scripts/pixiv-cleanup.sh；**入口**＝app.py（`app:app`）；**参考/可选**＝opendesign/、pixiv-api-http-main/、*.patch；**运行数据**＝instance/、downloads/、cookies.txt（全部 gitignore）。
 
 ## 7. 模块说明
 
@@ -206,19 +204,18 @@ E:\pixiv\
 
 | 模块 | 职责一句话 | 关键符号 | 依赖 |
 | --- | --- | --- | --- |
-| `app.py` | 组装入口：Flask app / 配置 / 注册 7 Blueprint / 后台线程 / 4 页面路由；app 命名空间测试补丁契约 | `app`、`index`、`csrf_token`、`cache_page`、`favicon` | 全部模块（from-import 再导出） |
+| `app.py` | 组装入口：Flask app / 配置 / 注册 6 Blueprint / 后台线程 / 4 页面路由；app 命名空间测试补丁契约 | `app`、`index`、`csrf_token`、`cache_page`、`favicon` | 全部模块（from-import 再导出） |
 | `config.py` | 常量、`.env` 解析、`settings.json` import 时覆盖；`SETTINGS_KEYS` 设置键唯一来源 | `SETTINGS_KEYS`（config.py:133-150）、`COOKIE_PATH`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE` | 标准库、无模块依赖 |
-| `models.py` | ORM 6 表 + 会话管理 + 迁移入口 | `Illust`/`BlockedTag`/`DownloadLog`/`SearchCache`/`Collection`/`CollectionItem`、`init_db`、`get_session`、`safe_commit`、`get_favorite_pids` | config、sqlalchemy |
+| `models.py` | ORM 4 表 + 会话管理 + 迁移入口 | `Illust`/`BlockedTag`/`DownloadLog`/`SearchCache`、`init_db`、`get_session`、`safe_commit` | config、sqlalchemy |
 | `runtime.py` | 进程内存状态（-w 1 语义） | `_scan_cache`、`_db_pids_cache`、`_prefetch_state`、`download_executor`、`download_cancellations`、`_queued_downloads`、`_download_progress`、`_rate_limit_store`、`_search_tasks`、`SEARCH_TASK_TTL` | config、标准库 |
-| `helpers.py` | 纯工具函数与库内查询 | `enforce_image_cache_limit`、`_scan_local_downloads`、`_build_orphan_dicts`、`query_cached_tag`、`_pid_filter`、`_next_collection_position`、`_compute_move_position`、`_delete_illust_files`、`_delete_orphan_files` | config、models、fetcher、runtime |
+| `helpers.py` | 纯工具函数与库内查询 | `enforce_image_cache_limit`、`_scan_local_downloads`、`_build_orphan_dicts`、`query_cached_tag`、`_pid_filter`、`_delete_illust_files`、`_delete_orphan_files` | config、models、fetcher、runtime |
 | `middleware.py` | 认证墙 / CSRF / IP 限流 / 安全头（app 级钩子） | `_require_login`、`_csrf_required`、`_rate_limit`、`_check_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_safe_next`、`_security_headers`、`bp` | runtime |
 | `background.py` | 后台线程与下载引擎 | `_auto_follow_worker`、`_prefetch_loop`、`_prefetch_one_tag`、`_prefetch_refresh_bookmarks`、`_refresh_bookmarks_pass`、`_prefetch_capacity_cleanup`、`reset_prefetch_refresh`、`_download_illust`、`_reset_stuck_downloads`、`_reset_stuck_prefetch`、`start_background_threads`、`_is_user_owned` | fetcher、helpers、runtime、models |
 | `fetcher.py` | Pixiv API 封装（认证/搜索/详情/限流/重试/预算/取消/入库/连接池） | `build_pixiv_session`、`get_pooled_session`、`reset_pooled_session`、`paginated_search`、`search_by_tag`、`search_by_user`、`browse_discovery`、`fetch_following`、`_get_illust_detail`、`_fetch_details_parallel`、`_process_items`、`_insert_new_illusts`、`encode_cursor`/`decode_cursor`、`_TokenBucket`、`PixivAuthError`、`SearchCancelledError`、`SearchRateLimitedError`、`_DetailFetchBatch`、`_ProcessedItems`、`DEAD_DETAIL`、`RETRYABLE_GLOBAL_DETAIL` | config、models |
 | `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `search`、`search_status`、`cache_items`、`api_cache_tags`、`cache_item_delete`、`api_following`、`_submit_search_task`、`_cleanup_search_tasks` | middleware、helpers、fetcher、background、models、runtime |
-| `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理 / 收藏/打开目录 | `thumb_proxy`、`serve_image`、`detail_page`、`detail_api`、`api_gallery`、`delete_gallery`、`batch_delete_gallery`、`api_favorite_*`、`api_open_dir`、`CACHE_DIR`（单点定义） | helpers、fetcher、middleware、models、runtime |
+| `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理 / 打开目录 | `thumb_proxy`、`serve_image`、`detail_page`、`detail_api`、`api_gallery`、`delete_gallery`、`batch_delete_gallery`、`api_open_dir`、`CACHE_DIR`（单点定义） | helpers、fetcher、middleware、models、runtime |
 | `routes_download.py` | 下载触发/状态/取消/批量/导出/管理页 | `trigger_download`、`batch_download`、`_cancel_download_internal`、`download_status`、`download_status_batch`、`download_file`、`api_downloads` | background、helpers、middleware、models、runtime |
 | `routes_prefetch.py` | 预取管理 API | `prefetch_config_get/post`、`prefetch_tags_get/post/delete`、`prefetch_status_get`、`prefetch_refresh_reset_post`、`prefetch_refresh_post`、`_PREFETCH_SETTINGS_KEYS` | background、fetcher、middleware、models、runtime |
-| `routes_collections.py` | 收藏夹全部路由 | `list_collections`、`create_collection`、`update_collection`、`delete_collection`、`list_collection_items`、`add_collection_item`、`remove_collection_item`、`batch_add/remove_collection_items`、`move_collection_item` | helpers、middleware、models |
 | `routes_settings.py` | 登录 / 设置 / 屏蔽标签 / 自动关注控制 | `login_page`、`login_submit`、`settings_page`、`api_settings_get/post`、`settings_unlock`、`list/add/remove_blocked_tag`、`auto_follow_status/config`、`_SETTINGS_PATH`、`_load_settings`、`_settings_locked` | middleware、fetcher、models、runtime |
 
 ### 7.2 模块依赖关系
@@ -230,7 +227,7 @@ fetcher ──→ config, models
 helpers ──→ config, models, fetcher, runtime
 middleware ──→ runtime；函数体内 import app（认证位）
 background ──→ fetcher, helpers, runtime, models
-routes_search / routes_gallery / routes_download / routes_prefetch / routes_collections / routes_settings
+routes_search / routes_gallery / routes_download / routes_prefetch / routes_settings
     ──→ middleware, helpers, runtime, background, models（模块间互不 import）
 app.py（最后组装，from-import 再导出 20+ 符号作为测试补丁 seam）
 ```
@@ -261,7 +258,7 @@ sequenceDiagram
     A->>A: 4. Flask app + ProxyFix(x_for=1, x_proto=1)
     A->>A: 5. SECRET_KEY（instance/.secret_key，缺失/空则生成）
     A->>A: 6. Session 加固（HttpOnly/SameSite=Lax/Secure=COOKIE_SECURE/7 天）
-    A->>A: 7. 注册 7 个 Blueprint（middleware_bp 最先）
+    A->>A: 7. 注册 6 个 Blueprint（middleware_bp 最先）
     A->>A: 8. mkdir downloads/ 与 image_cache/；enforce_image_cache_limit(force=True)
     A->>M: 9. init_db()：create_all → run_migrations（user_version，迁移前自动备份）→ 无条件补跑 repair+v4 列
     A->>B: 10. _reset_stuck_downloads() / _reset_stuck_prefetch()（清残留状态）
@@ -283,7 +280,7 @@ sequenceDiagram
     U->>P: HTTP 请求
     P->>MW: before_app_request _require_login（认证墙）
     MW-->>U: 未认证：页面 302 /login 或 API 401
-    MW->>RT: 通过 → 路由分发（61 路由之一）
+    MW->>RT: 通过 → 路由分发（48 路由之一）
     RT->>RT: 参数校验（sort/tag_mode/r18_mode 白名单回退、游标解码）
     RT->>SV: 业务调用（POST 先过 _csrf_required，登录类再过 _rate_limit）
     SV->>DB: get_session() + safe_commit()（写入必须 safe_commit）
@@ -364,8 +361,8 @@ sequenceDiagram
 
 要点（源码）：
 - 入库永不停，容量靠三层淘汰压住（`background.py:554-561` 注释明确否决「暂停入库」方案）。
-- 刷新失败状态机（`background._refresh_bookmarks_pass`，`background.py:282-421`）：暂时性失败写 `refresh_failed_at` 退避 24h；404/删除类返回 `DEAD_DETAIL` 当场删除（已下载/已收藏保留并标记完成）；限流/连接错误返回 `RETRYABLE_GLOBAL_DETAIL` 不写标记，连续 3 条熔断本轮；认证失效/缺 Cookie 只中止不冒泡（冒泡会跳过容量清理、上限失效）。
-- 容量清理三层（`background._prefetch_capacity_cleanup`，`background.py:470-535`）：① 已最终刷新（信号可信）② 未刷新但失败过或入库 >3 天③ 其余未刷新兜底；层内收藏数低优先、并列更早上传优先；保护判定统一 `_is_user_owned`（`background.py:241-253`：收藏夹成员或用户操作类 DownloadLog，`prefetch_deleted` 不算保护）。
+- 刷新失败状态机（`background._refresh_bookmarks_pass`，`background.py:282-421`）：暂时性失败写 `refresh_failed_at` 退避 24h；404/删除类返回 `DEAD_DETAIL` 当场删除（已下载/点过下载的保留并标记完成）；限流/连接错误返回 `RETRYABLE_GLOBAL_DETAIL` 不写标记，连续 3 条熔断本轮；认证失效/缺 Cookie 只中止不冒泡（冒泡会跳过容量清理、上限失效）。
+- 容量清理三层（`background._prefetch_capacity_cleanup`，`background.py:470-535`）：① 已最终刷新（信号可信）② 未刷新但失败过或入库 >3 天③ 其余未刷新兜底；层内收藏数低优先、并列更早上传优先；保护判定 = 已下载/下载中/排队中 + `_is_user_owned`（`background.py:287-299`：仅**用户操作类** `DownloadLog`，含失败/取消待重试；`prefetch_deleted` 不算保护）。收藏夹移除后，"只收藏未下载"不再构成保护。
 - 手动干预：`POST /api/prefetch/refresh`（单标签后台刷新）、`POST /api/prefetch/refresh-reset`（`{tag}` 或 `{pixiv_id}`，清标记放回队列）。
 
 ### 9.3 下载
@@ -403,12 +400,7 @@ sequenceDiagram
 - 取消分两个入口：`/download/cancel`（标记取消，worker 自行感知清理）与 `/download/reset`（立即删残留文件 + 重置状态；取消标记留给 worker 的 finally 清理，`routes_download.py:79-112`）。
 - 自动关注新作品先 commit 再提交下载，否则 `_download_illust` 查不到行会静默跳过（`background.py:127-135`）。
 
-### 9.4 收藏与移动排序
-
-- 收藏语义完全由 Collection 驱动：切换收藏 = 在「我的收藏」收藏夹增删 `CollectionItem`（`routes_gallery.py:551-576`）；判断收藏用 `models.get_favorite_pids()`；`Illust.is_favorite` 列已废弃删除（v2 迁移）。
-- 排序：新项位置 = 当前最大 position + 1000（`helpers._next_collection_position`）；上移/下移在相邻项之间取中点（间距 <1.0 时触发全量重排 `(i+1)*1000`）；最终 UPDATE 带 `AND position=:op` 乐观锁，rowcount=0 返回 409（`routes_collections.py:193-248`）。
-
-### 9.5 缩略图代理
+### 9.4 缩略图代理
 
 ```text
 GET /thumb/<urlsafe_b64(url)>
@@ -454,14 +446,12 @@ graph LR
 
 | 类 | 表 | 职责 | 关键字段（类型） | 关键方法/属性 |
 | --- | --- | --- | --- | --- |
-| `Illust` | `illusts` | 作品元数据（搜索/预取/下载共用一张表） | `pixiv_id`(int, UNIQUE, index)、`title`、`user_id`(index)、`user_name`、`tags`(Text JSON)、`page_count`、`bookmark_count`、`bookmark_updated_at`(DateTime?)、`upload_date`、`thumb_url`、`original_urls`(Text JSON)、`local_paths`(Text JSON, null)、`download_status`(String?)、`downloaded_at`、`file_size`、`prefetch_source`(int 0/1)、`prefetch_refresh_at`(DateTime?)、`refresh_failed_at`(DateTime?)、`created_at` | `tags_list`/`original_urls_list`/`local_paths_list`（JSON property，坏 JSON 返回 []/None）、`to_dict(favorite)`（不输出 local_paths） |
+| `Illust` | `illusts` | 作品元数据（搜索/预取/下载共用一张表） | `pixiv_id`(int, UNIQUE, index)、`title`、`user_id`(index)、`user_name`、`tags`(Text JSON)、`page_count`、`bookmark_count`、`bookmark_updated_at`(DateTime?)、`upload_date`、`thumb_url`、`original_urls`(Text JSON)、`local_paths`(Text JSON, null)、`download_status`(String?)、`downloaded_at`、`file_size`、`prefetch_source`(int 0/1)、`prefetch_refresh_at`(DateTime?)、`refresh_failed_at`(DateTime?)、`created_at` | `tags_list`/`original_urls_list`/`local_paths_list`（JSON property，坏 JSON 返回 []/None）、`to_dict()`（无参数，不输出 local_paths） |
 | `BlockedTag` | `blocked_tags` | 屏蔽标签 | `tag`(String, UNIQUE, index)、`created_at` | — |
 | `DownloadLog` | `download_logs` | 下载/删除审计 | `pixiv_id`(int, index)、`action`(String)、`message`、`created_at` | `to_dict()` |
 | `SearchCache` | `search_cache` | 预取缓存索引（tag 主键） | `tag`(String, PK)、`illust_ids`(Text JSON)、`cached_at`(DateTime?)、`status`(String: idle/fetching/done/error)、`error`、`total`(int) | — |
-| `Collection` | `collections` | 收藏夹 | `name`(String, UNIQUE)、`description`、`created_at`、`updated_at`(onupdate) | `to_dict()` |
-| `CollectionItem` | `collection_items` | 收藏夹条目（UNIQUE(collection_id,pixiv_id)） | `collection_id`(FK→collections.id)、`pixiv_id`(int, index)、`position`(Float，分数差值排序)、`created_at` | `to_dict()` |
 
-模块级函数：`init_db()`（create_all→迁移→兜底 repair，models.py:234-245）、`get_session()`（`Session(engine)`）、`safe_commit(session)`（失败 rollback 后原样抛出，models.py:32-49）、`get_favorite_pids(session)`（「我的收藏」成员集合，models.py:252-258）。
+模块级函数：`init_db()`（create_all→迁移→兜底 repair，models.py:192-203）、`get_session()`（`Session(engine)`）、`safe_commit(session)`（失败 rollback 后原样抛出，models.py:32-49）。
 
 ### 11.2 异常/哨兵类（`fetcher.py`）
 
@@ -497,7 +487,7 @@ graph LR
 | `fetch_following(page, r18_mode)` | (results, has_more) | 关注最新作品；本地方再兜一层 R18 过滤 | `background._auto_follow_worker`、`routes_search.api_following` |
 | `_get_illust_detail(session, pixiv_id, limiter, return_dead=False)` | dict / None / 哨兵 | 详情拉取 + 分类重试（ConnectionError 立即返回；403 退避 3s/9s（真实 429 被传输层拦下 → 归入"其他" 1s）；其他退避 1s；401→PixivAuthError；404/删除关键词→DEAD_DETAIL）；每次 attempt 先取 detail/fill 桶与总桶、再进 `_detail_gate` 槽位 | `_fetch_details_parallel`、`helpers._fetch_original_urls`、`background._refresh_bookmarks_pass` |
 | `_fetch_details_parallel(pixiv_ids, early_stop, limiter, on_detail)` | `_DetailFetchBatch(details, attempted, rate_limited)` | 并行详情 + early_stop 流式过滤 + 取消；已启动请求处理完再返回（防分页漂移重复）；`on_detail(pid, detail)` 在 collector 线程按完成顺序回调；被闸拒绝的请求不计 `attempted`、不回调 | `_process_items`、`_background_fill_details` |
-| `_process_items(db, items, id_extractor, illust_factory, blocked, *, min_bookmarks, hide_r18, defer_details, max_results, limiter, progress)` | `_ProcessedItems`（list 子类 + `.rate_limited`） | 去重→过滤→（defer 写库/同步拉详情）→入库→收藏标注；`_budget_consume(attempted)`；`progress` 逐条发 `examined` / `detail_failed` / `result` 三类事件（候选仍以返回值为准） | 3 个搜索函数 |
+| `_process_items(db, items, id_extractor, illust_factory, blocked, *, min_bookmarks, hide_r18, defer_details, max_results, limiter, progress)` | `_ProcessedItems`（list 子类 + `.rate_limited`） | 去重→过滤→（defer 写库/同步拉详情）→入库；`_budget_consume(attempted)`；`progress` 逐条发 `examined` / `detail_failed` / `result` 三类事件（候选仍以返回值为准） | 3 个搜索函数 |
 | `_insert_new_illusts(db, illusts)` | `{pid: 赢家行}` | `INSERT ... ON CONFLICT DO NOTHING` 冲突容忍批量写 + 按 pid 回查 | `_process_items` |
 | `_background_fill_details(pixiv_ids)` / `_kick_background_fill(pixiv_ids)` | — | 后台补全 bookmark_count/original_urls（低速桶 20/min、作品级 300s 去重） | `_process_items`（defer 路径）、`routes_gallery.api_gallery` |
 | `encode_cursor(data)` / `decode_cursor(cursor)` | str / dict\|None | HMAC-SHA256 签名游标（`CURSOR_SECRET`），校验失败返回 None | `paginated_search` / `routes_search.search` |
@@ -516,7 +506,7 @@ graph LR
 | `_refresh_bookmarks_pass(max_items, stats)` / `_prefetch_refresh_bookmarks(max_items)` | 最终收藏数刷新状态机（详见 §9.2）；stats 落 `_prefetch_state['refresh_stats']` | `_prefetch_loop` |
 | `_prefetch_capacity_cleanup()` | 三层容量淘汰（详见 §9.2） | `_prefetch_loop` |
 | `reset_prefetch_refresh(tag=None, pixiv_id=None)` | 清刷新完成/失败标记，把作品放回队列（必须指定范围；tag 批量用 json_each 下推） | `routes_prefetch.prefetch_refresh_reset_post` |
-| `_is_user_owned(db, pixiv_id)` | 保护判定：收藏夹成员或用户操作类 DownloadLog | 两处容量/删除逻辑 |
+| `_is_user_owned(db, pixiv_id)` | 保护判定：存在**用户操作类** `DownloadLog`（`start`/`failed`/`cancelled`/`done`/`deleted`，含失败/取消待重试）；与"已下载/下载中/排队中"共同构成完整保护集 | 两处容量/删除逻辑 |
 | `_download_illust(pixiv_id)` | 下载引擎（详见 §9.3） | `download_executor` |
 | `_release_download_lock(pixiv_id, lock)` | 注销锁：`download_locks.get(pid) is lock` 才 pop（防删掉并发新任务的锁） | `_download_illust` finally |
 | `start_background_threads()` / `_shutdown_background_threads()` | 启动所有后台线程（幂等）/ atexit 优雅停止 | app.py |
@@ -529,7 +519,6 @@ graph LR
 | `_scan_local_downloads()` | 扫描 downloads/ 返回 `{pid: [paths]}`，TTL 30s；先写 data 再写 ts（防脏窗口） |
 | `_pid_filter(all_ids)` | json_each 单绑定参数下推（8000 id 实测快 8.8 倍，不拼分块 IN） |
 | `query_cached_tag(tag, min_bookmarks, sort_order, tag_mode, r18_mode, offset, limit, filter_tag)` | 库内缓存查询：过滤/排序/分页/计数全部下推 SQLite；tags 损坏降级丢标签条件；返回 (results, has_more, next_offset, filtered_total) |
-| `_compute_move_position(items, idx, direction)` | 收藏移动位置计算（中点/边界 ±1000/需重排），返回 (new_pos, needs_rebalance, error_code) |
 | `_check_rate_limit(ip, max_attempts, window)` | 限流核心：整个读-判-记-清在 `_rate_limit_lock` 内（防并发绕过，middleware.py:31-57） |
 | `_csrf_required(f)` | POST 校验 `X-CSRF-Token` 头（hmac.compare_digest） |
 | `_safe_next(url)` | 防开放重定向：拒绝非 `/` 开头、`//`、`\`、控制字符 |
@@ -584,7 +573,7 @@ graph LR
 
 - 功能：查询任务状态（访问时顺带清理过期任务）。
 - 响应：200 `{"status": "done|running|cancelled", "results": [...], "cursor": "<str|null>", "has_more": bool, "fetch_stats": {"detail_fetched": n, "detail_failed": n, "seconds": f}}`；终态 `error` 时 401（auth）或 502 并带 `error` 字段；404 `{"error": "搜索任务不存在或已过期，请重新搜索", "error_code": "TASK_LOST"}`。
-- 结果条目字段 = `Illust.to_dict()`（§14）＋ 搜索特有字段（`is_favorite` 注水；作者搜索含全部详情字段）。
+- 结果条目字段 = `Illust.to_dict()`（§14）＋ 搜索特有字段（作者搜索含全部详情字段）；本地收藏夹移除后不再有 `is_favorite` 注水。
 - 源码：`routes_search.py::search_status`（220-242）。
 
 #### GET /api/cache/items — 缓存浏览（库内查询，不请求 Pixiv）
@@ -595,7 +584,7 @@ graph LR
 
 #### GET /api/cache/tags — 预取作品标签列表（datalist 提示，LIMIT 500，损坏 JSON 降级空列表）。源码：`routes_search.py::api_cache_tags`。
 
-#### POST /api/cache/items/<pixiv_id>/delete — 从缓存删除单条（须 CSRF；已下载/下载中/已收藏返回 400；非预取 404）。源码：`routes_search.py::cache_item_delete`（310-325）。
+#### POST /api/cache/items/<pixiv_id>/delete — 从缓存删除单条（须 CSRF；已下载/下载中返回 400；非预取 404）。源码：`routes_search.py::cache_item_delete`（310-325）。
 
 #### GET /api/following?page=&r18_mode= — 关注最新列表；401（Cookie 过期）。源码：`routes_search.py::api_following`。
 
@@ -624,19 +613,15 @@ graph LR
 #### GET /api/gallery
 
 - 功能：图库分页查询（已下载作品 + 孤儿文件补全）。
-- 参数：`tag`（标签过滤）、`limit`(1-200，默认 50)、`offset`、`favorites`(true/false)、`collection_id`（按收藏夹过滤并按其 position 排序）、`sort`(created/downloaded)、`r18`(safe/all)。
-- 响应：200 `{"data": [...], "total": n, "favorite_total": n, "has_more": bool}`；条目 = `to_dict()` + `file_count` + `local_urls`（orphan 额外含 `local_dir`/`local_paths` 且 `download_status='done'`）。
-- 源码：`routes_gallery.py::api_gallery`（239-420）。
+- 参数：`tag`（标签过滤）、`limit`(1-200，默认 50)、`offset`、`sort`(created/downloaded)、`r18`(safe/all)。
+- 响应：200 `{"data": [...], "total": n, "has_more": bool}`；条目 = `to_dict()` + `file_count` + `local_urls`（orphan 额外含 `local_dir`/`local_paths` 且 `download_status='done'`）。本地收藏夹移除后，`favorites` / `collection_id` 参数与 `favorite_total` 字段均已删除（传入即被忽略）。
+- 源码：`routes_gallery.py::api_gallery`。
 
 #### GET /api/gallery/tags — 已下载作品标签去重列表（LIMIT 1000）。源码：`routes_gallery.py::api_gallery_tags`。
 
 #### DELETE /api/gallery/<pixiv_id> — 删除已下载作品（含孤儿目录删除）；无行也无目录 404；写 DownloadLog(deleted)；失效扫描缓存。源码：`routes_gallery.py::delete_gallery`。
 
 #### POST /api/gallery/batch-delete — 批量删除（ids 列表；孤儿一并处理）。源码：`routes_gallery.py::batch_delete_gallery`。
-
-#### GET /api/illust/<pixiv_id>/collections — 返回该作品所在收藏夹 id 列表。源码：`routes_gallery.py::illust_collections`。
-
-#### GET/POST /api/favorite/<pixiv_id> — 查询/切换「我的收藏」归属；POST 返回 `{"is_favorite": true|false}`；404 作品不存在。源码：`routes_gallery.py::api_favorite_get/post`。
 
 #### POST /api/open-dir — 打开本地文件夹（仅 `remote_addr` 为 127.0.0.1/::1；Windows `os.startfile`，其他平台 `xdg-open`）。源码：`routes_gallery.py::api_open_dir`。
 
@@ -662,26 +647,12 @@ graph LR
 | `POST /api/prefetch/config` | 更新预取三键：先全部校验持久化 settings.json，成功后一次性同步内存；非整数 400；写盘失败 500 | 更新后的三键 |
 | `GET /api/prefetch/tags` | 全部标签（cached_at/status/total/error） | — |
 | `POST /api/prefetch/tags` | 新增标签（`{"tag": "..."}`） | 201 `{"tag": ...}`；409 已存在 |
-| `DELETE /api/prefetch/tags/<tag>` | 删除标签并连带删除无引用/未下载/未收藏的预取作品 | `{"tag": ...}`；404 |
+| `DELETE /api/prefetch/tags/<tag>` | 删除标签并连带删除无引用/未下载（无本地文件）的预取作品 | `{"tag": ...}`；404 |
 | `GET /api/prefetch/status` | `{"running", "last_check", "interval", "refresh": {上一轮统计}, "pending_refresh", "failed_backoff", "detail_errors": {message→count}}` | — |
 | `POST /api/prefetch/refresh-reset` | 清刷新标记放回队列（`{"tag"}` 或 `{"pixiv_id"}`，必选其一；404 标签不存在） | `{"status":"reset","count":n}` |
 | `POST /api/prefetch/refresh` | 后台线程触发单标签预取 | `{"tag", "status":"refreshing"}`；409 正在刷新 |
 
-### 13.6 收藏夹（routes_collections.py）
-
-| 端点 | 功能 | 返回要点 |
-| --- | --- | --- |
-| `GET /api/collections` | 列表（一次 GROUP BY 计数） | `[{id,name,description,created_at,updated_at,item_count}]` |
-| `POST /api/collections` | 创建（name≤50）。409 重名 | 201 `Collection.to_dict()` |
-| `PUT /api/collections/<id>` | 改名/描述。404/409 | 更新后的 dict |
-| `DELETE /api/collections/<id>` | 删除（连带条目） | `{"status":"deleted"}` |
-| `GET /api/collections/<id>/items` | 分页条目（按 position ASC） | `{"data","total","has_more"}` |
-| `POST /api/collections/<id>/items` | 加条目（`{"pixiv_id"}`，position=MAX+1000）。409 已在夹内 | 201 item dict |
-| `DELETE /api/collections/<id>/items/<pid>` | 移除 | `{"status":"deleted"}` |
-| `POST/DELETE /api/collections/<id>/items/batch` | 批量加/删（`{"pixiv_ids":[...]}`） | `{"added","total"}` / `{"removed"}` |
-| `POST /api/collections/<id>/items/<pid>/move` | 上移/下移（`{"direction":"up|down"}`；乐观锁） | `{"position", "rebalanced"}`；400 边界；409 位置被改 |
-
-### 13.7 设置 / 认证（routes_settings.py、middleware.py）
+### 13.6 设置 / 认证（routes_settings.py、middleware.py）
 
 #### GET/POST /login
 
@@ -706,7 +677,7 @@ graph LR
 #### /api/auto-follow/status + POST /api/auto-follow/config — 读写 `_auto_follow_state`（interval/auto_download）。源码：`routes_settings.py:58-74`。
 GET 返回 `_auto_follow_state` 的**副本** + 派生字段 `alive`（取自 `background.get_background_health()`）。状态语义（设置页文案依赖，勿简化）：`last_check` / `last_count` 只在**成功拉到关注列表并处理完一轮**时更新；`last_error`（审计 S22）**只在成功跑完一轮时清空**，所以非空 = 最近一轮就失败了 —— 它存在的意义就是把"没有新作品"与"每轮都在失败"分开。**"拉不到任何作品"既不写也不清 `last_error`**：Cookie 失效时 Pixiv 静默返回空结果，写进去是假告警、清掉会抹掉真证据。`alive=True` 也不代表在干活（禁用 interval=0 时线程照样活着）。
 
-### 13.8 鉴权与错误码总表
+### 13.7 鉴权与错误码总表
 
 | 机制 | 说明 |
 | --- | --- |
@@ -727,8 +698,6 @@ GET 返回 `_auto_follow_state` 的**副本** + 派生字段 `alive`（取自 `b
 
 ```mermaid
 erDiagram
-    COLLECTIONS ||--o{ COLLECTION_ITEMS : "FK collection_id (ON DELETE 未配置，代码层删除)"
-    ILLUSTS ||..o{ COLLECTION_ITEMS : "pixiv_id 引用（非 FK，隐式）"
     ILLUSTS ||..o{ DOWNLOAD_LOGS : "pixiv_id 引用（非 FK）"
     SEARCH_CACHE {
         string tag PK
@@ -746,8 +715,6 @@ erDiagram
         text local_paths "JSON 数组 nullable"
     }
     BLOCKED_TAGS { string tag UK }
-    COLLECTIONS { int id PK; string name UK }
-    COLLECTION_ITEMS { int id PK; int collection_id FK; int pixiv_id; float position }
     DOWNLOAD_LOGS { int id PK; int pixiv_id; string action }
 ```
 
@@ -778,17 +745,18 @@ erDiagram
 | `blocked_tags` | `id`/`tag`/`created_at` | — | `tag` UNIQUE+index | 屏蔽标签 |
 | `download_logs` | `id`/`pixiv_id`/`action`/`message`/`created_at` | — | `pixiv_id` index | 审计日志；action 集合：`start`/`done`/`failed`/`cancelled`/`deleted`/`prefetch_deleted`/`cleaned`(由清理脚本经 SQL 写入) |
 | `search_cache` | `tag`/`illust_ids`/`cached_at`/`status`/`error`/`total` | — | `tag` PK | 预取索引；status: idle/fetching/done/error |
-| `collections` | `id`/`name`/`description`/`created_at`/`updated_at` | — | `name` UNIQUE | 收藏夹；`updated_at` onupdate |
-| `collection_items` | `id`/`collection_id`/`pixiv_id`/`position`/`created_at` | collection_id: Integer FK→collections.id（NOT NULL）；position: Float NOT NULL default 0.0 | **UNIQUE(collection_id, pixiv_id)**（`uq_collection_item`）+ `pixiv_id` index | 排序核心：分数差值（1000 步长 / 中点插入） |
 
-### 14.3 迁移历史（`migrations/versions.py:133-138`）
+> 本地收藏夹的两张表（`collections` / `collection_items`）已于迁移 **v5** 删除，ORM 里对应模型（`Collection` / `CollectionItem`）也已整体移除。
+
+### 14.3 迁移历史（`migrations/versions.py::MIGRATIONS`）
 
 | 版本 | 函数 | 内容 |
 | --- | --- | --- |
-| v1 | `migrate_collection_positions` | `collection_items` 补 `position REAL NOT NULL DEFAULT 0.0`，并按 (collection_id, created_at, id) 回填 `counter*1000.0` |
+| v1 | `migrate_collection_positions` | `collection_items` 补 `position REAL NOT NULL DEFAULT 0.0`，并按 (collection_id, created_at, id) 回填 `counter*1000.0`；**`collection_items` 不存在时直接 no-op** —— v5 之后（以及全新库）都没有这张表，不 no-op 会让 `init_db()` 因缺表起不来；对该表仍存在的旧库行为与发布时一致 |
 | v2 | `migrate_illust_schema` | `illusts` 加 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`；**DROP** `description`/`is_favorite`/`favorited_at`（SQLite ≥3.35 用 `ALTER TABLE DROP COLUMN`，否则 `rebuild_illusts_table` 重建表，保留 PK/UNIQUE/NOT NULL/DEFAULT 与全部索引） |
 | v3 | `repair_illust_schema` | 幂等重跑 v2（目的：库被外部改动丢列时兜底） |
 | v4 | `add_illust_refresh_failed_at` | 补 `refresh_failed_at DATETIME`（幂等） |
+| v5 | `drop_collection_tables` | **DROP `collections` / `collection_items`**（本地收藏夹功能整体移除）；子表先删（`collection_items.collection_id` 引用 `collections.id`，外部开启外键时先删父表会失败），用 `DROP TABLE IF EXISTS` 保证重入 no-op |
 
 机制（`migrations/runner.py`）：`PRAGMA user_version` 记录当前版本；pending 迁移逐个在事务内执行并推进版本号；**升级前自动 `backup_database` 拷贝到 `instance/backups/<db>.<UTC时间戳>[-n].bak`**（runner.py:12-26, 46-47）。`init_db()` 迁移后**无条件再跑一次** `repair_illust_schema` + `add_illust_refresh_failed_at` 兜底（models.py:240-245）。约束：**新增 schema 变更只允许追加新版本，不得修改已发布版本**（AGENTS.md）。
 
@@ -801,12 +769,11 @@ erDiagram
 | `illusts`（搜索/预取来源） | 搜索/预取/自动关注入库（冲突容忍） | 详情补全（收藏数/原图）、预取刷新、下载状态 | 手动删除（图库/缓存页）、预取容量清理、永久死亡清理 |
 | `search_cache` | 预取/手动刷新 | 每轮累积合并 illust_ids | 删除标签（连带无引用作品） |
 | `download_logs` | 下载/删除全流程 | —（append-only） | 无自动清理（持续增长，Info 级关注点） |
-| `collections/items` | 收藏操作 | position 排序 | 收藏夹删除连带 items |
 | `blocked_tags` | 设置页 | — | 设置页 |
 
 ### 14.5 实例库实测（分析时点）
 
-`PRAGMA user_version = 3`（**v4 未应用**，`illusts` 无 `refresh_failed_at` 列——当前代码下次启动会自动迁移并先备份）；行数：`illusts`=1456、`download_logs`=44、`collections`=1（默认「我的收藏」）、`search_cache`=1、`blocked_tags`=0、`collection_items`=0。SQLite 版本 3.50.4（≥3.35 走 DROP COLUMN 路径）。
+`PRAGMA user_version = 3`（**v4 未应用**，`illusts` 无 `refresh_failed_at` 列——当前代码下次启动会自动迁移并先备份）；行数：`illusts`=1456、`download_logs`=44、`collections`=1（默认「我的收藏」）、`search_cache`=1、`blocked_tags`=0、`collection_items`=0。SQLite 版本 3.50.4（≥3.35 走 DROP COLUMN 路径）。**⚠ 该快照早于 v5**：`collections` / `collection_items` 两表及其行此后已被 v5 迁移删除，当前库结构见 §14.2（4 张表）。
 
 ---
 
@@ -968,7 +935,7 @@ graph TD
 
 | 测试文件 | 测试对象 | 覆盖要点 | 规模（约） |
 | --- | --- | --- | --- |
-| `test_app.py` | app 组装/路由/搜索任务/图库/收藏 | CSRF、异步搜索任务与取消、游标（ps 步长/24h/丢弃重搜）、图库排序/R18/收藏成员契约/孤儿删除、详情 medium_urls、TTL 清理 | ~100 用例 |
+| `test_app.py` | app 组装/路由/搜索任务/图库/收藏夹端点移除契约 | CSRF、异步搜索任务与取消、游标（ps 步长/24h/丢弃重搜）、图库排序/R18/已移除收藏夹端点 404 契约/孤儿删除、详情 medium_urls、TTL 清理 | ~100 用例 |
 | `test_auth.py` | 认证/安全 | 登录墙 302/401、登录成功/失败/爆破限流（含 40 轮×8 线程并发压限流器）、_safe_next 开放重定向、open-dir 本机限制、CSP 与安全头 | ~25 |
 | `test_models.py` | ORM/迁移 | 模型字段、JSON property、to_dict（精确键集）、safe_commit locked 语义、重建表兼容 | ~30 |
 | `test_migrations.py` | 迁移 runner | 备份落盘/时间戳唯一、仅待迁移才备份、按序应用、失败不推进版本、legacy 升级 | ~15 |
@@ -985,7 +952,7 @@ graph TD
 
 - **数据库隔离**：`conftest.py:8-15` 在 import models/app **前**覆盖 `config.DATABASE_PATH`（`pixiv_test_<pid>.db`）并置 `AUTO_FOLLOW_INTERVAL=0`/`PREFETCH_INTERVAL=0`。
 - **app fixture**（session 级）：`TESTING=True` + `SESSION_COOKIE_SECURE=False`；teardown 先 `models.engine.dispose()` 再删 db/-wal/-shm（WinError 32 规避，conftest.py:29-40）。
-- **clean_db**：每用例清空六表 + 重置 `_scan_cache['ts']`/`_db_pids_cache['ts']`。
+- **clean_db**：每用例清空四表（`Illust`/`BlockedTag`/`DownloadLog`/`SearchCache`）+ 重置 `_scan_cache['ts']`/`_db_pids_cache['ts']`。
 - **app 命名空间补丁 seam**：`app.py` 顶部 from-import 再导出被补丁符号（搜索函数、TTL、`_prefetch_*`、`build_pixiv_session`、`_SETTINGS_PATH` 等 20+）；业务模块在函数体内 `import app` 延迟引用（`docs/architecture.md:45-67` 契约表）。**删除任何 from-import 前必须 `grep "app\.<名>" tests/` 核对**。
 - **离线原则**：全库无 `@pytest.mark.integration` 用例（marker 与 `live_pixiv_required` 为死代码）；构造 detail/download 类用例必须预置 `original_urls_list`（否则惰性拉取走真实网络，历史事故：单用例 15s→140s）。
 - **运行入口**：`scripts\run_tests.ps1`（确定性临时根 + 沙箱插件 + 直调 `venv\Scripts\python.exe -m pytest`，参数透传）；本地也可直接 `venv\Scripts\python.exe -m pytest`。
@@ -1074,7 +1041,7 @@ graph TD
 | 项 | 事实 | 证据 |
 | --- | --- | --- |
 | 库内过滤用 json_each 单绑定参数 | `_pid_filter` 把整个 id 数组作为一个绑定参数下推；分块 IN 在 8000 id 时生成 16k 绑定参数。实测 `query_cached_tag` 64.2ms → 24.8ms（纯 SQL 64ms → 7ms，8.8×） | `helpers.py:190-198`、AGENTS.md |
-| 计数防 N+1 | `list_collections` 一次 GROUP BY；20 个收藏夹计数从 5.0ms → 整条路由 0.9ms | `routes_collections.py:19-31` |
+| 计数防 N+1 | *（历史项：随收藏夹功能移除，`list_collections` 与 `routes_collections.py` 已不存在，保留为教训）* 一次 GROUP BY 取代逐条 COUNT；20 个收藏夹计数从 5.0ms → 整条路由 0.9ms | 原 `routes_collections.py:19-31`（已删除） |
 | 连接池复用 | `/thumb` 与 `_fetch_details_parallel` 走 `get_pooled_session()`（threading.local）；实测 30 请求：每请求新建 Session=30 条 TCP 连接，复用=1 条 | `fetcher.py:332-371`、AGENTS.md |
 | 图片响应带 max_age | `LOCAL_IMAGE_MAX_AGE=7 天`（Flask 默认 `SEND_FILE_MAX_AGE_DEFAULT=None` 会发 no-cache）；/thumb 同为 7 天 | `routes_gallery.py:129`、`thumb_proxy` |
 | 详情预算 | 作者搜索 `detail_budget=ITEMS_PER_PAGE×2`，防止扫满 `_MAX_SCAN_PAGES` 页（最坏 10×24×1.33s≈5 分钟） | `fetcher.py:75-111`、`routes_search.py:210` |
@@ -1097,7 +1064,7 @@ graph TD
 | `download_file` 内存 ZIP | 100MB+ 原图合集全量入 BytesIO（ZIP_STORED），内存峰值≈文件总大小 | 临时文件流式 zip（zipfile 写磁盘文件） |
 | `_process_items` to_refetch 重复拉取 | bookmark_count=0 且同步路径失败的旧行，每次搜索都重拉详情 | 记录永久失败标记（类似 refresh_failed_at 的按作品退避） |
 | `fetch_following` 每页一次会话扫描 | auto_follow 每轮最多 10 页 × 网络；间隔 600s，可接受 | 维持 |
-| 大 `illusts` 表无 bookmark_count 独立索引 | 图库 `favorites_only` 无收藏数过滤；容量淘汰按 bookmark_count 排序是 Python 层（10000 行内） | 规模增长后再评估 |
+| 大 `illusts` 表无 bookmark_count 独立索引 | 图库已无收藏数过滤（收藏夹筛选随功能移除）；容量淘汰按 bookmark_count 排序是 Python 层（10000 行内） | 规模增长后再评估 |
 | SQLite 单写者 | 预取/搜索/下载并发写有 busy_timeout 10s 兜底；高并发写会串行化 | 单用户场景可接受 |
 | 内存态互斥覆盖 | `_last_fetch_stats` 并发覆盖（仅展示统计）；`_scan_cache`/`_db_pids_cache` 并发重建重复扫盘 | AGENTS.md 已判定可接受 |
 
@@ -1211,7 +1178,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 
 ### 24.1 新增路由
 
-1. 在对应 `routes_*.py` 添加 `@bp.route(...)` 视图（已注册的 7 个 Blueprint 复用，无需改 app.py；新 Blueprint 才需在 `app.py:102-108` 注册）。
+1. 在对应 `routes_*.py` 添加 `@bp.route(...)` 视图（已注册的 6 个 Blueprint 复用，无需改 app.py；新 Blueprint 才需在 `app.py:102-108` 注册）。
 2. POST 接口必须 `@_csrf_required`；可能被限流的关键接口加 `@_rate_limit`。
 3. 依赖「可能被测试 monkeypatch 的符号」时：该符号必须在 `app.py` 顶部 from-import 再导出，业务代码在**函数体内** `import app` 后以 `app.<符号>` 引用（禁止模块顶部 `from app import`——循环 import 且看不到补丁）。
 4. 读取 `app.<符号>` 处加注释 `# 延迟导入...tests monkeypatch('app.<符号>')`（先例：routes_search.py:34）。
@@ -1270,7 +1237,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | 多 worker 部署会怎样？ | 下载/搜索/限流/预取状态各自独立，行为错乱；必须 `-w 1`（runtime.py:30-42） |
 | 预取与搜索是同一套数据吗？ | `/search` 永远实时 Pixiv，不读缓存；预取结果只在 `/cache` 页浏览（有意设计） |
 | 预取缓存满了怎么办？ | 自动三层淘汰（默认 10000 上限）；可在设置页调 `prefetch_max_illusts` 或 /api/prefetch/refresh-reset 救回被强制完成的作品 |
-| 收藏与「收藏数」是什么关系？ | 「我的收藏」= 默认收藏夹（Collection）；与 Pixiv 站内收藏无关 |
+| 「收藏数」是什么？ | Pixiv 站内的收藏（bookmark）数（`illusts.bookmark_count`），用于 `min_bookmarks` 过滤、缓存淘汰排序与「最低收藏数」设置；**本应用的本地收藏夹功能已移除**（迁移 v5 删除 `collections`/`collection_items`，`/api/collections`、`/api/favorite` 均返回 404），与站内收藏无关 |
 | 可以改上游地址吗？ | `PIXIV_BASE_URL` 可改代理/镜像（config.py:49） |
 | 数据存在哪些文件？ | 元数据 instance/pixiv.db；缩略图缓存 instance/image_cache；原图 downloads/；会话 cookies.txt |
 | 需要 Docker 吗？ | 仓库无 Docker 支持，源码直部署 |
@@ -1308,7 +1275,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | 8 | Low | 前端重复代码与静默 catch | static/page-downloads.js 等 | 快速迭代 | 维护成本 | 抽取公共函数 |
 | 9 | Info | integration marker 死代码 | pytest.ini:4-5、conftest.py:22-26 | 暂无真实集成用例 | 误导 | 保留作为未来真实测试入口或删除 |
 | 10 | Info | 3 份 spec 未回写「已实现」 | docs/superpowers/specs/2026-08-1{2,3}*.md | 回写纪律遗漏 | 状态失真 | 补回写 |
-| 11 | Info | 实例库 user_version=3（v4 未应用） | instance/pixiv.db（实测） | 库未被当前代码启动过 | 下次启动自动迁移+备份 | 无操作，观察即可 |
+| 11 | Info | 实例库 user_version=3（v4/v5 未应用） | instance/pixiv.db（实测） | 库未被当前代码启动过 | 下次启动自动迁移+备份（v5 会删掉收藏夹两张表） | 无操作，观察即可 |
 | 12 | Info | 设置写盘逻辑两处重复 | routes_settings.py:231-240、routes_prefetch.py:56-67 | 独立演进 | 同步逻辑漂移风险 | 抽公共「写 settings.json + 同步内存」函数 |
 
 ---
@@ -1375,9 +1342,8 @@ journalctl -u pixiv-viewer -f | grep prefetch
 
 1. **多实例/多用户**：当前架构的所有内存状态与 SQLite 模型都是单实例设计（runtime.py 注释明示）；演进需先外置状态（P3 高难度项）。
 2. **上游兼容层**：Pixiv Ajax API 非官方且经常变动；`fetcher.py` 已把所有解析集中一处，未来可抽解析器接口 + 契约测试（当前 test_fetcher 已覆盖主要报文形态）。
-3. **收藏增强**：PpPpP的收藏夹方案.md 提到超大规模用 Redis Sorted Set 与水平拆分预留；当前 position 分数差值在万级以内足够。
-4. **离线能力扩展**：目前「缓存」只是元数据 + 缩略图；可演进为完整离线浏览（原图预下载策略、离线灯箱）。
-5. **可观测性**：`refresh_stats`/`detail_errors` 已是内置健康信号（/api/prefetch/status），可扩展为统一 status 页。
+3. **离线能力扩展**：目前「缓存」只是元数据 + 缩略图；可演进为完整离线浏览（原图预下载策略、离线灯箱）。
+4. **可观测性**：`refresh_stats`/`detail_errors` 已是内置健康信号（/api/prefetch/status），可扩展为统一 status 页。
 
 ---
 
@@ -1395,14 +1361,13 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | `_AUTH_EXEMPT_PATHS` / 前缀 | {/login,/favicon.ico,/csrf-token} + /static | middleware.py:98-99 |
 | `R18_TAGS` | {"R-18","R-18G"} | fetcher.py:408 |
 
-### 32.2 路由全清单（61 个，×：需 CSRF，含 POST/PUT/DELETE）
+### 32.2 路由全清单（48 个，×：需 CSRF，含 POST/PUT/DELETE）
 
 页面/辅助：`/`、`/cache`、`/csrf-token`、`/favicon.ico`、`/gallery`、`/settings`、`/login`(GET)、`/downloads`
 搜索：`/search`、`/api/search/status/<task_id>`、`/api/cache/items`、`/api/cache/tags`、`/api/cache/items/<pid>/delete`×、`/api/following`
-图库：`/thumb/<b64>`、`/api/image/<pid>/<index>`、`/detail/<pid>`、`/api/detail/<pid>`、`/api/gallery`、`/api/gallery/tags`、`/api/gallery/<pid>`×、`/api/gallery/batch-delete`×、`/api/illust/<pid>/collections`、`/api/open-dir`×、`/api/favorite/<pid>`(GET/POST×)
+图库：`/thumb/<b64>`、`/api/image/<pid>/<index>`、`/detail/<pid>`、`/api/detail/<pid>`、`/api/gallery`、`/api/gallery/tags`、`/api/gallery/<pid>`×、`/api/gallery/batch-delete`×、`/api/open-dir`×
 下载：`/download/<pid>`×、`/api/download/batch`×、`/download/cancel/<pid>`×、`/download/reset/<pid>`×、`/download_status/<pid>`、`/api/download/status/batch`、`/download_file/<pid>`、`/api/downloads`
 预取：`/api/prefetch/config`(GET/POST×)、`/api/prefetch/tags`(GET/POST×/DELETE×)、`/api/prefetch/status`、`/api/prefetch/refresh`×、`/api/prefetch/refresh-reset`×
-收藏夹：`/api/collections`(GET/POST×)、`/api/collections/<id>`(PUT×/DELETE×)、`/api/collections/<id>/items`(GET/POST×)、`/api/collections/<id>/items/<pid>`(DELETE×)、`/api/collections/<id>/items/batch`(POST×/DELETE×)、`/api/collections/<id>/items/<pid>/move`×
 设置：`/login`(POST×)、`/settings`、`/api/settings`(GET/POST×)、`/api/settings/unlock`×、`/api/blocked-tags`(GET/POST×/DELETE×)、`/api/auto-follow/status`、`/api/auto-follow/config`×
 
 ### 32.3 符号索引（按模块检索入口）
@@ -1411,7 +1376,6 @@ journalctl -u pixiv-viewer -f | grep prefetch
 - 搜索与游标：`fetcher.py`（`encode_cursor`/`decode_cursor`/`paginated_search`/`search_*`）+ `routes_search.py`
 - 预取全链路：`background.py` + `routes_prefetch.py` + `helpers.query_cached_tag`
 - 下载全链路：`background._download_illust` + `routes_download.py`
-- 收藏：`models.Collection/CollectionItem` + `routes_collections.py` + `helpers._compute_move_position`
 - 图片：`routes_gallery.thumb_proxy/serve_image` + `helpers._original_to_resized/_proxy_thumb`
 - 迁移：`migrations/runner.py` + `migrations/versions.py` + `models.init_db`
 - 配置：`config.py`（SETTINGS_KEYS 唯一来源）
@@ -1437,7 +1401,7 @@ plans（11）：对应上述课题的实施计划与 08-20 个人自用维护整
 
 ### 32.6 文档生成信息
 
-本文档由对仓库全量源码（15 个后端模块、61 路由、8 模板、13 测试文件、迁移/脚本/设计文档）的静态分析生成；测试数据（§19.3）为实际运行 `scripts\run_tests.ps1 -q` 的实证结果；数据库结构（§14.5）为对 `instance/pixiv.db` 的只读检查。未读取/未输出任何密钥、Cookie 或密码类原文。生成时间：2026-09。
+本文档由对仓库全量源码（14 个后端模块、48 路由、8 模板、13 测试文件、迁移/脚本/设计文档）的静态分析生成；测试数据（§19.3）为实际运行 `scripts\run_tests.ps1 -q` 的实证结果；数据库结构（§14.5）为对 `instance/pixiv.db` 的只读检查。未读取/未输出任何密钥、Cookie 或密码类原文。生成时间：2026-09。
 
 ---
 
@@ -1446,11 +1410,11 @@ plans（11）：对应上述课题的实施计划与 08-20 个人自用维护整
 ```
 [x] 项目结构是否完整               —— §6 全目录 + 分类
 [x] 入口是否找到                   —— §8.1（app.py 全链路）
-[x] 核心模块是否覆盖               —— §7（14 模块表 + 依赖图）
-[x] 核心类是否覆盖                 —— §11（6 ORM 类 + 异常/哨兵 + 限流器）
+[x] 核心模块是否覆盖               —— §7（13 模块表 + 依赖图）
+[x] 核心类是否覆盖                 —— §11（4 ORM 类 + 异常/哨兵 + 限流器）
 [x] 核心函数是否覆盖               —— §12（fetcher/background/helpers/middleware 函数表）
-[x] API 是否覆盖                   —— §13（61 路由按 8 组 + 鉴权错误码总表）
-[x] 数据库是否覆盖                 —— §14（ER 图 + 6 表字段 + 迁移 v1-v4 + 实测）
+[x] API 是否覆盖                   —— §13（48 路由按 7 节 + 鉴权错误码总表）
+[x] 数据库是否覆盖                 —— §14（ER 图 + 4 表字段 + 迁移 v1-v5 + 实测）
 [x] 配置是否覆盖                   —— §15（设置键表 + 环境变量 + 常量 + 敏感文件）
 [x] 第三方依赖是否覆盖             —— §16（Pixiv 上游端点清单）
 [x] 测试是否覆盖                   —— §19（12+1 文件、机制、实测 309 passed、薄弱区）
@@ -1462,6 +1426,6 @@ plans（11）：对应上述课题的实施计划与 08-20 个人自用维护整
 [x] 是否存在未经证实的推测         —— 全部结论标注来源；仅 §20 文件权限 1 处标「推测」
 [x] 是否泄露 Secret                —— 已检查：未输出任何密钥/Cookie 原文（§15.4 明示）
 [x] Mermaid 图是否与源码一致        —— 5 图均按真实模块/流程绘制（§5/§8/§9/§10/§17）
-[x] 是否存在重复或矛盾描述         —— 已核对：§13.8 错误码表与 §17 异常表一致；未发现矛盾
+[x] 是否存在重复或矛盾描述         —— 已核对：§13.7 错误码表与 §17 异常表一致；未发现矛盾
 [ ] （N/A）README 分析             —— 仓库无 README（AGENTS.md 为入口文档，已在开头说明）
 ```

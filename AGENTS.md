@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 601 用例约 20s，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 682 用例约 21s，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -43,20 +43,19 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 
 | 文件 | 作用 |
 |------|------|
-| `app.py` | 组装入口（Flask app / 配置 / 注册 7 个 Blueprint / 启动后台线程）+ 4 个页面路由（`/`、`/cache`、`/csrf-token`、`/favicon.ico`） |
+| `app.py` | 组装入口（Flask app / 配置 / 注册 6 个 Blueprint / 启动后台线程）+ 4 个页面路由（`/`、`/cache`、`/csrf-token`、`/favicon.ico`） |
 | `config.py` | 常量、`.env` 与 `instance/settings.json` 覆盖；`SETTINGS_KEYS` 是**设置键的唯一来源**（config 与设置页共用） |
-| `models.py` | SQLAlchemy ORM：`Illust`、`BlockedTag`、`DownloadLog`、`Collection`、`CollectionItem`、`SearchCache`；`init_db` / `get_session` / `safe_commit` / `get_favorite_pids` |
+| `models.py` | SQLAlchemy ORM：`Illust`、`BlockedTag`、`DownloadLog`、`SearchCache`；`init_db` / `get_session` / `safe_commit` |
 | `runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：扫描/TTL 缓存、预取状态、下载队列与进度、限流存储、异步搜索任务 |
-| `helpers.py` | 纯工具函数与库内查询：下载目录扫描、URL/展示工具、`query_cached_tag`、收藏夹位置计算、文件删除 |
+| `helpers.py` | 纯工具函数与库内查询：下载目录扫描、URL/展示工具、`query_cached_tag`、文件删除 |
 | `middleware.py` | 认证 / CSRF / 限流 / 安全头；app 级钩子（`before_app_request` / `after_app_request`）随 `middleware_bp` 注册 |
 | `background.py` | 后台线程与下载引擎：自动关注、预取循环、下载执行器、`start_background_threads()`（幂等）、`_reset_stuck_*` |
 | `pixiv_client.py` | **Pixiv 适配层**：Ajax 端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析；不碰 DB、不认识 `Illust` |
 | `fetcher.py` | Pixiv **业务层**：屏蔽/R18/收藏数过滤、搜索缓存、游标分页、取消与详情预算、入库、后台详情补全；Ajax 细节全部委托 `pixiv_client`（并把其符号再导出给历史调用方与测试补丁 seam） |
 | `routes_search.py` | `/search`、搜索任务状态、缓存浏览 `/api/cache/*`、`/api/following` |
-| `routes_gallery.py` | 图库、详情页、图片服务、缩略图代理 `/thumb/<b64>`、收藏 API、`/api/open-dir` |
+| `routes_gallery.py` | 图库、详情页、图片服务、缩略图代理 `/thumb/<b64>`、`/api/open-dir` |
 | `routes_download.py` | 下载触发/状态/取消/批量、下载管理页 |
 | `routes_prefetch.py` | 预取管理 API（config / tags / status / refresh） |
-| `routes_collections.py` | 收藏夹全部路由（items / batch / move） |
 | `routes_settings.py` | 登录、设置读写、屏蔽标签、自动关注控制 |
 | `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `lightbox.js` + `style.css` + `vendor/bootstrap-5.3.3/` |
@@ -79,7 +78,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ### 扩展点：新增路由
 
-路由全部挂在 Blueprint 上，共 7 个（`middleware_bp` / `search_bp` / `gallery_bp` / `download_bp` / `prefetch_bp` / `collections_bp` / `settings_bp`）。新增接口时：在对应的 `routes_*.py` 里加路由 → `app.py` 注册该 Blueprint（已注册则无需改动）。**如果新接口的某个依赖将来可能被测试 monkeypatch，该符号必须在 `app.py` 顶部用 from-import 再导出一次**，然后业务代码在函数体内 `import app` 延迟引用 `app.<符号>` —— 见文末「测试契约」。
+路由全部挂在 Blueprint 上，共 6 个（`middleware_bp` / `search_bp` / `gallery_bp` / `download_bp` / `prefetch_bp` / `settings_bp`）。新增接口时：在对应的 `routes_*.py` 里加路由 → `app.py` 注册该 Blueprint（已注册则无需改动）。**如果新接口的某个依赖将来可能被测试 monkeypatch，该符号必须在 `app.py` 顶部用 from-import 再导出一次**，然后业务代码在函数体内 `import app` 延迟引用 `app.<符号>` —— 见文末「测试契约」。
 
 ---
 
@@ -150,8 +149,8 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **详情 API 三级令牌桶**：`DETAIL_RATE_PER_MINUTE=45`（前台搜索）、`FILL_RATE_PER_MINUTE=20`（后台补全）、`TOTAL_RATE_PER_MINUTE=60`（总闸）。
 - **详情拉取的重试是分类的**：连接错误立即放弃、限流退避重试（真正触发退避的是 403 —— 429 被传输层拦下，见文末「重试策略」）—— 不要在两处同时放开。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址。
-- **预取缓存**：手动在设置页配置预取标签，后台线程按 `prefetch_interval` 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）预取，写入 `Illust`（`prefetch_source=1`）+ `SearchCache`。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果由独立 `/cache` 页浏览（`GET /api/cache/items`，库内过滤排序分页）。预取作品入库满 1 天刷新一次"最终收藏数"，< 10 且未下载未收藏的删除；超出 `prefetch_max_illusts`（默认 10000）按"已刷新优先、收藏数低优先"三层淘汰（详见下条）。
-- **最终收藏数刷新有持久化失败状态机**（`illusts.refresh_failed_at`，迁移 v4）：暂时性失败写时间戳、退避 `PREFETCH_REFRESH_BACKOFF`（24h）期内不再入选——**这是防"永久失败的死作品每轮占满 100 个名额"的关键，不要退回"失败即静默 continue"**；404 / 删除类报错返回 `fetcher.DEAD_DETAIL`，未下载未收藏的当场删除（已下载/已收藏标记完成保留）；限流/连接错误返回 `fetcher.RETRYABLE_GLOBAL_DETAIL`，**不记在作品头上**，连续 `PREFETCH_REFRESH_ABORT_STREAK`（3）条即中止本轮；认证失效（`PixivAuthError`）/ Cookie 缺失只中止本轮、不写标记、**不冒泡**（冒泡会让 `_prefetch_loop` 跳过容量清理、上限失效）；失败满 `PREFETCH_REFRESH_FORCE_DONE`（14 天）强制标记完成，交容量清理淘汰。**保护判定统一走 `background._is_user_owned()`**（收藏夹 + 用户操作类 `DownloadLog`，含失败/取消待重试；缓存清理自己写的 `action='prefetch_deleted'` 不算保护）——用户点过下载的作品不当缓存垃圾。**入库永不停**：`_prefetch_loop` 每轮都入库，容量靠三层淘汰压住（不靠暂停入库——已否决的方案）。**容量清理三层**（`_prefetch_capacity_cleanup`，层内收藏数低优先、并列更早上传优先，保护判定统一走 `background._is_user_owned()` + 下载中/已下载）：① 已最终刷新（信号可信）→ ② 未刷新但刷新失败过或入库超过 `PREFETCH_EVICT_UNREFRESHED_AFTER`（3 天）→ ③ 其余未刷新兜底（**保证上限永远压得住**，tier2/3 用入库快照收藏数，新作品超限时优先被删、下轮可能重新入库）。每轮刷新批量 `PREFETCH_REFRESH_BATCH`（300，用满已有 20/分钟桶预算，不碰 403 红线）。观测与手动干预：`GET /api/prefetch/status` 除运行态外还返回 `refresh`（上一轮结构化统计：processed/ok/deleted_low/deleted_dead/kept_dead/failed_transient/failed_global/force_done/aborted/at）、`pending_refresh`（未完成刷新数）、`failed_backoff`（退避中数量）、`detail_errors`（未命中删除关键词的详情报错样本 message→次数，用于核对关键词清单），设置页「搜索预取」卡片展示；`POST /api/prefetch/refresh-reset`（`{tag}` 或 `{pixiv_id}`，必须指定范围）清空刷新完成/失败标记把作品放回队列，用于 Cookie 权限修复后救回被强制完成/永久退避的作品，下一轮预取生效。
+- **预取缓存**：手动在设置页配置预取标签，后台线程按 `prefetch_interval` 用宽松参数（min_bookmarks=1、date_d、R18 不过滤）预取，写入 `Illust`（`prefetch_source=1`）+ `SearchCache`。**`/search` 永远走实时 Pixiv，不命中缓存**；预取结果由独立 `/cache` 页浏览（`GET /api/cache/items`，库内过滤排序分页）。预取作品入库满 1 天刷新一次"最终收藏数"，< 10 且不属保护范围（未下载、无下载意图）的删除；超出 `prefetch_max_illusts`（默认 10000）按"已刷新优先、收藏数低优先"三层淘汰（详见下条）。
+- **最终收藏数刷新有持久化失败状态机**（`illusts.refresh_failed_at`，迁移 v4）：暂时性失败写时间戳、退避 `PREFETCH_REFRESH_BACKOFF`（24h）期内不再入选——**这是防"永久失败的死作品每轮占满 100 个名额"的关键，不要退回"失败即静默 continue"**；404 / 删除类报错返回 `fetcher.DEAD_DETAIL`，未下载且无下载意图的当场删除（已下载/点过下载标记完成保留）；限流/连接错误返回 `fetcher.RETRYABLE_GLOBAL_DETAIL`，**不记在作品头上**，连续 `PREFETCH_REFRESH_ABORT_STREAK`（3）条即中止本轮；认证失效（`PixivAuthError`）/ Cookie 缺失只中止本轮、不写标记、**不冒泡**（冒泡会让 `_prefetch_loop` 跳过容量清理、上限失效）；失败满 `PREFETCH_REFRESH_FORCE_DONE`（14 天）强制标记完成，交容量清理淘汰。**保护判定统一走 `background._is_user_owned()`**（已下载 + 用户操作类 `DownloadLog`，含失败/取消待重试；缓存清理自己写的 `action='prefetch_deleted'` 不算保护）——用户点过下载的作品不当缓存垃圾。**入库永不停**：`_prefetch_loop` 每轮都入库，容量靠三层淘汰压住（不靠暂停入库——已否决的方案）。**容量清理三层**（`_prefetch_capacity_cleanup`，层内收藏数低优先、并列更早上传优先，保护判定统一走 `background._is_user_owned()` + 下载中/已下载）：① 已最终刷新（信号可信）→ ② 未刷新但刷新失败过或入库超过 `PREFETCH_EVICT_UNREFRESHED_AFTER`（3 天）→ ③ 其余未刷新兜底（**保证上限永远压得住**，tier2/3 用入库快照收藏数，新作品超限时优先被删、下轮可能重新入库）。每轮刷新批量 `PREFETCH_REFRESH_BATCH`（300，用满已有 20/分钟桶预算，不碰 403 红线）。观测与手动干预：`GET /api/prefetch/status` 除运行态外还返回 `refresh`（上一轮结构化统计：processed/ok/deleted_low/deleted_dead/kept_dead/failed_transient/failed_global/force_done/aborted/at）、`pending_refresh`（未完成刷新数）、`failed_backoff`（退避中数量）、`detail_errors`（未命中删除关键词的详情报错样本 message→次数，用于核对关键词清单），设置页「搜索预取」卡片展示；`POST /api/prefetch/refresh-reset`（`{tag}` 或 `{pixiv_id}`，必须指定范围）清空刷新完成/失败标记把作品放回队列，用于 Cookie 权限修复后救回被强制完成/永久退避的作品，下一轮预取生效。
 
 ### 数据库
 
@@ -159,8 +158,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **入库去重走 `fetcher._insert_new_illusts()`（`INSERT ... ON CONFLICT DO NOTHING`）**：`_process_items` 的查重→拉详情（网络耗时）→INSERT 之间有并发窗口（其他标签预取/手动刷新/用户在途搜索可能先插入同一 pid），普通 `db.add()+flush()` 撞 `UNIQUE constraint failed` 会让**整批事务作废**。任何新插作品都经这个冲突容忍写入 + 按 pid 回查赢家行，别改回逐条 flush。
 - **`_process_items` / `fetch_following` 返回的是 `Illust.to_dict()` 形状，不能直接回灌模型**：那是**展示用** dict —— `upload_date` 是 `isoformat()` **字符串**，`tags` / `original_urls` 是 list（写回模型要走 `*_list` 属性），而 `DateTime` 列只收 datetime 对象。`_auto_follow_worker` 就这么踩过：`Illust(upload_date=r['upload_date'])` 让 `safe_commit` 抛 `TypeError`，被宽 `except` 吞成一行日志 —— 只在"该轮有新作品"时触发，于是"一有新作品就静默失败、下轮重试再失败"、`last_check` 永不更新（审计 §33.5，S23 修）。**要回灌就用 `fetcher._parse_date(r['upload_date'])`**（Pixiv `updateDate` 的同一个解析器，容忍 `None`），别写无守卫的 `datetime.fromisoformat(...)`（`None` 会炸）。
 - **获取 session 用 `get_session()`**，不要直接 `Session(engine)`（`init_db()` 等启动逻辑除外）。
-- **轻量迁移系统**：启动时 `create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行；当前版本 v1 `migrate_collection_positions`（补 `collection_items.position` 并回填）、v2 `migrate_illust_schema`（补 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`，DROP `description`/`is_favorite`/`favorited_at`）、v3 `repair_illust_schema`、v4 `add_illust_refresh_failed_at`（补 `refresh_failed_at` 刷新失败退避时间戳）。`init_db()` 在迁移后**无条件再跑一次** `repair_illust_schema` 兜底，并额外幂等调用一次 `add_illust_refresh_failed_at`（v4 列不在 v2 的列集里，用于覆盖外部改动丢列）。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。**新增 schema 变更必须追加新版本，不得修改已发布版本。**
-- **收藏语义完全由 Collection 驱动**：切换收藏即在"我的收藏"收藏夹增删 `CollectionItem`。`Illust.is_favorite` 列已废弃删除，不要再依赖；判断收藏用 `models.get_favorite_pids()`。
+- **轻量迁移系统**：启动时 `create_all()` 后由 `migrations/runner.py` 按 `PRAGMA user_version` 顺序执行；当前版本 v1 `migrate_collection_positions`（补 `collection_items.position` 并回填；`collection_items` 不存在时直接 no-op —— 全新库与已跑过 v5 的库都没有这张表，不 no-op 的话 `init_db()` 会因缺表起不来）、v2 `migrate_illust_schema`（补 `file_size`/`downloaded_at`/`bookmark_updated_at`/`prefetch_source`/`prefetch_refresh_at`，DROP `description`/`is_favorite`/`favorited_at`）、v3 `repair_illust_schema`、v4 `add_illust_refresh_failed_at`（补 `refresh_failed_at` 刷新失败退避时间戳）、v5 `drop_collection_tables`（删掉 `collections`/`collection_items` 两张表，**子表先删** —— `collection_items.collection_id` 引用 `collections.id`，开启外键的库先删父表会失败）。`init_db()` 在迁移后**无条件再跑一次** `repair_illust_schema` 兜底，并额外幂等调用一次 `add_illust_refresh_failed_at`（v4 列不在 v2 的列集里，用于覆盖外部改动丢列）。SQLite < 3.35 时用重建表策略保留 PK/UNIQUE/NOT NULL。**新增 schema 变更必须追加新版本，不得修改已发布版本。**
 - `Illust.to_dict()` **不输出 `local_paths`**（磁盘绝对路径），前端取图走 `/api/image/<pid>/<index>`。
 - `tags` / `original_urls` / `local_paths` 是 JSON 文本列，读写走 `*_list` property。库内标签过滤用 SQLite `json_each()`；单条损坏 JSON 会抛 `OperationalError`，图库/缓存查询都有"降级跳过标签过滤"的兜底。
 
@@ -192,13 +190,14 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/收藏契约/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/**收藏夹端点移除后的 404 契约**/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
 - session 级 `app` fixture 结束后调用 `models.engine.dispose()`，否则 Windows 上无法删除临时 .db 文件（WinError 32）。
 - `clean_db` fixture 在每次测试前清空所有表，并重置 `_scan_cache['ts']` / `_db_pids_cache['ts']`。
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
+- **删除收藏夹功能后的实测基线：收集 682 条 = 676 passed / 2 skipped / 4 failed**，约 21s。4 个 failed 全是 `test_test_setup.py::test_temp_root_*` 的**环境相关**失败（这些用例在测试进程里再起 `powershell.exe` 子进程并捕获其输出，当前受限执行环境里该子进程退出码非 0），不是代码回归 —— 换掉外层 `TEMP/TMP` 覆盖单独跑这个文件，同样 4 条全挂、其余 16 条通过。
 
 ### 最重要的约定：app 命名空间是测试补丁 seam
 

@@ -9,18 +9,17 @@
 |---|---|---|
 | `app.py` | 组装入口：创建 Flask app、注册全部 Blueprint、启动后台线程；仅剩 4 个页面/辅助路由 | `/`、`/cache`、`/csrf-token`、`/favicon.ico`；import 时序：`init_db()` → `_reset_stuck_*`（清理残留）→ `background.start_background_threads()` → `atexit.register(_shutdown_background_threads)` |
 | `runtime.py` | 进程内存状态（`-w 1` 单进程语义，全部模块级变量） | `_scan_cache`/`_SCAN_CACHE_TTL`、`_db_pids_cache`、`_thumb_sem`/`_thumb_failed`/`_THUMB_FAIL_COOLDOWN`、`_auto_follow_state`/`_auto_follow_stop`、`_prefetch_state`、`_queued_downloads`/`_download_progress`/`download_cancellations`/`download_executor`、`_search_tasks`/`_search_tasks_lock`/`SEARCH_TASK_TTL`、`_rate_limit_store` |
-| `helpers.py` | 纯工具函数与库内查询 | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`、`_delete_illust_files`、`_next_collection_position`、`_compute_move_position` |
+| `helpers.py` | 纯工具函数与库内查询 | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`、`_delete_illust_files` |
 | `middleware.py` | 认证/CSRF/限流/安全头；app 级钩子随 `middleware_bp` 注册即全局生效 | `_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_csrf_required`、`_require_login`（`before_app_request`）、`_security_headers`（`after_app_request`）、`_safe_next`、`_is_authed` |
 | `background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh`/`_is_user_owned` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
 | `pixiv_client.py` | **Pixiv 适配层**（Ajax 传输 + 协议）：端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析 | `endpoint_*`（5 个端点，**Ajax 路径字符串的唯一来源**）、`envelope_error`、`handle_list_request_error`、`parse_tags`/`extract_original_urls`/`item_pixiv_id`/`item_bookmark_count`/`parse_illust_summary`/`parse_illust_detail`、`fetch_illust_detail`/`fetch_original_urls`/`fetch_search_illusts`/`fetch_discovery_artworks`/`fetch_user_profile_ids`/`fetch_following_latest`、`build_pixiv_session`/`build_credentialless_session`/`get_pooled_session`/`reset_pooled_session`/`set_cookie_cache`、`_TokenBucket` 与三个桶、`PixivAuthError`、`DEAD_DETAIL`/`RETRYABLE_GLOBAL_DETAIL`、`get_detail_error_samples`、`R18_TAGS`、`build_search_query` |
 | `fetcher.py` | Pixiv **业务层**：过滤/缓存/分页/入库；Ajax 细节全部委托适配层 | `search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、`_process_items`、`_insert_new_illusts`（冲突容忍入库）、`clear_search_cache`、`_fetch_details_parallel`（并发与 early_stop）、`_kick_background_fill`；并**再导出**适配层符号（见「测试契约」） |
-| `models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/Collection/CollectionItem/SearchCache |
+| `models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/SearchCache |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` import 时覆盖 | `DOWNLOAD_DIR`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE`、`ITEMS_PER_PAGE` 等；**import 时执行全部副作用**（读 `.env`/settings.json、生成密钥） |
 | `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `/search`、`/api/search/status/<task_id>`、`/api/cache/*`、`/api/following`；`_submit_search_task`/`_cleanup_search_tasks` |
-| `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理 / 收藏 API（含页面路由） | `/gallery`、`/detail/<pid>`、`/api/gallery*`、`/thumb/<b64>`、`/api/image/<pid>/<index>`、`/api/favorite/<pid>`、`/api/open-dir`、`/api/illust/<pid>/collections` |
+| `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理（含页面路由） | `/gallery`、`/detail/<pid>`、`/api/gallery*`、`/thumb/<b64>`、`/api/image/<pid>/<index>`、`/api/open-dir` |
 | `routes_download.py` | 下载触发/状态/取消/批量/下载管理（含页面路由） | `/download/<pid>`、`/api/download/batch`、`/download/cancel|reset/<pid>`、`/download_status/<pid>`、`/api/download/status/batch`、`/download_file/<pid>`、`/downloads`、`/api/downloads`；`_cancel_download_internal` |
 | `routes_prefetch.py` | 预取管理 API | `/api/prefetch/config|tags|status|refresh|refresh-reset`；`_PREFETCH_SETTINGS_KEYS` |
-| `routes_collections.py` | 收藏夹全部路由 | `/api/collections` 全部（含 items / batch / move）；注：`/api/illust/<pid>/collections` 在 routes_gallery，不重复 |
 | `routes_settings.py` | 登录 / 设置 / 屏蔽标签 / 自动关注控制（含页面路由） | `/login`(GET/POST)、`/settings`、`/api/settings*`、`/api/blocked-tags`、`/api/auto-follow/*`；`_SETTINGS_PATH`/`_SETTINGS_DEFAULTS`/`_load_settings`/`_settings_locked` |
 
 ## 加载顺序
@@ -35,7 +34,7 @@ pixiv_client / config / runtime（叶子）→ helpers → middleware → backgr
 - `middleware` 读取 runtime 状态（限流存储）。
 - `background` 依赖 helpers/runtime/models/fetcher。
 - 各 `routes_*` 依赖 middleware/helpers/runtime/background/models，**模块间不互相导入**。
-- `app.py` 最后组装：创建 app → 注册 7 个 Blueprint（middleware_bp 最先，保证 app 级钩子最先生效）→ 启动后台线程。
+- `app.py` 最后组装：创建 app → 注册 6 个 Blueprint（middleware_bp 最先，保证 app 级钩子最先生效）→ 启动后台线程。
 
 ## `-w 1` 单进程语义与线程启动
 
@@ -58,7 +57,7 @@ pixiv_client / config / runtime（叶子）→ helpers → middleware → backgr
 | `_rate_limit_store` | test_auth.py 清空（与 middleware 共享同一 dict） |
 | `_scan_cache`、`_db_pids_cache` | conftest.py 重置 `ts` |
 | `_prefetch_state` | test_prefetch.py / test_prefetch_api.py 原地改写 |
-| `_prefetch_one_tag`、`_prefetch_capacity_cleanup`、`_prefetch_loop`、`_start_prefetch_thread`、`_prefetch_refresh_bookmarks`、`reset_prefetch_refresh`、`_is_user_owned`、`_reset_stuck_prefetch` | test_prefetch.py / test_prefetch_api.py（`refresh-reset` 路由经 `app.reset_prefetch_refresh`） |
+| `_prefetch_one_tag`、`_prefetch_capacity_cleanup`、`_prefetch_loop`、`_start_prefetch_thread`、`_prefetch_refresh_bookmarks`、`reset_prefetch_refresh`、`_reset_stuck_prefetch` | test_prefetch.py / test_prefetch_api.py（`refresh-reset` 路由经 `app.reset_prefetch_refresh`） |
 | `build_pixiv_session`、`fetcher`（模块导入） | test_prefetch.py |
 | `_SETTINGS_PATH`、`_load_settings` | test_prefetch_api.py 夹具 `setattr(app, '_SETTINGS_PATH', ...)` |
 | `ACCESS_PASSWORD`、`SETTINGS_PASSWORD` | test_auth.py |
