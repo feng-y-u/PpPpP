@@ -14,6 +14,8 @@ import pixiv_client
 import runtime
 from sqlalchemy import or_, text, update
 
+import backups
+import config
 from config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
                     PREFETCH_EVICT_UNREFRESHED_AFTER,
                     PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
@@ -23,6 +25,7 @@ from helpers import _get_download_dir, _extract_ext, check_image_url
 from models import (get_session, Illust, SearchCache,
                     DownloadLog, safe_commit)
 from runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
+                     _snapshot_state, _snapshot_stop,
                      _queued_downloads, _download_progress,
                      _download_queue_lock, is_queued_download,
                      queued_download_snapshot,
@@ -687,6 +690,76 @@ def _start_prefetch_thread() -> None:
     logger.info(f'[prefetch] 后台线程已启动，interval={interval}s')
 
 
+_snapshot_thread: threading.Thread | None = None
+
+
+def _snapshot_poll_seconds(interval: int) -> float:
+    """后台唤醒间隔：最多 1 小时醒一次。
+
+    取 min 有两个作用：interval 被调小后能较快生效；线程睡着时收不到
+    `_snapshot_stop`，唤醒粒度就是退出延迟的上界（daemon 线程虽然不阻塞退出，
+    但优雅停止仍应尽快）。
+    """
+    return float(min(interval, 3600))
+
+
+def take_database_snapshot() -> str | None:
+    """按 `BACKUP_INTERVAL` 判断是否需要，并在需要时落一份快照。
+
+    返回新快照文件名；"还没到点"返回 None。**独立成函数**是为了能被测试直接驱动
+    （不必等后台线程），将来加"立即备份"入口也可以复用它。
+    """
+    db_path = config.DATABASE_PATH
+    interval = int(_snapshot_state['interval'] or 0)
+    if not backups.snapshot_due(db_path, interval):
+        _snapshot_state['count'] = len(backups.snapshot_paths(db_path))
+        return None
+
+    import models  # 延迟导入：与预取循环同款，避免模块级绑定挡住测试补丁
+    target = backups.take_snapshot(db_path, engine=models.engine)
+    removed = backups.prune_snapshots(db_path, int(_snapshot_state['keep'] or 1))
+    _snapshot_state.update({
+        'last_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'last_path': target.name,
+        'last_error': None,
+        'last_pruned': len(removed),
+        'count': len(backups.snapshot_paths(db_path)),
+    })
+    logger.info(
+        f'[backup] 数据库快照 {target.name}（清理旧份 {len(removed)}，当前 {_snapshot_state["count"]} 份）')
+    return target.name
+
+
+def _snapshot_loop() -> None:
+    """滚动快照后台循环（与"迁移前备份"互补，动机见 backups.py 顶部注释）。
+
+    被禁用（interval<=0）时线程照样启动并空转：`snapshot_alive=True` 于是**不等于**
+    "在留快照"，判断"有没有在干活"要看 `_snapshot_state['enabled']`（同款歧义在预取
+    /自动关注上已经踩过，见 AGENTS.md）。
+    """
+    while not _snapshot_stop.is_set():
+        interval = int(_snapshot_state['interval'] or 0)
+        _snapshot_state['enabled'] = interval > 0
+        if interval > 0:
+            try:
+                take_database_snapshot()
+            except Exception as e:
+                # 快照失败绝不能打死线程：那会让"再也留不下快照"这件事永远没人发现
+                _snapshot_state['last_error'] = f'快照失败: {e}'
+                logger.error(f'[backup] 数据库快照失败: {e}')
+        _snapshot_stop.wait(_snapshot_poll_seconds(interval) if interval > 0 else 60)
+
+
+def _start_snapshot_thread() -> None:
+    global _snapshot_thread
+    if _snapshot_thread is not None:
+        return
+    _snapshot_thread = threading.Thread(target=_snapshot_loop, daemon=True)
+    _snapshot_thread.start()
+    logger.info(f'[backup] 滚动快照线程已启动（interval={_snapshot_state["interval"]}s，'
+                f'保留 {_snapshot_state["keep"]} 份）')
+
+
 def get_background_health() -> dict:
     """后台线程健康快照（审计 S12）：线程存活 + 预取是否"很久没跑完一轮"。
 
@@ -713,6 +786,8 @@ def get_background_health() -> dict:
     return {
         'prefetch_alive': _prefetch_thread is not None and _prefetch_thread.is_alive(),
         'auto_follow_alive': _auto_follow_thread is not None and _auto_follow_thread.is_alive(),
+        # 同款语义：活着 ≠ 在留快照，是否在干活看 runtime._snapshot_state['enabled']
+        'snapshot_alive': _snapshot_thread is not None and _snapshot_thread.is_alive(),
         'last_check': last_check,
         'stale': stale,
         'last_error': _prefetch_state.get('last_error'),
@@ -969,6 +1044,7 @@ _auto_follow_thread: threading.Thread | None = None
 def _shutdown_background_threads() -> None:
     """进程退出时优雅停止后台线程（gunicorn worker 退出 / 测试进程结束）。"""
     _auto_follow_stop.set()
+    _snapshot_stop.set()
     download_executor.shutdown(wait=False)
 
 
@@ -980,3 +1056,4 @@ def start_background_threads() -> None:
     _auto_follow_thread = threading.Thread(target=_auto_follow_worker, daemon=True)
     _auto_follow_thread.start()
     _start_prefetch_thread()
+    _start_snapshot_thread()

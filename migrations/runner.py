@@ -24,19 +24,25 @@ def _checkpoint_wal(engine: Engine) -> None:
         conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
-def backup_database(db_path: str | Path, backup_dir: str | Path | None = None) -> Path:
-    """Copy an existing SQLite database to a uniquely timestamped backup file."""
+def backup_database(db_path: str | Path, backup_dir: str | Path | None = None, *,
+                    label: str = "") -> Path:
+    """Copy an existing SQLite database to a uniquely timestamped backup file.
+
+    `label` 插在扩展名之前（如 `label='snapshot-'` → `pixiv.db.snapshot-<ts>.bak`）：
+    滚动快照靠它把自己与**迁移前备份**区分开，清理时才敢只删自己的那些文件
+    （"淘汰只认本缓存写的文件"是同一条纪律）。默认空串 = 历史文件名逐字节不变。
+    """
     source = Path(db_path)
     if not source.is_file():
         raise FileNotFoundError(source)
     target_dir = Path(backup_dir) if backup_dir is not None else source.parent / "backups"
     target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    target = target_dir / f"{source.name}.{timestamp}.bak"
+    target = target_dir / f"{source.name}.{label}{timestamp}.bak"
     counter = 0
     while target.exists():
         counter += 1
-        target = target_dir / f"{source.name}.{timestamp}.{counter}.bak"
+        target = target_dir / f"{source.name}.{label}{timestamp}.{counter}.bak"
     shutil.copy2(source, target)
     # belt & braces：checkpoint 没能并回主库时（其他 reader 占用、非 TRUNCATE
     # 能完成的场景），把 -wal/-shm 以同名后缀一并复制，副本仍能被 SQLite 正常

@@ -20,7 +20,19 @@ def test_conftest_does_not_replace_os_mkdir():
     assert "os.mkdir =" not in conftest
 
 
-def _invoke_powershell(command, env):
+_PRELUDE = f". '{RUN_TESTS_SCRIPT}'"
+
+
+def _invoke_powershell(statements, env=None):
+    """在**健康环境**里执行一段 PS 语句并返回 stdout 行。
+
+    要控制的 `$env:` 一律由语句**在会话内部**赋值，不再经进程 env 传入。原因：Windows
+    PowerShell 启动自身就要用 TEMP/TMP，一旦这两个变量指向不存在的目录（本文件早先的
+    写法就是 `C:/pixiv-test/environment-temp`），它会直接以非 0 退出 —— 于是"验证 TEMP
+    回退"的用例**在断言之前就死在子进程启动上**，长期挂着 4 条红（审计报告里记作
+    "预先存在"）。改成会话内赋值后，子进程永远拿到健康 env，被断言的才是
+    `Resolve-PixivTestTempRoot` 的真实逻辑。
+    """
     if POWERSHELL is None:
         pytest.skip("powershell.exe is required for run_tests.ps1 helper tests")
     result = subprocess.run(
@@ -30,125 +42,118 @@ def _invoke_powershell(command, env):
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            command,
+            statements,
         ],
-        check=True,
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
+    if result.returncode != 0:
+        pytest.fail(
+            f"powershell 退出码 {result.returncode}（stderr: {result.stderr.strip()[:400]}）"
+        )
     return result.stdout.strip().splitlines()
+
+
+def _force_non_sandbox_branch() -> str:
+    """把 `isDshSandbox` 钉成 false：本组用例验证的就是 LOCALAPPDATA/TEMP 回退链。
+
+    正常经 `run_tests.ps1` 运行时子进程 TEMP 已是工作区临时根、该变量本就是 false；
+    但直接跑 pytest（TEMP 形如 `...\\Temp\\dsh-<token>`）时它会是 true，回退链就会被
+    "沙箱优先"分支短路掉 —— 显式赋值让这组断言与环境无关。
+    """
+    return "$script:isDshSandbox = $false\n"
+
+
+def _resolve_temp_root(prelude: str) -> Path:
+    """dot-source 脚本 → 会话内改 env → 返回 `Resolve-PixivTestTempRoot` 的结果。"""
+    output = _invoke_powershell(f"{_PRELUDE}\n{_force_non_sandbox_branch()}{prelude}\nResolve-PixivTestTempRoot")
+    assert output, 'Resolve-PixivTestTempRoot 必须有输出'
+    return Path(output[-1])
 
 
 @pytest.mark.parametrize("variable", ["TEMP", "TMP"])
 def test_temp_root_uses_explicit_override(variable):
-    env = os.environ.copy()
     override = Path(f"C:/pixiv-test/override-{variable.lower()}")
-    env.update(
-        {
-            "PIXIV_TEST_TMP": str(override),
-            "LOCALAPPDATA": "C:/pixiv-test/local",
-            variable: "C:/pixiv-test/environment-temp",
-        }
+
+    root = _resolve_temp_root(
+        f"$env:PIXIV_TEST_TMP = '{override}'\n"
+        f"$env:LOCALAPPDATA = 'C:/pixiv-test/local'\n"
+        f"$env:{variable} = 'C:/pixiv-test/environment-temp'"
     )
 
-    output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; Resolve-PixivTestTempRoot",
-        env,
-    )
-
-    assert Path(output[-1]) == override
+    assert root == override
 
 
 def test_temp_root_defaults_to_local_app_data():
-    env = os.environ.copy()
-    env.pop("PIXIV_TEST_TMP", None)
-    env["LOCALAPPDATA"] = "C:/pixiv-test/local"
-
-    output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; Resolve-PixivTestTempRoot",
-        env,
+    root = _resolve_temp_root(
+        "$env:PIXIV_TEST_TMP = $null\n"
+        "$env:LOCALAPPDATA = 'C:/pixiv-test/local'"
     )
 
-    assert Path(output[-1]) == Path("C:/pixiv-test/local/pixiv-viewer-test-tmp")
+    assert root == Path("C:/pixiv-test/local/pixiv-viewer-test-tmp")
 
 
 def test_temp_root_falls_back_to_temp_environment_variable():
-    env = os.environ.copy()
-    env.update(
-        {
-            "PIXIV_TEST_TMP": "",
-            "LOCALAPPDATA": "",
-            "TEMP": "C:/pixiv-test/temp",
-            "TMP": "C:/pixiv-test/tmp",
-        }
+    root = _resolve_temp_root(
+        "$env:PIXIV_TEST_TMP = ''\n"
+        "$env:LOCALAPPDATA = ''\n"
+        "$env:TEMP = 'C:/pixiv-test/temp'\n"
+        "$env:TMP = 'C:/pixiv-test/tmp'"
     )
 
-    output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; Resolve-PixivTestTempRoot",
-        env,
-    )
-
-    assert Path(output[-1]) == Path("C:/pixiv-test/temp/pixiv-viewer-test-tmp")
+    assert root == Path("C:/pixiv-test/temp/pixiv-viewer-test-tmp")
 
 
 def test_temp_root_falls_back_to_tmp_when_temp_is_empty():
-    env = os.environ.copy()
-    env.update(
-        {
-            "PIXIV_TEST_TMP": "",
-            "LOCALAPPDATA": "",
-            "TEMP": "",
-            "TMP": "C:/pixiv-test/tmp",
-        }
+    root = _resolve_temp_root(
+        "$env:PIXIV_TEST_TMP = ''\n"
+        "$env:LOCALAPPDATA = ''\n"
+        "$env:TEMP = ''\n"
+        "$env:TMP = 'C:/pixiv-test/tmp'"
     )
 
-    output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; Resolve-PixivTestTempRoot",
-        env,
-    )
-
-    assert Path(output[-1]) == Path("C:/pixiv-test/tmp/pixiv-viewer-test-tmp")
+    assert root == Path("C:/pixiv-test/tmp/pixiv-viewer-test-tmp")
 
 
 def test_temp_root_falls_back_when_temp_environment_is_empty():
-    if POWERSHELL is None:
-        pytest.skip("powershell.exe is required for run_tests.ps1 helper tests")
-    env = os.environ.copy()
-    for variable in ("PIXIV_TEST_TMP", "LOCALAPPDATA", "TEMP", "TMP"):
-        env.pop(variable, None)
-    expected_parent = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-Command", "[IO.Path]::GetTempPath()"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    ).stdout.strip()
+    """连 TEMP/TMP 都没有时回退到 `[IO.Path]::GetTempPath()`。
 
+    期望值在同一次会话里取（取完再调被测函数）：这样"清空环境变量"这件事不会顺手把
+    取期望值的那次调用也弄坏。
+    """
     output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; Resolve-PixivTestTempRoot",
-        env,
+        f"{_PRELUDE}\n"
+        f"{_force_non_sandbox_branch()}"
+        "Remove-Item Env:PIXIV_TEST_TMP,Env:LOCALAPPDATA,Env:TEMP,Env:TMP "
+        "-ErrorAction SilentlyContinue\n"
+        "$expected = [IO.Path]::GetTempPath()\n"
+        "$actual = Resolve-PixivTestTempRoot\n"
+        "Write-Output $expected\n"
+        "Write-Output $actual"
     )
 
-    assert Path(output[-1]) == Path(expected_parent) / "pixiv-viewer-test-tmp"
+    assert len(output) == 2, f'期望值与实际值各一行，实际输出：{output}'
+    assert Path(output[-1]) == Path(output[0]) / "pixiv-viewer-test-tmp"
 
 
 def test_run_tests_constructs_basetemp_and_preserves_pytest_arguments():
-    env = os.environ.copy()
     base_temp = Path("C:/pixiv-test/root/run-unique")
     output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; Get-PixivPytestArguments -BaseTemp '{base_temp}' -PytestArgs @('tests/test_app.py','-k','smoke')",
-        env,
+        f"{_PRELUDE}\n"
+        f"Get-PixivPytestArguments -BaseTemp '{base_temp}' "
+        "-PytestArgs @('tests/test_app.py','-k','smoke')"
     )
 
     assert output == ["-m", "pytest", f"--basetemp={base_temp}", "tests/test_app.py", "-k", "smoke"]
 
 
 def test_run_tests_generates_distinct_run_directories():
-    env = os.environ.copy()
     output = _invoke_powershell(
-        f". '{RUN_TESTS_SCRIPT}'; New-PixivTestRunDirectory 'C:/pixiv-test'; New-PixivTestRunDirectory 'C:/pixiv-test'",
-        env,
+        f"{_PRELUDE}\n"
+        "New-PixivTestRunDirectory 'C:/pixiv-test'\n"
+        "New-PixivTestRunDirectory 'C:/pixiv-test'"
     )
 
     assert len(output) == 2

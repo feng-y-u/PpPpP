@@ -137,8 +137,9 @@ function renderPage(pageNum) {
   if (!page) return;
   const grid = $('#masonryGrid');
   grid.innerHTML = '';
-  renderInChunks(page, (r) => {
-    const node = renderCard(r);
+  renderInChunks(page, (r, i) => {
+    // 把"本页列表 + 下标"交给卡片：点开灯箱时要用整页做导航上下文（与图库一致）
+    const node = renderCard(r, { list: page, index: i });
     grid.appendChild(node);
     return node;
   }, { chunk: 12, delay: 25 }).then(() => {
@@ -291,6 +292,7 @@ async function doSearch() {
   $('#masonryGrid').innerHTML = '';
   $('#emptyState').style.display = 'none';
   $('#authErrorState').style.display = 'none';
+  hideCredentialHint();   // 新一轮搜索：上一次空结果的凭据建议必须清掉
   batchInProgress = false;
 
   showLoading(true);
@@ -345,20 +347,51 @@ async function doSearch() {
   } catch { if (gen === searchGeneration) { showToast('网络错误', true); showLoading(false); } }
 }
 
+// ── 空结果的凭据体检 ──
+// 背景：Cookie 失效时 Pixiv 对搜索类请求常常**静默返回空页**，界面只能显示"暂无结果"，
+// 用户无法把"真的没结果"与"凭据失效"分开（AGENTS.md / maintenance.md 都记着这条语义）。
+// 所以空结果时顺带问一次 `/api/pixiv/health`，只在"确实有问题"时补一句可执行的建议。
+// 它只是**增强提示**：失败、超时、没这个接口都不影响原有空状态。
+function hideCredentialHint() {
+  const hint = $('#emptyHint');
+  if (!hint) return;
+  hint.style.display = 'none';
+  hint.textContent = '';
+}
+
+function checkCredentialHealth() {
+  const hint = $('#emptyHint');
+  if (!hint) return;
+  hideCredentialHint();
+  fetch('/api/pixiv/health')
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => {
+      if (!d || d.ok || !d.advice) return;
+      // 体检期间用户可能已经发起新搜索（空状态已隐藏、网格里是新结果）——
+      // 那种情况绝不能把建议插到新结果上
+      if ($('#emptyState').style.display === 'none') return;
+      hint.textContent = d.advice;
+      hint.style.display = 'block';
+    })
+    .catch(() => {});
+}
+
 function finishSearch(data) {
   if (!data.results.length) {
     $('#emptyState').style.display = 'block';
+    checkCredentialHealth();
     showLoading(false);
     return;
   }
+  hideCredentialHint();
   loadedPages = [dedupResults(data.results)];
   nextCursor = data.cursor || null;
   hasMore = data.has_more || false;
   currentPage = 1;
   const grid = $('#masonryGrid');
   const results = loadedPages[0];
-  renderInChunks(results, (r) => {
-    const node = renderCard(r);
+  renderInChunks(results, (r, i) => {
+    const node = renderCard(r, { list: results, index: i });
     grid.appendChild(node);
     return node;
   }, { chunk: 12, delay: 25 }).then(() => {
@@ -585,14 +618,18 @@ $('#r18Mode').addEventListener('change', () => {
 // 的 _make_search_publisher）。这一步之差有用户可见的后果：该 pid 的行可能随后随事务回滚，
 // 此时 /detail/<pid> 会 abort(404)、下载接口返回 404 作品不存在（routes_download）。
 // 选择的组合：
-//   ① **详情页可看**：预览卡点击与普通卡一样跳 /detail/<pid> —— 路由在查不到行时会回退到
-//      进行中搜索任务的内存快照（runtime.find_running_preview），所以不必等整页筛完；
-//   ② 渲染层不打**下载**行为：预览卡不渲染下载按钮（未落库的 pid 下载必然 404），
+//   ① **已提交卡 → 灯箱**：与图库/缓存页一致，点卡片弹预览，灯箱里的「打开详情」负责跳转；
+//      导航上下文取"本页已提交的整页结果"（opts.list / opts.index，由 renderPage /
+//      finishSearch 传入）；
+//   ② **预览卡 → 详情页**：未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱的页源探测
+//      只能拿到 250px 缩略图 —— 而详情页会回退到进行中搜索任务的内存快照
+//      （runtime.find_running_preview）给出中图，所以预览卡仍然走详情页；
+//   ③ 渲染层不打**下载**行为：预览卡不渲染下载按钮（未落库的 pid 下载必然 404），
 //      卡片上写明"可预览 · 暂不可下载"；
-//   ③ 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
+//   ④ 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
 //      .photo-card-actions）往预览卡塞回下载按钮，点击也到不了它自己的监听器；
-//   ④ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
-// 不传 opts 时（canonical 路径）行为与从前逐字一致 —— 已提交卡照旧下载、跳详情、开灯箱。
+//   ⑤ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
+// 不传 opts 时（预览路径）行为与从前逐字一致。
 function renderCard(r, opts) {
   const preview = !!(opts && opts.preview);
   const isDone = r.download_status === 'done';
@@ -647,12 +684,25 @@ function renderCard(r, opts) {
     });
   });
 
-  // Card click → detail page
+  // Card click → 已提交卡开灯箱 / 预览卡跳详情页（理由见上方 renderCard 的注释）
   item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
-    // 预览卡与普通卡一样跳详情：路由会在库里查不到行时回退到进行中搜索的内存快照
-    //（runtime.find_running_preview），所以"已筛出的作品"不必等整页筛完就能看。
-    window.location.href = `/detail/${r.pixiv_id}`;
+    if (preview) {
+      // 未落库：/api/detail/<pid> 是 404，灯箱只会拿到缩略图；详情页有内存快照兜底
+      window.location.href = `/detail/${r.pixiv_id}`;
+      return;
+    }
+    const list = (opts && opts.list) || [];
+    const idx = (opts && typeof opts.index === 'number') ? opts.index : 0;
+    // 防御：灯箱脚本没加载时退回到"跳详情页"这个老行为，而不是整卡失去响应
+    if (typeof lightbox === 'undefined') {
+      window.location.href = `/detail/${r.pixiv_id}`;
+      return;
+    }
+    lightbox.open(list.map(x => ({
+      pixiv_id: x.pixiv_id,
+      thumbUrl: proxyThumb(x.thumb_url),
+    })), Math.max(0, Math.min(idx, list.length - 1)));
   });
 
   // Artist click

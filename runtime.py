@@ -4,12 +4,15 @@ import json
 import logging
 import os
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from config import (
     DOWNLOAD_MAX_WORKERS, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
+    BACKUP_INTERVAL, BACKUP_KEEP,
     THUMB_CONCURRENCY,
 )
 
@@ -33,6 +36,82 @@ _thumb_failed: dict[str, float] = {}
 # RuntimeError: dictionary changed size during iteration。
 _thumb_failed_lock = threading.Lock()
 _THUMB_FAIL_COOLDOWN = 30.0
+
+# ── /thumb 取图统计（仅观测）──
+# 为什么需要：失败路径过去几乎全静默 —— 404/403/超时/冷却都只是 abort(502)，只有
+# "并发槽位等超时"会留一条 warning。于是"很多图加载不出来"只能靠翻
+# instance/image_cache 逐文件反推（2026-09-30 的中图 404 事故就是这么查出来的：
+# 写探针 + md5 逐个比对 2000 个缓存文件）。这里按"原因 + 主机"聚合计数并保留少量
+# URL 样本，把那段排查压缩成一次 `GET /api/thumb/stats`。
+# 容量有界：原因是固定枚举（见 routes_gallery._thumb_failure_reason）、主机数封顶
+#（超出并入 `(other)`）、样本用 deque(maxlen)。计数是进程内存，重启清零。
+_THUMB_FAILURE_HOST_LIMIT = 50
+_thumb_failures: dict = {
+    'total': 0,
+    'served': 0,        # 回源成功取到图
+    'cache_hits': 0,    # 直接命中磁盘缓存
+    'by_reason': {},
+    'by_host': {},
+    'samples': deque(maxlen=20),
+}
+# 读写都持锁：遍历式快照（jsonify）与并发写入必须互斥（见文末「并发」约定）
+_thumb_failures_lock = threading.Lock()
+
+
+def note_thumb_failure(url: str, reason: str, *, status: int | None = None) -> None:
+    """记一次取图失败：按原因与主机聚合，并留一条带 URL 的样本。
+
+    纯观测，**不得**影响控制流（调用方该 abort 还是 abort）。
+    """
+    try:
+        host = urlsplit(url).hostname or ''
+    except ValueError:
+        host = ''
+    with _thumb_failures_lock:
+        _thumb_failures['total'] += 1
+        reasons = _thumb_failures['by_reason']
+        reasons[reason] = reasons.get(reason, 0) + 1
+        hosts = _thumb_failures['by_host']
+        # 主机维度封顶：重定向目标可能五花八门，不封顶就成了可控内存增长
+        key = host if (host in hosts or len(hosts) < _THUMB_FAILURE_HOST_LIMIT) else '(other)'
+        hosts[key] = hosts.get(key, 0) + 1
+        _thumb_failures['samples'].append({
+            'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'reason': reason,
+            'status': status,
+            'host': host,
+            'url': url,
+        })
+
+
+def note_thumb_served(*, cache_hit: bool) -> None:
+    """记一次成功出图（区分磁盘命中与回源），用于算失败占比。"""
+    with _thumb_failures_lock:
+        _thumb_failures['cache_hits' if cache_hit else 'served'] += 1
+
+
+def thumb_failure_snapshot() -> dict:
+    """`/api/thumb/stats` 的数据源：锁内深拷贝一层，锁外序列化。"""
+    with _thumb_failures_lock:
+        return {
+            'total': _thumb_failures['total'],
+            'served': _thumb_failures['served'],
+            'cache_hits': _thumb_failures['cache_hits'],
+            'by_reason': dict(_thumb_failures['by_reason']),
+            'by_host': dict(_thumb_failures['by_host']),
+            'samples': [dict(sample) for sample in _thumb_failures['samples']],
+        }
+
+
+def clear_thumb_failures() -> None:
+    """清空取图统计（测试夹具；也可当作"复位观测"用）。"""
+    with _thumb_failures_lock:
+        for key in ('total', 'served', 'cache_hits'):
+            _thumb_failures[key] = 0
+        _thumb_failures['by_reason'].clear()
+        _thumb_failures['by_host'].clear()
+        _thumb_failures['samples'].clear()
+
 
 # ── /thumb 越界重定向：自动发现表 + 拒绝计数（仅观测用途）──
 # 跨域重定向跟随成功后记录目标主机，用于回答"Pixiv 图床是不是换域名了"。这里
@@ -169,6 +248,30 @@ _prefetch_state = {
     # 一个直接说"这轮报了什么"的字段配合 /api/prefetch/status 观察。
     'last_error': None,
 }
+
+# ── 数据库滚动快照状态 ──
+# 键集合固定、只改值（见并发约定），供 `GET /api/backups` 与 `get_background_health()`
+# 无锁读取。`enabled` 是**派生值**（interval>0），显式放进状态里是为了避免
+# "线程活着 ≠ 在干活"这类歧义：备份线程即使被禁用也会启动并空转，所以
+# `snapshot_alive=True` 单看并不能说明它在做事 —— 必须配合 `enabled`。
+_snapshot_state = {
+    'enabled': BACKUP_INTERVAL > 0,
+    'interval': BACKUP_INTERVAL,
+    'keep': BACKUP_KEEP,
+    'last_at': None,       # 上次成功快照的时间（ISO，UTC）
+    'last_path': None,     # 上次快照文件名
+    'last_error': None,    # 最近一次失败；成功即清空（与预取/自动关注同款语义）
+    'last_pruned': 0,      # 上次清理删掉的旧快照份数
+    'count': 0,            # 当前快照份数
+}
+_snapshot_stop = threading.Event()
+
+# ── 凭据体检缓存 ──
+# `GET /api/pixiv/health` 每次会发一次上游请求；前端在"搜索空结果"时自动调用它，
+# 用户连点搜索就会连发。30 秒 TTL 内的重复调用直接复用结论（先写数据、再写时间戳，
+# 见并发约定；并发重建时最多多打一次上游，不返回脏数据）。
+_credential_health_cache: dict = {'ts': 0.0, 'data': None}
+_CREDENTIAL_HEALTH_TTL = 30.0
 
 # ── 下载队列/进度/取消/线程池 ──
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)

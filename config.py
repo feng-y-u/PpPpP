@@ -118,6 +118,15 @@ PREFETCH_REFRESH_BATCH = 300
 # 刷新队列证明推不动的作品不该继续占容量，但太新的作品仍给刷新一次机会。
 PREFETCH_EVICT_UNREFRESHED_AFTER = 3 * 86400
 
+# ── 数据库滚动快照 ──
+# 与「迁移前自动备份」互补：迁移备份的时间点取决于"上次迁移"，距上次迁移越久、意外
+# 删除后可恢复的点就越旧。2026-09-30 的事故里救回数据的恰好是一次 12 分钟前的迁移
+# 备份 —— 纯属运气，早十分钟动手，最近的备份就是 3 周前的。
+# 按固定间隔再留一份，并只保留最近 BACKUP_KEEP 份（只删本模块写的 snapshot-* 文件，
+# 迁移备份与其它文件一律不碰）。0 = 禁用该项。
+BACKUP_INTERVAL = 86400   # 秒；0 禁用滚动快照
+BACKUP_KEEP = 7           # 保留份数
+
 # 显示设置
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下
 
@@ -210,6 +219,8 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'prefetch_interval': ('PREFETCH_INTERVAL', 3600),
     'prefetch_pages': ('PREFETCH_PAGES', 3),
     'prefetch_max_illusts': ('PREFETCH_MAX_ILLUSTS', 10000),
+    'backup_interval': ('BACKUP_INTERVAL', 86400),
+    'backup_keep': ('BACKUP_KEEP', 7),
 }
 
 def _backup_corrupt_settings(path: str) -> None:

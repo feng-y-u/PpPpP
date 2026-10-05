@@ -38,6 +38,10 @@ _TEST_DB_PATH = os.path.join(tempfile.gettempdir(), f'pixiv_test_{os.getpid()}.d
 config.DATABASE_PATH = _TEST_DB_PATH
 config.AUTO_FOLLOW_INTERVAL = 0
 config.PREFETCH_INTERVAL = 0
+# 同样关掉滚动快照：不关的话每个测试会话都会往临时实例目录里写快照，而且快照线程
+# 会在后台与测试并发动数据库（测试要的是确定性，不是备份能力）。快照逻辑本身由
+# tests/test_backups.py 直接驱动被测函数覆盖，不依赖后台线程。
+config.BACKUP_INTERVAL = 0
 
 import pytest
 

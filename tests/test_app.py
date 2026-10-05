@@ -1001,6 +1001,24 @@ class TestRoutes:
         resp = client.get('/downloads')
         assert resp.status_code == 200
 
+    def test_index_page_wires_lightbox_for_committed_cards(self, client):
+        """搜索页必须加载共享灯箱，并让**已提交**的结果卡走灯箱。
+
+        与图库/缓存页保持一致（点卡片弹预览、灯箱里的「打开详情」负责跳转）。预览卡是
+        例外：未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱探测不到页源、只能显示
+        250px 缩略图，所以它仍然走详情页（那边有内存快照兜底给出中图）。
+        """
+        resp = client.get('/')
+        assert resp.status_code == 200
+        assert b'lightbox.js' in resp.data, '搜索页必须引入共享灯箱组件'
+
+        js = pathlib.Path('static/page-index.js').read_text(encoding='utf-8')
+        assert 'lightbox.open(' in js, '已提交卡点击应当打开灯箱'
+        # 导航上下文必须整页传进去（否则灯箱里左右切换只能在当前卡片上打转）
+        assert 'list: page, index: i' in js and 'list: results, index: i' in js
+        # 预览卡仍是"跳详情页"：这条分支的存在本身就是那条 404 约束的落地
+        assert 'if (preview) {' in js
+
 
 class TestDbIsolation:
     def test_engine_uses_temp_db(self):

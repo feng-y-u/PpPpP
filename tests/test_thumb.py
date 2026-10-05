@@ -40,7 +40,9 @@ class _FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(f'{self.status_code}')
+            # 与真实 requests 一致：HTTPError 必须带上 .response，否则调用方
+            # 拿不到状态码（`_thumb_failure_reason` 正是靠它把失败分类的）
+            raise requests.HTTPError(f'{self.status_code}', response=self)
 
     def iter_content(self, chunk_size=8192):
         yield self._body
@@ -96,11 +98,13 @@ def thumb_env(monkeypatch, tmp_path):
     monkeypatch.setattr(routes_gallery, 'get_pooled_session', registry.session)
     monkeypatch.setattr(routes_gallery, 'reset_pooled_session', lambda: None)
     runtime._thumb_failed.clear()
+    runtime.clear_thumb_failures()
     with runtime._thumb_redirect_lock:
         runtime._thumb_redirect_hosts.clear()
         runtime._thumb_redirect_rejected.clear()
     yield {'registry': registry, 'tmp': tmp_path, 'state': tmp_path / 'thumb_redirect_hosts.json'}
     runtime._thumb_failed.clear()
+    runtime.clear_thumb_failures()
 
 
 def _rejected(host: str) -> int:
@@ -463,17 +467,33 @@ def test_thumb_cache_hit_serves_from_disk_without_network(thumb_env, client):
     assert os.stat(cache_path).st_mtime_ns == before, '读缓存不得改 mtime'
 
 
-def test_thumb_cache_hit_without_meta_assumes_jpeg(thumb_env, client):
-    """`.meta` 缺失（旧版本缓存）时按 jpeg 回放，不能因此 500。"""
-    cache_path, _ = _cache_paths(THUMB)
-    with open(cache_path, 'wb') as f:
-        f.write(b'no-meta')
+def test_thumb_cache_hit_without_meta_falls_back_to_extension(thumb_env, client):
+    """`.meta` 缺失或为空时**按扩展名**回放 Content-Type，不能一律当 jpeg。
 
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
+    回归来源：缓存文件是在写 `.meta` 之前就 rename 落盘的（见 `test_thumb_atomic_write_
+    failure_...`），所以"有图无 meta"是可能的。旧实现一律回 `image/jpeg`，于是 PNG 被
+    以 `image/jpeg` 送出 —— 叠加全局 `X-Content-Type-Options: nosniff`，浏览器直接拒绝
+    渲染，那张图就永久坏掉（直到缓存被 mtime 淘汰）。
+    """
+    png_url = 'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/9_p0.png'
 
-    assert resp.status_code == 200
-    assert resp.mimetype == 'image/jpeg'
-    assert thumb_env['registry'].calls == []
+    for url, expected in ((THUMB, 'image/jpeg'), (png_url, 'image/png')):
+        cache_path, meta_path = _cache_paths(url)
+        with open(cache_path, 'wb') as f:
+            f.write(b'no-meta')
+        assert not os.path.exists(meta_path), '本用例前提：缓存文件没有 .meta'
+
+        resp = client.get(f'/thumb/{_b64(url)}')
+
+        assert resp.status_code == 200
+        assert resp.mimetype == expected, f'{url} 无 .meta 时应按扩展名回放 {expected}'
+        assert thumb_env['registry'].calls == []
+
+    # 空的 .meta（0 字节）同样要按扩展名兜底：读到空串时不能回一个空 mimetype
+    cache_path, meta_path = _cache_paths(png_url)
+    with open(meta_path, 'w'):
+        pass
+    assert client.get(f'/thumb/{_b64(png_url)}').mimetype == 'image/png'
 
 
 def test_thumb_failure_cooldown_skips_network_until_expiry(thumb_env, client):
@@ -536,8 +556,63 @@ def test_thumb_atomic_write_failure_streams_response_without_caching(thumb_env, 
     resp = client.get(f'/thumb/{_b64(THUMB)}')
 
     assert resp.status_code == 200
-    assert resp.data == IMAGE_BYTES, '降级路径必须把原图完整给出去'
+    assert resp.data == IMAGE_BYTES, '降级路径必须把原图完整地给出去'
     assert os.listdir(routes_gallery.CACHE_DIR) == [], '不得留下缓存或 .tmp 残留'
+
+
+# ── /thumb 取图统计（可观测；2026-09-30 中图 404 事故的产物）──
+
+def test_thumb_stats_classifies_upstream_404_and_keeps_url_sample(thumb_env, client):
+    """上游 404 必须落到 `http_404` 并留下 URL 样本 —— 正是中图事故的形状。
+
+    这次事故里的症状是"很多作品的中图加载不出来"，而失败路径当时全静默（只有一条
+    槽位超时的 warning），只能靠翻 image_cache 逐文件反推。分类 + 样本让同样的问题
+    变成一次 `GET /api/thumb/stats`。
+    """
+    broken = 'https://i.pximg.net/c/600x600/img-master/img/2026/01/01/00/00/00/9_p0_master1200.png'
+    thumb_env['registry'].add(broken, status_code=404)
+
+    assert client.get(f'/thumb/{_b64(broken)}').status_code == 502
+
+    stats = client.get('/api/thumb/stats').get_json()
+    assert stats['total'] == 1
+    assert stats['by_reason'] == {'http_404': 1}
+    assert stats['by_host'] == {'i.pximg.net': 1}
+    assert stats['served'] == 0 and stats['cache_hits'] == 0
+    assert [s['url'] for s in stats['samples']] == [broken]
+    assert stats['samples'][0]['status'] == 404
+    assert stats['samples'][0]['reason'] == 'http_404'
+    assert stats['samples'][0]['at'], '样本要带时间戳，便于和发布/改动作对照'
+
+
+def test_thumb_stats_counts_cooldown_and_semaphore_timeout(thumb_env, client, monkeypatch):
+    """本地侧的两类失败也要各成一类：冷却命中（502）与槽位等超时（503）。"""
+    missing = f'{THUMB}?stats-cooldown=1'   # registry 未预置 → 连接错误 → 记冷却
+    assert client.get(f'/thumb/{_b64(missing)}').status_code == 502
+    assert client.get(f'/thumb/{_b64(missing)}').status_code == 502
+
+    monkeypatch.setattr(routes_gallery, '_thumb_sem', _NoSlotSemaphore())
+    monkeypatch.setattr(runtime, 'THUMB_SEM_TIMEOUT', 0.01, raising=False)
+    assert client.get(f'/thumb/{_b64(THUMB)}').status_code == 503
+
+    stats = client.get('/api/thumb/stats').get_json()
+    assert stats['by_reason']['conn_error'] == 1, '首次失败按连接错误归类'
+    assert stats['by_reason']['cooldown'] == 1, '冷却期内的那次请求单独计数'
+    assert stats['by_reason']['sem_timeout'] == 1
+    assert stats['total'] == 3
+
+
+def test_thumb_stats_counts_served_and_cache_hits(thumb_env, client):
+    """成功也要计数（区分回源与磁盘命中），否则失败占比无从计算。"""
+    thumb_env['registry'].add(THUMB)
+
+    assert client.get(f'/thumb/{_b64(THUMB)}').status_code == 200
+    assert client.get(f'/thumb/{_b64(THUMB)}').status_code == 200   # 第二次命中磁盘
+
+    stats = client.get('/api/thumb/stats').get_json()
+    assert (stats['served'], stats['cache_hits'], stats['total']) == (1, 1, 0)
+    assert thumb_env['registry'].calls and len(thumb_env['registry'].calls) == 1, \
+        '第二次必须走缓存、不再回源'
 
 
 # ── /api/image 三分支（审计 S18 补齐）──

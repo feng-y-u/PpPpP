@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import mimetypes
 import os
 import platform
 import threading
@@ -53,6 +54,25 @@ def _is_redirect_response(resp) -> bool:
     这里按状态码判定：3xx 要么是合法的一次跟随，要么判失败。
     """
     return 300 <= resp.status_code < 400
+
+
+def _thumb_failure_reason(exc: BaseException) -> str:
+    """把取图失败分类成可聚合的原因字符串（`/api/thumb/stats` 的键集合）。
+
+    分类的价值在于"一眼看出是哪一类问题"：`http_404` 会直接指向"我们拼出来的图片
+    地址在图床上不存在"（2026-09-30 的中图扩展名事故就是这个形状），`timeout` /
+    `conn_error` 指向网络与代理，`sem_timeout` 指向本地并发被占满。
+    """
+    status = getattr(getattr(exc, 'response', None), 'status_code', None)
+    if status is not None:
+        if status in (403, 404):
+            return f'http_{status}'
+        return 'http_5xx' if status >= 500 else 'http_4xx'
+    if isinstance(exc, requests.Timeout):
+        return 'timeout'
+    if isinstance(exc, requests.ConnectionError):
+        return 'conn_error'
+    return type(exc).__name__
 
 
 def _thumb_request(url: str, *, with_cookie: bool = True):
@@ -139,16 +159,25 @@ def thumb_proxy(url_b64: str) -> Response:
     cache_path = os.path.join(CACHE_DIR, f'{cache_key}.{ext}')
     meta_path = cache_path + '.meta'
     if os.path.isfile(cache_path):
-        mimetype = 'image/jpeg'
+        # `.meta` 是写入时记下的原始 Content-Type。缺失或为空时**必须按扩展名兜底**，
+        # 不能一律当 jpeg：缓存文件是在写 `.meta` **之前**就 rename 落盘的（见下面的
+        # 原子写），那个顺序下"有图无 meta"是可能的；PNG 若以 `image/jpeg` 送出，
+        # 叠加全局 `X-Content-Type-Options: nosniff` 会被浏览器**拒绝渲染** —— 表现为
+        # 这张图永久坏掉，直到缓存按 mtime 被淘汰。
+        mimetype = ''
         if os.path.isfile(meta_path):
             with open(meta_path) as f:
                 mimetype = f.read().strip()
+        if not mimetype:
+            mimetype = mimetypes.guess_type(cache_path)[0] or 'image/jpeg'
+        runtime.note_thumb_served(cache_hit=True)
         return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
 
     # 实时拉取分流：限制并发数 + 失败 URL 冷却，防止刷新/返回时把 Pixiv 图床打爆
     #（大量未命中缓存的缩略图同时实时拉 → 超时/限流 → 整批 502 → 前端"全消失"）
     now = time.time()
     if now - _thumb_failed.get(url, 0.0) < _THUMB_FAIL_COOLDOWN:
+        runtime.note_thumb_failure(url, 'cooldown')
         return abort(502)  # 冷却期内直接失败，不重复发起网络请求
 
     # 等槽位要带上限（审计 S11）：没有上限时，图床变慢会让排在后面的缩略图请求
@@ -157,6 +186,7 @@ def thumb_proxy(url_b64: str) -> Response:
     if not _thumb_sem.acquire(timeout=runtime.THUMB_SEM_TIMEOUT):
         logger.warning(
             f'/thumb 并发槽位等待超过 {runtime.THUMB_SEM_TIMEOUT}s，放弃本次取图: {url}')
+        runtime.note_thumb_failure(url, 'sem_timeout')
         return abort(503)
 
     try:
@@ -181,7 +211,12 @@ def thumb_proxy(url_b64: str) -> Response:
             resp.raise_for_status()
         finally:
             _thumb_sem.release()
-    except requests.RequestException:
+    except requests.RequestException as e:
+        runtime.note_thumb_failure(
+            url,
+            'redirect_rejected' if isinstance(e, _ThumbRedirectRejected)
+            else _thumb_failure_reason(e),
+            status=getattr(getattr(e, 'response', None), 'status_code', None))
         with _thumb_failed_lock:
             _thumb_failed[url] = now
             # 顺手清理过期失败记录，防止集合无限增长
@@ -190,6 +225,7 @@ def thumb_proxy(url_b64: str) -> Response:
         return abort(502)
 
     _thumb_failed.pop(url, None)
+    runtime.note_thumb_served(cache_hit=False)
 
     mimetype = resp.headers.get('Content-Type', 'image/jpeg')
     try:
@@ -573,6 +609,18 @@ def batch_delete_gallery() -> Response:
 
 
 # ── 重定向观测与打开目录 ──
+
+@bp.route('/api/thumb/stats')
+def thumb_stats() -> Response:
+    """`/thumb` 取图统计：磁盘命中 / 回源成功 / 失败（按原因与主机聚合 + 最近 URL 样本）。
+
+    回答的是"很多图加载不出来"这类问题：`by_reason['http_404']` 一多就说明我们拼出来的
+    图片地址在图床上不存在（2026-09-30 的中图扩展名事故正是这个形状，当时只能靠翻
+    image_cache 逐文件反推）；`timeout` / `conn_error` 指向网络与代理；`sem_timeout`
+    指向本地并发槽位被占满。纯观测接口，不影响任何控制流；计数在进程内存里，重启清零。
+    """
+    return jsonify(runtime.thumb_failure_snapshot())
+
 
 @bp.route('/api/thumb/redirect-hosts')
 def thumb_redirect_hosts_get() -> Response:

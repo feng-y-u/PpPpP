@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from base64 import urlsafe_b64encode
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from sqlalchemy import text
@@ -15,9 +16,18 @@ from sqlalchemy.exc import OperationalError
 
 import config
 from config import DOWNLOAD_DIR, MEDIUM_IMAGE_SIZE
-from models import get_session, Illust, BlockedTag, SearchCache
 import pixiv_client
 import runtime
+
+# ⚠ 本模块**不能**在模块级 `from models import ...`：`models.py` 在 import 那一刻就
+# `create_engine(config.DATABASE_PATH)`，于是"谁先 import 到 models"决定了 engine 绑哪个库
+# —— 2026-09-30 的测试清空生产库事故正是这条链（`-p` 插件 `import helpers` → helpers →
+# models → engine 绑生产库 → 夹具清表）。本模块唯一需要 DB 的 `query_cached_tag` 改成
+# 函数内延迟 import，helpers 于是重新成为**叶子**（只依赖 config/runtime/pixiv_client）。
+# 回归用例：tests/test_helpers.py::test_helpers_does_not_import_models_at_module_level。
+if TYPE_CHECKING:   # 仅供注解可读，运行时**不**执行
+    from models import Illust
+
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +311,10 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     Returns:
         (results_dicts, has_more, next_offset, filtered_total)
     """
+    # 延迟 import（见文件顶部注释）：把"helpers 依赖 models"收窄到真正需要 DB 的这一个
+    # 函数体内，模块 import 顺序就不再能决定 engine 绑到哪个库。
+    from models import BlockedTag, Illust, SearchCache, get_session
+
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
         sc = db.query(SearchCache).filter(

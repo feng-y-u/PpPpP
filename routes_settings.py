@@ -27,7 +27,8 @@ from middleware import (_credential_version, _csrf_required, _get_csrf_token,
                         _session_authed)
 from routes_prefetch import _PREFETCH_SETTINGS_KEYS
 from models import BlockedTag, get_session, safe_commit
-from runtime import _auto_follow_state, _prefetch_state
+from runtime import (_CREDENTIAL_HEALTH_TTL, _auto_follow_state,
+                     _credential_health_cache, _prefetch_state, _snapshot_state)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,106 @@ def auto_follow_status() -> Response:
     data = dict(_auto_follow_state)
     data['alive'] = get_background_health()['auto_follow_alive']
     return jsonify(data)
+
+
+@bp.route('/api/pixiv/health')
+def pixiv_health() -> Response:
+    """凭据体检：本地 Cookie 事实 + 一次上游自检。
+
+    为什么要有这个接口：Cookie 失效时 Pixiv 对搜索类请求常常**静默返回空页**
+    （`docs/maintenance.md` 有说明），界面只能显示"没有找到作品" —— 用户没法把
+    "真的没结果"与"凭据失效"分开。前端在空结果时调它，然后按 `advice` 给具体建议。
+
+    `probe.result` 的取值与含义：`cookie_missing`（本地就没有文件，不联网）/
+    `auth`（上游明确报认证问题）/ `rate_limited`（403，限流而非失效）/
+    `network`（连不上，网络或代理）/ `error`（上游非认证错误）/ `ok`（上游接受了请求）。
+    注意 `ok` **不等于**"一定有数据"：关注列表本来没有新作品时同样是空结果。
+    结论有 30s TTL 缓存，避免用户连点搜索时反复打上游。
+    """
+    cookie_path = pixiv_client.COOKIE_PATH
+    present = os.path.isfile(cookie_path)
+    cookie = {
+        'path': cookie_path,
+        'present': present,
+        'age_seconds': (int(time.time() - os.path.getmtime(cookie_path))
+                        if present else None),
+    }
+
+    now = time.time()
+    cache = _credential_health_cache
+    cached = cache['data']
+    if cached is not None and now - cache['ts'] < _CREDENTIAL_HEALTH_TTL:
+        probe = dict(cached)
+    elif not present:
+        # 本地事实就足够定性，没必要为了"证明没有 Cookie"去打一次上游
+        probe = {'result': 'cookie_missing', 'detail': f'没有找到 Cookie 文件 {cookie_path}'}
+        cache['data'] = dict(probe)      # 先写数据
+        cache['ts'] = now                # 再写时间戳
+    else:
+        session = pixiv_client.build_pixiv_session()
+        try:
+            probe = pixiv_client.probe_credentials(session)
+        except Exception as e:           # 探针自己炸了不该 500：如实报 network
+            probe = {'result': 'network', 'detail': f'{type(e).__name__}: {e}'}
+        finally:
+            session.close()
+        cache['data'] = dict(probe)
+        cache['ts'] = now
+
+    return jsonify({
+        'ok': probe['result'] == 'ok',
+        'cookie': cookie,
+        'probe': probe,
+        'advice': _credential_advice(probe, cookie),
+    })
+
+
+def _credential_advice(probe: dict, cookie: dict) -> str:
+    """把体检结论翻成一句可执行的建议；`ok` 时返回空串（没有可建议的）。"""
+    result = probe.get('result')
+    if result == 'ok':
+        return ''
+    if result == 'cookie_missing':
+        return ('没有找到 Cookie 文件：在浏览器登录 Pixiv 后把 PHPSESSID 写入 cookies.txt'
+                '（或在设置页填写），否则搜索**一定是**空的。')
+    if result == 'auth':
+        return 'Cookie 已失效（上游明确报认证失败）：请更新 PHPSESSID 后重试。'
+    if result == 'rate_limited':
+        return '上游返回 403：这是限流/风控，不是凭据失效 —— 等一会儿再试。'
+    if result == 'network':
+        return f'连不上 Pixiv（网络或代理问题），当前结果不代表"没有作品"。详情：{probe.get("detail", "")}'
+    if result == 'error':
+        return f'上游返回错误：{probe.get("detail", "")}'
+    return ''
+
+
+@bp.route('/api/backups')
+def backups_status() -> Response:
+    """数据库滚动快照的观测面：运行态 + 磁盘上的快照文件。
+
+    `state` 里 `enabled` 是**派生值**（`interval>0`）：备份线程即使被禁用也会启动并
+    空转，所以它自己的 `snapshot_alive`（见 `/api/prefetch/status`）只说明"线程活着"，
+    回答不了"到底有没有在留快照" —— 那要看 `enabled` 与 `last_at`。
+
+    `files` 只列 `pixiv.db.snapshot-*.bak`（本机制自己写的那些）：迁移前备份与用户
+    手工放进 `instance/backups/` 的文件不在这里，也不会被保留策略清理。
+    """
+    from backups import backup_dir_for, snapshot_paths   # 局部导入：仅本接口需要
+    db_path = config_module.DATABASE_PATH
+    files = []
+    for path in snapshot_paths(db_path):
+        stat = path.stat()
+        files.append({
+            'name': path.name,
+            'size': stat.st_size,
+            'mtime': time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(stat.st_mtime)),
+        })
+    return jsonify({
+        'state': dict(_snapshot_state),
+        'db_path': db_path,
+        'backup_dir': str(backup_dir_for(db_path)),
+        'files': files,
+    })
 
 
 @bp.route('/api/auto-follow/config', methods=['POST'])

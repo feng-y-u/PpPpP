@@ -1072,3 +1072,47 @@ def fetch_following_latest(session: requests.Session, *,
         return [], False
 
     return parse_follow_latest(data.get('body', {}) or {})
+
+
+def probe_credentials(session: requests.Session) -> dict:
+    """一次廉价的上游自检：回答"当前 Cookie 还能不能用"。
+
+    为什么需要：Cookie 失效时 Pixiv 对**搜索类**请求常常静默返回空结果（见
+    `docs/maintenance.md` 的认证说明），界面于是把它显示成"没有找到作品" —— 用户无法
+    把"真的没结果"和"凭据失效"分开。这里用一个**需要登录**的端点（关注画师最新作品）
+    当探针，并把结论分成可执行的几类，让前端能给出不同建议。
+
+    诚实边界（重要）：`result == 'ok'` 只说明"上游接受了这次请求、没有报认证错误"，
+    **不能**据此推断"一定有数据" —— 关注列表里本来就没有新作品时同样是空结果。所以
+    `works == 0` 的情形在 `detail` 里如实写明"无明确信号"，而不是当成凭据有问题。
+
+    返回值：`{'result': ok|auth|rate_limited|network|error, 'detail': str, 'works': int?}`
+    """
+    url = endpoint_follow_latest_illust(mode='all', page=1)
+    try:
+        resp = session.get(url, timeout=DETAIL_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status == 401:
+            return {'result': 'auth', 'detail': 'HTTP 401'}
+        if status == 403:
+            # 403 是限流/风控，不是凭据失效（同 handle_list_request_error 的分类口径）
+            return {'result': 'rate_limited', 'detail': 'HTTP 403（限流/风控，非凭据失效）'}
+        return {'result': 'network', 'detail': f'{type(e).__name__}: {e}'}
+
+    try:
+        message = envelope_error(data, log_prefix='Credential probe API error')
+    except PixivAuthError as e:
+        return {'result': 'auth', 'detail': str(e)}
+    if message:
+        return {'result': 'error', 'detail': message}
+
+    works, _has_more = parse_follow_latest(data.get('body', {}) or {})
+    return {
+        'result': 'ok',
+        'works': len(works),
+        'detail': ('上游接受了本次请求' if works
+                   else '上游未报认证错误，但本次没有返回作品（无明确信号）'),
+    }
