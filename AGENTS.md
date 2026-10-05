@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 708 用例约 18~21s，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 732 用例约 20s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -46,8 +46,9 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `app.py` | 组装入口（Flask app / 配置 / 注册 6 个 Blueprint / 启动后台线程）+ 4 个页面路由（`/`、`/cache`、`/csrf-token`、`/favicon.ico`） |
 | `config.py` | 常量、`.env` 与 `instance/settings.json` 覆盖；`SETTINGS_KEYS` 是**设置键的唯一来源**（config 与设置页共用） |
 | `models.py` | SQLAlchemy ORM：`Illust`、`BlockedTag`、`DownloadLog`、`SearchCache`；`init_db` / `get_session` / `safe_commit` |
-| `runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：扫描/TTL 缓存、预取状态、下载队列与进度、限流存储、异步搜索任务 |
-| `helpers.py` | 纯工具函数与库内查询：下载目录扫描、URL/展示工具、`query_cached_tag`、文件删除 |
+| `runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：扫描/TTL 缓存、预取状态、下载队列与进度、限流存储、异步搜索任务、`/thumb` 取图统计、滚动快照状态、凭据体检缓存 |
+| `backups.py` | 数据库**滚动快照**（与"迁移前备份"互补）：`take_snapshot` / `prune_snapshots` / `snapshot_due`；只清点与清理自己写的 `pixiv.db.snapshot-*.bak` |
+| `helpers.py` | 纯工具函数与库内查询：下载目录扫描、URL/展示工具、`query_cached_tag`、文件删除。**必须保持叶子**：模块级不得 import `models`（唯一需要 DB 的 `query_cached_tag` 在函数体内延迟 import），否则"谁先 import 到 models"会决定 engine 绑哪个库 —— 见文末「测试」里的三道防线 |
 | `middleware.py` | 认证 / CSRF / 限流 / 安全头；app 级钩子（`before_app_request` / `after_app_request`）随 `middleware_bp` 注册 |
 | `background.py` | 后台线程与下载引擎：自动关注、预取循环、下载执行器、`start_background_threads()`（幂等）、`_reset_stuck_*` |
 | `pixiv_client.py` | **Pixiv 适配层**：Ajax 端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析；不碰 DB、不认识 `Illust` |
@@ -71,8 +72,10 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 依赖单向、无循环 import：
 
 ```
-config / runtime / helpers（叶子）→ middleware → background → routes_* → app.py（组装）
+config / runtime / helpers / backups（叶子）→ middleware → background → routes_* → app.py（组装）
 ```
+
+`helpers.py` 与 `backups.py` 是**真叶子**：模块级不得 import `models`（前者唯一需要 DB 的 `query_cached_tag` 在函数体内延迟 import；后者只碰文件与 `migrations.runner` 的复制原语）。`helpers` 曾经在模块级 `from models import ...`，那正是 2026-09-30 "测试清空生产库"事故的物理原因 —— 回归用例钉在 `tests/test_helpers.py::test_helpers_does_not_import_models_at_module_level`。
 
 `app.py` import 时序：`init_db()` → `_reset_stuck_downloads()` / `_reset_stuck_prefetch()`（清理残留状态）→ `start_background_threads()` → `atexit.register(_shutdown_background_threads)`。
 
@@ -114,11 +117,12 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ### 进程与状态
 
-- **Gunicorn 必须用 `-w 1`，但建议加 `--threads 8`**：内存状态（`_auto_follow_state`、`_prefetch_state`、`_queued_downloads`、`_download_progress`、`download_cancellations`、`_search_tasks`、`_rate_limit_store`、`_scan_cache`、`_db_pids_cache`、`_thumb_failed`、`download_locks`）是**进程级**的 —— 多 worker 不共享，所以 `-w` 必须为 1；而线程共享同一进程内存，所以 `--threads N` 在保持单进程语义的前提下提供并发。
+- **Gunicorn 必须用 `-w 1`，但建议加 `--threads 8`**：内存状态（`_auto_follow_state`、`_prefetch_state`、`_snapshot_state`、`_queued_downloads`、`_download_progress`、`download_cancellations`、`_search_tasks`、`_rate_limit_store`、`_scan_cache`、`_db_pids_cache`、`_thumb_failed`、`_thumb_failures`、`_credential_health_cache`、`download_locks`）是**进程级**的 —— 多 worker 不共享，所以 `-w` 必须为 1；而线程共享同一进程内存，所以 `--threads N` 在保持单进程语义的前提下提供并发。
   缺省（sync worker、无 `--threads`）时 gunicorn **一次只处理一个请求**：一页 24 张缩略图会严格串行加载，这是图库首屏慢的主要来源之一。共享状态的线程安全已审计（见文末「并发」），可安全开启。
 - **启动即重置**：`_reset_stuck_downloads()` 清除所有 `downloading` 状态并删除残留文件；`_reset_stuck_prefetch()` 把 `SearchCache.status='fetching'` 改回 `done`（否则预取抢占逻辑会让该标签被永久跳过）。
 - **限流是每 worker 的内存计数器**：`_rate_limit` 装饰器按 IP 保存时间戳，用于 `POST /login` 与 `/api/settings/unlock`。
-- 关键 TTL：`SEARCH_TASK_TTL=600s`、`_SCAN_CACHE_TTL=30s`、`_DB_PIDS_CACHE_TTL=30s`、`_THUMB_FAIL_COOLDOWN=30s`、缩略图并发上限 `config.THUMB_CONCURRENCY`（默认 12）。
+- 关键 TTL：`SEARCH_TASK_TTL=600s`、`_SCAN_CACHE_TTL=30s`、`_DB_PIDS_CACHE_TTL=30s`、`_THUMB_FAIL_COOLDOWN=30s`、`_CREDENTIAL_HEALTH_TTL=30s`、缩略图并发上限 `config.THUMB_CONCURRENCY`（默认 12）。
+- **后台线程一共三条**：自动关注、预取、**滚动快照**（`background._snapshot_loop`）。快照线程**即使被禁用（`BACKUP_INTERVAL=0`）也会启动并空转**，所以 `snapshot_alive`（见 `get_background_health()`）只说明"线程活着"，是否真在留快照要看 `runtime._snapshot_state['enabled']` 与 `GET /api/backups` 的 `state.last_at` —— 与自动关注那条"alive ≠ 在干活"是同款坑。快照的失败只写 `last_error` 并继续下一轮（打死线程 = "再也留不下快照"永远没人发现）。
 - **后台线程存活只能"看"，不会自动重启**：`background.get_background_health()` 回答 `prefetch_alive` / `auto_follow_alive`（线程引用的唯一持有者在 `background`），`prefetch_alive` 等字段经 `/api/prefetch/status` 暴露，`auto_follow_alive` 另经 `/api/auto-follow/status` 暴露给设置页「自动关注」卡片。三条容易踩的语义：① `auto_follow_alive` **不等于**"在干活" —— 线程活着但每轮都失败（Cookie 失效）时仍是 `True`；② `auto_follow_interval=0`（禁用）时线程照样活着，字段仍为 `True`，且禁用期间**不碰** `last_error`（没尝试就没学到新东西）；③ `_auto_follow_state['last_check']` / `last_count` 只在**成功拉到关注列表并处理完一轮**时更新（拉不到任何作品的那轮直接 `continue`），所以"陈旧"既可能是没有新作品、也可能是每轮都在失败，界面文案不能写成"上次轮询时间"。把③那两种"陈旧"分开的就是 `_auto_follow_state['last_error']`（审计 S20 遗留，与预取那套同名同义）：**只在成功跑完一轮时清空**，所以非空 = 最近一轮就失败了；而"拉不到任何作品"**不写也不清**这个字段 —— Cookie 失效时 Pixiv 静默返回空结果，写进去就是假告警、清掉会抹掉真证据。`alive` 是**派生值**，不要写进 `_auto_follow_state`（该 dict 由自动关注线程与 `/api/auto-follow/config` 共用）；`last_error` 相反，它是 worker 写的运行态字段，必须待在 `runtime._auto_follow_state` 的初始字面量里（键集合固定才可无锁读）。
 
 ### 配置与重启
@@ -146,8 +150,12 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。所有 Pixiv 请求**必须经 `pixiv_client.build_pixiv_session()`**（`fetcher` 仍再导出同名函数，老调用方无需改）构造 session，禁止裸建 `requests.Session()`。
 - **Pixiv 接口只认 `pixiv_client.py` 这一处**：Ajax 路径、查询参数名、`error`/`message`/`body` 信封、payload 字段名（`illustTitle`/`userId`/`updateDate`/`metaPages`/`isLastPage`…）全部只在适配层出现；业务层（`fetcher`）只用规范字段（`bookmark_count`/`original_urls`/`thumb_url`…）。**改 Pixiv 接口 → 只改 `pixiv_client`**；路由/后台/helpers 一律不拼 URL、不认响应字段。新增/变更字段时先看 `tests/test_pixiv_contract.py`（脱敏样本 + 离线契约测试，样本在 `tests/fixtures/pixiv/`，用 `scripts/pixiv_capture.py` 刷新）。⚠️ 适配层的有状态符号（`_cookie_value`/`_cookie_mtime`/`_total_limiter`/`_detail_error_samples`）**只在 `pixiv_client` 命名空间**，测试补丁要打在它身上 —— 打在 `fetcher` 上会静默失效。
 - **缩略图代理 `/thumb/<base64_url>`**：入口仅允许 `https://i.pximg.net/` 白名单，磁盘缓存 7 天 + 失败 URL 冷却，防刷新时打爆图床。**重定向不自动跟随**（`allow_redirects=False`）：3xx 时按凭据分级跟随**一次** —— 目标在 `config.IMAGE_HOST_ALLOWLIST` 内用带凭据连接池；白名单外的公网 https 用无凭据连接池（要求 `Content-Type: image/*`）并记入发现表（`GET/DELETE /api/thumb/redirect-hosts`，落盘 `instance/thumb_redirect_hosts.json`，`THUMB_REDIRECT_DISCOVERY=false` 可关闭跨域跟随）。非法目标（非 https / 内网 / 云元数据 / userinfo / 非 443）与嵌套重定向、缺 `Location` 一律 502 且**不发第二次请求**。发现表**不会**自动变成白名单（白名单只决定"是否携带凭据"）—— 确认是官方 CDN 后手工加进 `config.IMAGE_HOST_ALLOWLIST` 并重启。
+- **`/thumb` 取图统计 `/api/thumb/stats`**（纯观测）：按**原因**（`http_404`/`http_403`/`http_4xx`/`http_5xx`/`timeout`/`conn_error`/`cooldown`/`sem_timeout`/`redirect_rejected`）与**主机**聚合失败计数，外加 `served`/`cache_hits` 与最近 20 条带 URL 的样本。它存在的意义就是"很多图加载不出来"这类问题：2026-09-30 的中图 404 事故当时只能靠写探针 + 逐文件比对 `image_cache` 才定位，而 `http_404` 样本会一眼指向"我们拼出来的地址在图床上不存在"。计数在进程内存里（重启清零），容量有界（原因是固定枚举、主机数封顶、样本用 `deque(maxlen=20)`）。
 - **热点路径必须复用连接池**：`/thumb` 与 `_fetch_details_parallel` 走 `pixiv_client.get_pooled_session()`（线程内复用 Session），**不要在这些循环里调 `build_pixiv_session()`**。原因见文末「连接复用」。
 - **中图（master1200）地址的扩展名恒为 `.jpg`**（`helpers._original_to_resized`）：master 是图床**统一重编码的 JPEG**，与原图格式无关 —— 原图是 PNG 的作品若被拼成 `_master1200.png`，图床一律 **404**（实测同一作品 `.png` → 404 / `.jpg` → 200）。这里曾经沿用原图的扩展名，于是**原图是 PNG 的作品中图全挂**；而 PNG 原图是多数（实测某实例 2120 条原图地址里 1375 条是 `.png`），症状就是"很多作品的中图加载不出来"：中图 404 → /thumb 记失败冷却 → 前端候选链退到原图代理 → PNG 原图 1~5MB、经代理几秒到几十秒（实测有 65s），超过 `/thumb` 的 `(10, 30)` 读超时后只剩 250px 缩略图兜底。回归用例：`tests/test_helpers.py::TestOriginalToResized`、`tests/test_app.py::TestDetailApiMediumUrls` / `TestDetailPageMediumUrls`。
+- **`/thumb` 缓存命中时的 Content-Type**：优先回放写入时记的 `.meta`；`.meta` 缺失或为空时**按文件扩展名兜底**（`mimetypes.guess_type`），不能一律当 jpeg —— 缓存文件是在写 `.meta` **之前**就 rename 落盘的（原子写顺序），"有图无 meta"是可能的，PNG 若以 `image/jpeg` 送出会被 `X-Content-Type-Options: nosniff` 拒绝渲染（这张图就永久坏掉，直到缓存被 mtime 淘汰）。
+- **数据库滚动快照 `/api/backups`**：返回快照运行态 + `instance/backups/` 里本机制写的 `pixiv.db.snapshot-*.bak`。`state.enabled` 是派生值（`BACKUP_INTERVAL>0`）—— 线程活着不等于在留快照。配置键 `backup_interval`（默认 86400s，0 禁用）/`backup_keep`（默认 7，只删自己命名的文件）。**恢复步骤见 `docs/maintenance.md` §4b**（停服 → 留档现状 → 清 `-wal`/`-shm` → 覆盖 → 校验行数与 `integrity_check`）。
+- **凭据体检 `/api/pixiv/health`**（`pixiv_client.probe_credentials`）：回答"Cookie 现在还能不能用"。`cookie_missing` 是本地事实（不联网），其余靠一次 `follow_latest` 探针分类成 `auth`/`rate_limited`/`network`/`error`/`ok`（结论有 30s TTL 缓存，供空结果时前端自动调用）。**`ok` 不等于"一定有数据"** —— 关注列表本来没有新作品时同样是空结果，这种"无明确信号"必须在文案里如实说明。前端只在**搜索空结果**时调它，并把 `advice` 显示在空状态里（把"真的没结果"与"凭据失效"分开）。
 - **详情 API 三级令牌桶**：`DETAIL_RATE_PER_MINUTE=45`（前台搜索）、`FILL_RATE_PER_MINUTE=20`（后台补全）、`TOTAL_RATE_PER_MINUTE=60`（总闸）。
 - **详情拉取的重试是分类的**：连接错误立即放弃、限流退避重试（真正触发退避的是 403 —— 429 被传输层拦下，见文末「重试策略」）—— 不要在两处同时放开。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址。
@@ -182,7 +190,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ### 目录
 
-- **`instance/`**：`.secret_key`、`.cursor_secret`、`pixiv.db`（+ WAL/SHM）、`settings.json`（损坏时另留 `settings.json.corrupt.bak`）、`image_cache/`、`thumb_redirect_hosts.json`（`/thumb` 重定向发现表）、`backups/`（迁移前自动备份）。整个目录在 `.gitignore` 中。
+- **`instance/`**：`.secret_key`、`.cursor_secret`、`pixiv.db`（+ WAL/SHM）、`settings.json`（损坏时另留 `settings.json.corrupt.bak`）、`image_cache/`、`thumb_redirect_hosts.json`（`/thumb` 重定向发现表）、`backups/`（**两种**备份：迁移前的 `pixiv.db.<ts>.bak` + 滚动快照 `pixiv.db.snapshot-<ts>.bak`，保留策略只清理后者）。整个目录在 `.gitignore` 中。
 - **`image_cache/` 有容量上限**：`config.IMAGE_CACHE_MAX_BYTES`（默认 1 GB）。超出后按 mtime 从旧到新淘汰，落到上限的 90%（`IMAGE_CACHE_TARGET_RATIO`）。淘汰只认本缓存写的文件（32 位 md5 名 + 同名 `.meta`），目录里的其他文件一律不动。扫描受 `IMAGE_CACHE_CLEANUP_INTERVAL`（默认 5 分钟）节流，写入缓存时顺便触发；启动时额外强制跑一次。
   注意这是"最旧写入优先"而非严格 LRU：命中缓存**不**刷新 mtime，否则 ETag 会跟着变、让浏览器那 7 天的本地缓存整体失效。
 - **`downloads/`** 和 **`cookies.txt`** 也在 `.gitignore` 中。
@@ -192,8 +200,8 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/**收藏夹端点移除后的 404 契约**/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_test_setup.py`（测试环境自校验）。
-- `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0`（事后覆盖无效，会连到生产库）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/**收藏夹端点移除后的 404 契约**/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_backups.py`（**滚动快照**：清点/到期判定/保留策略只删自己命名的文件 + 侧车、WAL 里已提交的数据必须进快照、`/api/backups` 载荷形状）、`test_test_setup.py`（测试环境自校验）。
+- `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0` / `BACKUP_INTERVAL=0`（事后覆盖无效，会连到生产库；关掉后台任务是为了让测试确定性 —— 快照逻辑本身由 `tests/test_backups.py` 直接驱动被测函数覆盖，不依赖线程）。
 - ⚠️ **测试绝不允许连生产库：`conftest.py` 有三道防线，都不要拆**。
   根因是 `models.py` 在 import 那一刻就 `create_engine(config.DATABASE_PATH)`，engine 建好后 conftest 再改 `config` 也**改不动它** —— 所以任何在 conftest 之前 import 到 `models` 的东西（`-p` 加载的自定义 pytest 插件、`sitecustomize`、包装脚本）都会让整轮测试直连真实库（`helpers.py` / `app.py` 都在模块级 from-import `models`，一次 `import helpers` 就够了）。**2026-09-30 真实发生过**：一个变异验证用的 `-p <插件>` 在模块级 `import helpers`，`clean_db` 因此清空了真实库的 1456 件作品（靠迁移前自动备份救回）。三道防线：
   ① conftest 顶部：`'models' in sys.modules` 就 `raise RuntimeError`（在覆盖路径之前）；
@@ -205,7 +213,8 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 708 条 = 702 passed / 2 skipped / 4 failed**，约 18s（2026-09-30：加入「搜索预览可查看」12 条 + 「中图扩展名」14 条用例后；更早删除收藏夹功能后的基线是 682 = 676 passed / 2 skipped / 4 failed）。4 个 failed 全是 `test_test_setup.py::test_temp_root_*` 的**环境相关**失败（这些用例在测试进程里再起 `powershell.exe` 子进程并捕获其输出，当前受限执行环境里该子进程退出码非 0），不是代码回归 —— 换掉外层 `TEMP/TMP` 覆盖单独跑这个文件，同样 4 条全挂、其余 16 条通过。
+- **当前实测基线：收集 732 条 = 730 passed / 2 skipped / 0 failed**，约 20s（2026-09-30：加入「搜索预览可查看」12 条 + 「中图扩展名」14 条 + `/thumb` 统计 3 条 + 滚动快照 7 条 + 凭据体检 11 条 + helpers 叶子 2 条 + 灯箱接线 1 条）。
+  **那 4 条长期失败的 `test_test_setup.py::test_temp_root_*` 已彻底修好，不再是"环境性失败"**：它们从此前把 `TEMP/TMP` 塞进**子进程环境**改为**在 PS 会话内部**赋值 —— 旧写法的 `C:/pixiv-test/environment-temp` 这种不存在的目录会让 Windows PowerShell 自己启动失败（它启动就要用 TMP），于是用例死在断言之前，多年来每个审计阶段都把它记成"预先存在、与本阶段无关"。现在 4 条真跑真断言（并做过变异验证：破坏 `PIXIV_TEST_TMP` 分支 → 对应 2 条失败）。**基线必须是 0 failed**：常红会让人在真回归面前失去判断力。
 
 ### 最重要的约定：app 命名空间是测试补丁 seam
 
@@ -223,7 +232,7 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 
 生产以 `gunicorn -w 1 --threads 8` 运行，请求由多线程并发处理。共享可变状态必须遵守以下约定（2026-08-29 已按此审计并修复）：
 
-- **容器遍历要加锁**。清理逻辑多为 Python 层推导式（每条之间有字节码边界，可被其他线程抢入），期间被改动会抛 `RuntimeError: dictionary changed size during iteration`。已知并已加锁：`_rate_limit_store`（`_rate_limit_lock`）、`_thumb_failed`（`_thumb_failed_lock`）、重定向发现表（`routes_gallery._thumb_redirect_lock`）。
+- **容器遍历要加锁**。清理逻辑多为 Python 层推导式（每条之间有字节码边界，可被其他线程抢入），期间被改动会抛 `RuntimeError: dictionary changed size during iteration`。已知并已加锁：`_rate_limit_store`（`_rate_limit_lock`）、`_thumb_failed`（`_thumb_failed_lock`）、`_thumb_failures`（`_thumb_failures_lock`，读写与快照都在锁内）、重定向发现表（`routes_gallery._thumb_redirect_lock`）。
 - **"读 → 判定 → 写"必须整体在锁内**。拆成多步时并发请求会各自读到未计入对方的中间状态。限流器是安全控制，这点尤其致命（曾可被并发爆破绕过）。
 - **TTL 缓存先写数据、再写时间戳**。反序会留下"时间戳已刷新、数据仍是旧值"的窗口；`_db_pids_cache` 原先甚至在整条 SQL 查询期间都保持着这个窗口，会让已下载作品被误判成孤儿。
 - **注销资源时只删自己那份**。`download_locks` 的 pop 必须比对锁对象本身，否则会把并发新任务的锁删掉（见 `background._release_download_lock`）。
@@ -289,6 +298,8 @@ config / runtime / helpers（叶子）→ middleware → background → routes_*
 - 无构建步骤：`app.js` 提供共享工具（`$`、`escHtml`、`proxyThumb`、`fmtSize`、`pvCache` 等），每个模板在底部显式引入自己的 `page-<name>.js`。
 - CSRF token 从页面 `<meta name="csrf-token">` 读取，POST 统一带 `X-CSRF-Token` 头。
 - 搜索结果在前端缓存 30 分钟（`SEARCH_CACHE_TTL`），游标状态恢复兜底 24 小时（与后端游标 TTL 对齐）。
+- **搜索页也接了共享 lightbox**：已提交的结果卡点击弹预览（导航上下文是**本页整页结果**，由 `renderCard(r, {list, index})` 传入），灯箱里的「打开详情」负责跳转；**预览卡是例外** —— 未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱只能拿到 250px 缩略图，所以预览卡仍跳详情页（那边有内存快照兜底给出中图）。
+- **空结果会做一次凭据体检**：`finishSearch` 在结果为空时调 `/api/pixiv/health`，只在"确实有问题"时把 `advice` 显示到 `#emptyHint`（Cookie 缺失/失效/限流/网络）。这是**增强提示**：接口失败或没有该字段都不影响原有空状态，且体检期间用户已发起新搜索时不得把建议插到新结果上（`#emptyState` 不可见就丢弃）。
 
 ---
 

@@ -81,6 +81,10 @@ powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -m integration
 ## 4. 数据库备份 / 迁移
 
 - **结构迁移**：启动时由 `migrations/runner.py` 按 `PRAGMA user_version` 版本化执行；**升级前自动备份**数据库到 `instance/backups/<db>.YYYYMMDDTHHMMSS.bak`。
+- **滚动快照**（自动，`BACKUP_INTERVAL` 默认 86400s = 每天一份）：后台线程按间隔在 `instance/backups/` 留一份 `pixiv.db.snapshot-<UTC 时间戳>.bak`，只保留最近 `BACKUP_KEEP`（默认 7）份。快照前会做 `PRAGMA wal_checkpoint(TRUNCATE)`，所以**已提交但还在 WAL 里的事务也在快照里**；checkpoint 失败（有别的连接持读锁）时会连 `-wal`/`-shm` 一起复制兜底。
+  - 为什么需要它：迁移备份的时间点由"上次迁移"决定，距上次迁移越久、可恢复的点就越旧。2026-09-30 的一次事故（测试夹具连到生产库后清空了 `illusts`）里，救回数据的恰好是一次 12 分钟前的迁移备份 —— 纯属运气；早十分钟动手，最近的备份就是 3 周前的。
+  - 观测：`GET /api/backups`（运行态 + 磁盘上的快照文件）。注意 `snapshot_alive`（见 `/api/prefetch/status`）只说明**线程活着**，是否真在留快照要看 `GET /api/backups` 里的 `state.enabled` 与 `state.last_at`。
+  - 关闭/调整：`settings.json` 里 `backup_interval: 0` 关闭，`backup_keep: N` 调整保留份数（改完需重启）。
 - **手动备份**（推荐定期）：
 
 ```bash
@@ -90,6 +94,47 @@ mkdir -p instance/backups && cp instance/pixiv.db instance/backups/pixiv.db.$(da
 ```
 
 - 回退：若迁移出现问题，用最新 `.bak` 覆盖后重启（记得把 `PRAGMA user_version` 已推进的版本一并回退或删除备份文件——最简单是整库恢复旧备份 + 旧代码）。
+
+### 4b. 从备份恢复（事故处置步骤）
+
+事故场景包括：误删数据、被外部脚本清库、迁移失败。**第一步永远是停服务**（否则 SQLite 还有连接在写，恢复会被覆盖）：
+
+```bash
+# 0) 如果服务在跑，先停（systemd 示例）
+sudo systemctl stop pixiv-viewer
+
+# 1) 选备份：迁移备份是 pixiv.db.<ts>.bak，滚动快照是 pixiv.db.snapshot-<ts>.bak
+ls -lt instance/backups/ | head
+# 用 Get-Item/stat 核对**改这份备份的 mtime**，确认它就是你要回到的时间点
+
+# 2) 先给现状留档（恢复动作本身也可能需要回退）
+cp instance/pixiv.db instance/backups/pixiv.db.DAMAGED-$(date +%Y%m%dT%H%M%S).bak
+
+# 3) 清掉属于**当前**库的侧车文件：残留的 -wal/-shm 与新主库不匹配
+rm -f instance/pixiv.db-wal instance/pixiv.db-shm
+
+# 4) 覆盖恢复（不要复制 .bak-wal/.bak-shm：那是备份自己的一致性副本，SQLite 会在打开时重建）
+cp instance/backups/pixiv.db.snapshot-20260930T000000.000000Z.bak instance/pixiv.db
+
+# 5) 校验：行数 + 完整性 + 模式版本
+sqlite3 'file:instance/pixiv.db?mode=ro' \
+  "PRAGMA integrity_check; SELECT COUNT(*) FROM illusts; PRAGMA user_version;"
+
+# 6) 启动服务：若备份的 user_version 落后，启动时会自动补跑迁移（迁移前还会再备份一次）
+sudo systemctl start pixiv-viewer
+```
+
+Windows（PowerShell）等价操作：
+
+```powershell
+Copy-Item instance\pixiv.db "instance\backups\pixiv.db.DAMAGED-$(Get-Date -Format yyyyMMddTHHmmss).bak"
+Remove-Item instance\pixiv.db-wal, instance\pixiv.db-shm -ErrorAction SilentlyContinue
+Copy-Item instance\backups\pixiv.db.snapshot-<ts>.bak instance\pixiv.db -Force
+```
+
+> ⚠️ **别用 `git checkout` 或"重跑迁移"当作恢复手段**：迁移是单向的（`user_version` 只增），它不会把删掉的行找回来 —— 只有备份里有。
+> ⚠️ 恢复后**核对行数**（`SELECT COUNT(*) FROM illusts`）再放行服务。只恢复文件不看行数，是"以为恢复了"的常见来源。
+> 已下载的原图在 `downloads/` 里，**不在数据库里**，任何数据库恢复都不影响它们。
 
 ---
 
