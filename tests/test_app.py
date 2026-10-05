@@ -18,6 +18,7 @@ import helpers
 import models
 import pixiv_client
 import routes_download
+import routes_gallery
 import runtime
 from config import ITEMS_PER_PAGE
 
@@ -1239,6 +1240,128 @@ class TestGalleryDeleteOrphans:
         data = resp.get_json()
         assert data['deleted'] == 2 and data['failed'] == 0
         assert not orphan.exists() and not known.exists()
+
+
+class TestGalleryDeleteTakesEffectImmediately:
+    """删除后列表必须**立刻**反映，且重复删除要如实说"此前已无文件"。
+
+    回归来源（用户报告）：删了带 DB 行的作品后卡片还会"存在几秒"，再删一次提示
+    "已删除 0 个作品/文件"。根因是列表查询
+    `download_status='done' OR pixiv_id IN (本地扫描到的 pid)`：删文件只把状态置回
+    `None`、行还在，而**只有孤儿分支**让 `_scan_cache` 失效 —— 扫描缓存（TTL 30s）
+    还认为文件在磁盘上，那一支就继续把这张卡捞出来。
+    """
+
+    def _token(self, client):
+        return client.get('/csrf-token').get_json()['token']
+
+    def _done_illust(self, clean_db, monkeypatch, tmp_path, pid):
+        import helpers
+        monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
+        work = tmp_path / str(pid)
+        work.mkdir()
+        f = work / f'{pid}_p0.jpg'
+        f.write_bytes(b'x' * 10)
+        illust = models.Illust(pixiv_id=pid, title='t', download_status='done',
+                               bookmark_count=5)   # 非 0 收藏数：免触发后台补全的真实请求
+        illust.local_paths_list = [str(f)]
+        clean_db.add(illust)
+        models.safe_commit(clean_db)
+        return work
+
+    def test_delete_invalidates_scan_cache_so_card_disappears_at_once(
+            self, client, clean_db, monkeypatch, tmp_path):
+        pid = 70011
+        self._done_illust(clean_db, monkeypatch, tmp_path, pid)
+
+        # 先请求一次把扫描缓存填上（模拟"页面已经打开过"）；不先填的话缓存本来就是
+        # 空的，这条用例会退化成恒真
+        first = client.get('/api/gallery?limit=10').get_json()
+        assert [r['pixiv_id'] for r in first['data']] == [pid]
+
+        resp = client.delete(f'/api/gallery/{pid}', headers={'X-CSRF-Token': self._token(client)})
+        assert resp.status_code == 200
+        assert resp.get_json()['status'] == 'deleted'
+
+        after = client.get('/api/gallery?limit=10').get_json()
+        assert after['data'] == [], '删除后必须立刻消失，而不是等目录扫描缓存过期（最多 30s）'
+        assert after['total'] == 0
+
+    def test_second_delete_reports_already_gone_instead_of_zero(
+            self, client, clean_db, monkeypatch, tmp_path):
+        """第二次删除要说"此前已删除"，不能说"已删除 0 个文件"（与失败无法区分）。"""
+        pid = 70012
+        self._done_illust(clean_db, monkeypatch, tmp_path, pid)
+
+        first = client.delete(f'/api/gallery/{pid}', headers={'X-CSRF-Token': self._token(client)})
+        assert first.get_json()['status'] == 'deleted'
+
+        second = client.delete(f'/api/gallery/{pid}', headers={'X-CSRF-Token': self._token(client)})
+
+        assert second.status_code == 200, '重复删除不是错误：卡片照常移掉即可'
+        body = second.get_json()
+        assert body['status'] == 'no_file'
+        assert '此前已删除' in body['message'], f'实际提示：{body}'
+
+    def test_batch_delete_counts_already_gone_separately(
+            self, client, clean_db, monkeypatch, tmp_path):
+        """批量删除里"文件已不在"的作品单独计数，并让扫描缓存失效。"""
+        import helpers
+        monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
+        (tmp_path / 'downloads').mkdir()
+        gone = models.Illust(pixiv_id=70013, title='t', download_status='done',
+                             bookmark_count=5)   # 无文件；非 0 收藏数免触发后台补全
+        clean_db.add(gone)
+        models.safe_commit(clean_db)
+
+        resp = client.post('/api/gallery/batch-delete',
+                           data=json.dumps({'ids': [70013]}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': self._token(client)})
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['deleted'] == 0 and data['no_file'] == 1 and data['failed'] == 0
+        assert '此前已无文件' in data['message'], f'实际提示：{data["message"]}'
+
+
+class TestGalleryPageSize:
+    """图库页大小必须跟随 `items_per_page`（服务端下发），不得在 JS 里硬编码。
+
+    回归来源（用户报告）：图库里"一行四个作品，最后空出两个空位"，而设置页里的
+    "每页展示作品数"在图库上完全不生效 —— 搜索页/缓存页都跟随设置，只有图库把
+    50 写死在 JS 里（`col-lg-3` 一行 4 个 → 50 = 12×4 + 2）。
+    """
+
+    def test_gallery_page_publishes_configured_page_size(self, client, monkeypatch):
+        monkeypatch.setattr(routes_gallery, 'ITEMS_PER_PAGE', 24)
+
+        html = client.get('/gallery').get_data(as_text=True)
+
+        assert '<meta name="items-per-page" content="24">' in html
+
+    def test_page_gallery_reads_page_size_from_meta(self):
+        js = pathlib.Path('static/page-gallery.js').read_text(encoding='utf-8')
+
+        assert 'meta[name="items-per-page"]' in js, '页大小必须读服务端下发的值'
+        assert 'const PAGE_SIZE = 50' not in js, '不得再硬编码页大小'
+
+    def test_api_gallery_default_limit_follows_setting(self, client, clean_db, monkeypatch,
+                                                       tmp_path):
+        """不传 limit 时默认页大小同样是 `items_per_page`（前后端同源）。"""
+        import helpers
+        monkeypatch.setattr(routes_gallery, 'ITEMS_PER_PAGE', 3)
+        monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
+        for pid in range(70020, 70026):        # 6 件已下载
+            clean_db.add(models.Illust(pixiv_id=pid, title=f't{pid}', download_status='done',
+                                       bookmark_count=5))   # 非 0：免触发后台补全
+        models.safe_commit(clean_db)
+
+        data = client.get('/api/gallery').get_json()
+
+        assert len(data['data']) == 3, f'默认页大小应为设置值 3，实际 {len(data["data"])}'
+        assert data['total'] == 6
+        assert data['has_more'] is True
 
 
 class TestDownloadFileZip:

@@ -20,7 +20,7 @@ from sqlalchemy.exc import OperationalError
 
 import fetcher
 import runtime
-from config import IMAGE_HOST_ALLOWLIST, THUMB_REDIRECT_DISCOVERY, _instance_dir
+from config import IMAGE_HOST_ALLOWLIST, ITEMS_PER_PAGE, THUMB_REDIRECT_DISCOVERY, _instance_dir
 from fetcher import PixivAuthError, get_pooled_session, reset_pooled_session
 from helpers import (_build_orphan_dicts, _delete_illust_files, _delete_orphan_files,
                      _extract_ext, _fetch_original_urls, _fmt_num, _get_download_dir,
@@ -381,7 +381,11 @@ def detail_api(pixiv_id: int) -> Response:
 
 @bp.route('/gallery')
 def gallery() -> str:
-    return render_template('gallery.html', csrf_token=_get_csrf_token())
+    # 把 `items_per_page` 交给前端当页大小：图库曾把它硬编码成 50（搜索页/缓存页都
+    # 跟随设置），于是"设置里改了每页数量"在图库上不生效，而且 50 在 4 列网格下
+    # 会空出 2 格（`col-lg-3`）。前后端同源后，改成任意值都一致。
+    return render_template('gallery.html', csrf_token=_get_csrf_token(),
+                           items_per_page=ITEMS_PER_PAGE)
 
 
 # ── 图库查询与删除 ──
@@ -389,7 +393,10 @@ def gallery() -> str:
 @bp.route('/api/gallery')
 def api_gallery() -> Response:
     tag_filter = request.args.get('tag', '').strip()
-    limit = request.args.get('limit', 50, type=int)
+    # 默认页大小跟随 `items_per_page`（与搜索页/缓存页一致）——前端一定会带 limit，
+    # 这个默认值只服务直接调 API 的场景，但两边必须同源，否则"设置里改了每页数量"
+    # 在图库页上手调接口时看不到效果。
+    limit = request.args.get('limit', ITEMS_PER_PAGE, type=int)
     offset = request.args.get('offset', 0, type=int)
     sort = request.args.get('sort', 'created')
     if sort not in ('created', 'downloaded'):
@@ -553,12 +560,30 @@ def delete_gallery(pixiv_id: int) -> Response:
                                message=f'已删除孤儿作品 {deleted} 个文件'))
             safe_commit(db)
             _scan_cache['ts'] = 0.0   # 目录扫描缓存立即失效，图库马上反映删除
-            return jsonify({'status': 'deleted', 'message': f'已删除 {deleted} 个文件'})
+            return jsonify(_delete_response(deleted, '该作品目录里没有可删除的文件'))
 
         deleted = _delete_illust_files(illust)
         db.add(DownloadLog(pixiv_id=pixiv_id, action='deleted', message=f'已删除 {deleted} 个文件'))
         safe_commit(db)
-        return jsonify({'status': 'deleted', 'message': f'已删除 {deleted} 个文件'})
+        # ⚠ 这里**必须**同样让目录扫描缓存失效：图库列表的查询是
+        # `download_status='done' OR pixiv_id IN (本地扫描到的 pid)`，
+        # 删文件只把 download_status 置回 None、行还在，若扫描缓存（TTL 30s）还认为
+        # 那些文件在磁盘上，这张卡会在列表里**继续存在**到缓存过期 ——
+        # 用户看到的就是"删了还在，再删一次说 0 个文件"。旧实现只有孤儿分支清了缓存。
+        _scan_cache['ts'] = 0.0
+        return jsonify(_delete_response(deleted, '该作品的下载文件此前已删除（没有可删的文件）'))
+
+
+def _delete_response(deleted: int, no_file_message: str) -> dict:
+    """删除结果的统一收尾：真的删掉了文件才说"已删除 N 个文件"。
+
+    为什么区分：重复删除时旧实现回 "已删除 0 个文件"，与"删除失败"在界面上无法区分
+    （前端只看 `resp.ok` 与 `message`）。这里如实说明"此前已删除"，界面可以照常把卡片
+    移掉，用户也不会以为操作没生效。
+    """
+    if deleted:
+        return {'status': 'deleted', 'message': f'已删除 {deleted} 个文件'}
+    return {'status': 'no_file', 'message': no_file_message}
 
 
 @bp.route('/api/gallery/batch-delete', methods=['POST'])
@@ -573,14 +598,17 @@ def batch_delete_gallery() -> Response:
         pixiv_ids = [int(pid) for pid in ids if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())]
         illusts = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
         handled = {i.pixiv_id for i in illusts}
-        deleted_count = 0
+        deleted_count = 0     # 确实删掉了文件的作品数（`deleted` 字段沿用该语义）
+        no_file_count = 0     # 找到了、但文件此前已不在（重复删除）
         total_files = 0
-        orphans_deleted = 0
         for illust in illusts:
             n = _delete_illust_files(illust)
             total_files += n
+            if n:
+                deleted_count += 1
+            else:
+                no_file_count += 1
             db.add(DownloadLog(pixiv_id=illust.pixiv_id, action='deleted', message=f'已删除 {n} 个文件'))
-            deleted_count += 1
         # 无 DB 行的 id 按孤儿目录删除，不再静默跳过
         for pid in pixiv_ids:
             if pid in handled:
@@ -591,20 +619,30 @@ def batch_delete_gallery() -> Response:
             if not existed:
                 continue
             total_files += n
-            deleted_count += 1
-            orphans_deleted += 1
+            if n:
+                deleted_count += 1
+            else:
+                no_file_count += 1
             db.add(DownloadLog(pixiv_id=pid, action='deleted', message=f'已删除孤儿作品 {n} 个文件'))
         safe_commit(db)
-        if orphans_deleted:
+        # 只要动过磁盘就让扫描缓存失效（旧实现只在删了**孤儿**时才清，于是带 DB 行的
+        # 作品删完仍会因 `pixiv_id IN (本地扫描到的 pid)` 这一支在列表里残留到缓存过期）
+        if deleted_count or no_file_count:
             _scan_cache['ts'] = 0.0
 
-    failed = len(pixiv_ids) - deleted_count
+    failed = len(pixiv_ids) - deleted_count - no_file_count
+    message = f'已删除 {deleted_count} 个作品 ({total_files} 个文件)'
+    if no_file_count:
+        message += f'，{no_file_count} 个此前已无文件'
+    if failed:
+        message += f'，{failed} 个未找到'
     return jsonify({
         'status': 'done',
         'deleted': deleted_count,
+        'no_file': no_file_count,
         'failed': failed,
         'total_files': total_files,
-        'message': f'已删除 {deleted_count} 个作品 ({total_files} 个文件)' + (f', {failed} 个失败' if failed else ''),
+        'message': message,
     })
 
 

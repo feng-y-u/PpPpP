@@ -7,6 +7,10 @@
 <link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
 <link href="/static/style.css" rel="stylesheet">
 <meta name="csrf-token" content="{{ csrf_token }}">
+<!-- 页大小由服务端下发（config.ITEMS_PER_PAGE / settings.json 的 items_per_page）：
+     图库曾经在 JS 里硬编码 50，导致"设置里改了每页数量"在这里不生效，且 50 在
+     4 列网格（col-lg-3）下会空出 2 格。 -->
+<meta name="items-per-page" content="{{ items_per_page }}">
 <style>
 /* ── Gallery Cards ── */
 .gallery-card {

@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 732 用例约 20s，**当前 0 failed**，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 738 用例约 20s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -156,6 +156,10 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - **`/thumb` 缓存命中时的 Content-Type**：优先回放写入时记的 `.meta`；`.meta` 缺失或为空时**按文件扩展名兜底**（`mimetypes.guess_type`），不能一律当 jpeg —— 缓存文件是在写 `.meta` **之前**就 rename 落盘的（原子写顺序），"有图无 meta"是可能的，PNG 若以 `image/jpeg` 送出会被 `X-Content-Type-Options: nosniff` 拒绝渲染（这张图就永久坏掉，直到缓存被 mtime 淘汰）。
 - **数据库滚动快照 `/api/backups`**：返回快照运行态 + `instance/backups/` 里本机制写的 `pixiv.db.snapshot-*.bak`。`state.enabled` 是派生值（`BACKUP_INTERVAL>0`）—— 线程活着不等于在留快照。配置键 `backup_interval`（默认 86400s，0 禁用）/`backup_keep`（默认 7，只删自己命名的文件）。**恢复步骤见 `docs/maintenance.md` §4b**（停服 → 留档现状 → 清 `-wal`/`-shm` → 覆盖 → 校验行数与 `integrity_check`）。
 - **凭据体检 `/api/pixiv/health`**（`pixiv_client.probe_credentials`）：回答"Cookie 现在还能不能用"。`cookie_missing` 是本地事实（不联网），其余靠一次 `follow_latest` 探针分类成 `auth`/`rate_limited`/`network`/`error`/`ok`（结论有 30s TTL 缓存，供空结果时前端自动调用）。**`ok` 不等于"一定有数据"** —— 关注列表本来没有新作品时同样是空结果，这种"无明确信号"必须在文案里如实说明。前端只在**搜索空结果**时调它，并把 `advice` 显示在空状态里（把"真的没结果"与"凭据失效"分开）。
+- **图库分页与删除（两个易踩点）**：
+  ① **页大小跟随 `config.ITEMS_PER_PAGE`**：`/gallery` 通过 `<meta name="items-per-page">` 下发给 `page-gallery.js`（`PAGE_SIZE` 读它、读不到才退回 50），`/api/gallery` 的默认 `limit` 也是它。曾经在 JS 里硬编码 50 —— 既让"设置页改每页数量"在图库上不生效（搜索页/缓存页都跟随设置），又因为 50 不是 4 的整数倍，在 `col-lg-3`（一行 4 个）下最后一行**空出 2 格**。
+  ② **凡是动过磁盘的删除路径都必须 `_scan_cache['ts'] = 0.0`**（单条 `/api/gallery/<pid>` DELETE 的两条分支 + 批量 `/api/gallery/batch-delete`）：列表查询是 `download_status='done' OR pixiv_id IN (本地扫描到的 pid)`，而删文件只把 `download_status` 置回 `None`、**行还在**，所以扫描缓存（TTL 30s）没失效时那一支会继续把这张卡捞出来 —— 用户看到"删了还在，再删一次提示 0 个文件"。旧实现只有孤儿分支清了缓存（回归用例 `TestGalleryDeleteTakesEffectImmediately`）。
+  ③ **重复删除不报"已删除 0 个文件"**：单条返回 `status: no_file` + "该作品…此前已删除"，批量返回 `no_file` 计数并在 message 里说明（`deleted` 只数**确实删掉文件**的作品）。前端只看 `resp.ok` 与 `message`，回一个 0 与"删除失败"在界面上无法区分。
 - **详情 API 三级令牌桶**：`DETAIL_RATE_PER_MINUTE=45`（前台搜索）、`FILL_RATE_PER_MINUTE=20`（后台补全）、`TOTAL_RATE_PER_MINUTE=60`（总闸）。
 - **详情拉取的重试是分类的**：连接错误立即放弃、限流退避重试（真正触发退避的是 403 —— 429 被传输层拦下，见文末「重试策略」）—— 不要在两处同时放开。
 - **`PIXIV_BASE_URL`** 可改为代理/镜像地址。
@@ -213,7 +217,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 732 条 = 730 passed / 2 skipped / 0 failed**，约 20s（2026-09-30：加入「搜索预览可查看」12 条 + 「中图扩展名」14 条 + `/thumb` 统计 3 条 + 滚动快照 7 条 + 凭据体检 11 条 + helpers 叶子 2 条 + 灯箱接线 1 条）。
+- **当前实测基线：收集 738 条 = 736 passed / 2 skipped / 0 failed**，约 20s（2026-09-30：加入「搜索预览可查看」12 条 + 「中图扩展名」14 条 + `/thumb` 统计 3 条 + 滚动快照 7 条 + 凭据体检 11 条 + helpers 叶子 2 条 + 灯箱接线 1 条 + 图库删除/分页 6 条）。
   **那 4 条长期失败的 `test_test_setup.py::test_temp_root_*` 已彻底修好，不再是"环境性失败"**：它们从此前把 `TEMP/TMP` 塞进**子进程环境**改为**在 PS 会话内部**赋值 —— 旧写法的 `C:/pixiv-test/environment-temp` 这种不存在的目录会让 Windows PowerShell 自己启动失败（它启动就要用 TMP），于是用例死在断言之前，多年来每个审计阶段都把它记成"预先存在、与本阶段无关"。现在 4 条真跑真断言（并做过变异验证：破坏 `PIXIV_TEST_TMP` 分支 → 对应 2 条失败）。**基线必须是 0 failed**：常红会让人在真回归面前失去判断力。
 
 ### 最重要的约定：app 命名空间是测试补丁 seam

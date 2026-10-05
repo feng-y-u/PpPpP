@@ -7,7 +7,11 @@ let allTags = [];
 let sortOrder = 'downloaded';
 let galleryR18 = 'safe';   // R18 过滤：默认隐藏（与缓存页/搜索页一致）
 let currentResults = [];
-const PAGE_SIZE = 50;
+// 页大小来自服务端（`<meta name="items-per-page">` ← config.ITEMS_PER_PAGE）。
+// 曾经硬编码 50：既让"设置里改每页数量"在图库上不生效，又因为 50 不是 4 的整数倍，
+// 在 4 列网格（col-lg-3）下最后一行空出 2 格。meta 缺失时才退回 50（自包含兜底）。
+const PAGE_SIZE = parseInt(
+  document.querySelector('meta[name="items-per-page"]')?.getAttribute('content') || '', 10) || 50;
 const GALLERY_CACHE_TTL = 30 * 60 * 1000; // 图库分页前端缓存 30 分钟
 
 function invalidateGalleryCache() {

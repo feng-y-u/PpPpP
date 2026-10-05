@@ -617,15 +617,16 @@ graph LR
 #### GET /api/gallery
 
 - 功能：图库分页查询（已下载作品 + 孤儿文件补全）。
-- 参数：`tag`（标签过滤）、`limit`(1-200，默认 50)、`offset`、`sort`(created/downloaded)、`r18`(safe/all)。
+- 参数：`tag`（标签过滤）、`limit`(1-200，**默认 `config.ITEMS_PER_PAGE`**)、`offset`、`sort`(created/downloaded)、`r18`(safe/all)。
 - 响应：200 `{"data": [...], "total": n, "has_more": bool}`；条目 = `to_dict()` + `file_count` + `local_urls`（orphan 额外含 `local_dir`/`local_paths` 且 `download_status='done'`）。本地收藏夹移除后，`favorites` / `collection_id` 参数与 `favorite_total` 字段均已删除（传入即被忽略）。
+- 页大小同源：`GET /gallery` 把 `ITEMS_PER_PAGE` 写进 `<meta name="items-per-page">`，`page-gallery.js` 的 `PAGE_SIZE` 读它（读不到才退回 50）——原先硬编码 50 会让"设置里改每页数量"在图库上失效，且在 4 列网格下末行空出 2 格。
 - 源码：`routes_gallery.py::api_gallery`。
 
 #### GET /api/gallery/tags — 已下载作品标签去重列表（LIMIT 1000）。源码：`routes_gallery.py::api_gallery_tags`。
 
-#### DELETE /api/gallery/<pixiv_id> — 删除已下载作品（含孤儿目录删除）；无行也无目录 404；写 DownloadLog(deleted)；失效扫描缓存。源码：`routes_gallery.py::delete_gallery`。
+#### DELETE /api/gallery/<pixiv_id> — 删除已下载作品（含孤儿目录删除）；无行也无目录 404；写 DownloadLog(deleted)；**两条分支都失效 `_scan_cache`**（列表查询含 `pixiv_id IN (本地扫描 pid)`，不失效会让卡片残留到 30s TTL 过期）；文件此前已删光时返回 `{"status": "no_file", ...}` 而不是"已删除 0 个文件"。源码：`routes_gallery.py::delete_gallery`。
 
-#### POST /api/gallery/batch-delete — 批量删除（ids 列表；孤儿一并处理）。源码：`routes_gallery.py::batch_delete_gallery`。
+#### POST /api/gallery/batch-delete — 批量删除（ids 列表；孤儿一并处理）。响应 `{"deleted", "no_file", "failed", "total_files", "message"}`：`deleted` 只数**确实删掉文件**的作品，`no_file` 数是"找到了但文件早已不在"的（重复删除），`failed` 是既无行也无目录的；message 会把这三种分别写清楚。源码：`routes_gallery.py::batch_delete_gallery`。
 
 #### POST /api/open-dir — 打开本地文件夹（仅 `remote_addr` 为 127.0.0.1/::1；Windows `os.startfile`，其他平台 `xdg-open`）。源码：`routes_gallery.py::api_open_dir`。
 
