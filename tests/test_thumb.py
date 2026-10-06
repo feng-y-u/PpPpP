@@ -562,44 +562,35 @@ def test_thumb_atomic_write_failure_streams_response_without_caching(thumb_env, 
 
 # ── /thumb 取图统计（可观测；2026-09-30 中图 404 事故的产物）──
 
-def test_thumb_stats_classifies_upstream_404_and_keeps_url_sample(thumb_env, client):
-    """上游 404 必须落到 `http_404` 并留下 URL 样本 —— 正是中图事故的形状。
+def test_thumb_stats_classifies_failures_by_reason(thumb_env, client, monkeypatch):
+    """失败按**原因 + 主机**归类并留 URL 样本：上游 404、本地冷却、槽位超时各成一类。
 
-    这次事故里的症状是"很多作品的中图加载不出来"，而失败路径当时全静默（只有一条
-    槽位超时的 warning），只能靠翻 image_cache 逐文件反推。分类 + 样本让同样的问题
-    变成一次 `GET /api/thumb/stats`。
+    上游 404 那条正是中图事故的形状 —— 当时失败路径全静默（只有一条槽位超时的
+    warning），只能翻 image_cache 逐文件反推；有了分类与样本，同样的问题变成一次
+    `GET /api/thumb/stats`，`http_404` 样本一眼指向"我们拼出来的地址在图床上不存在"。
+    三类共用"打一次快照看结果"的收尾，故合在一个用例里。
     """
     broken = 'https://i.pximg.net/c/600x600/img-master/img/2026/01/01/00/00/00/9_p0_master1200.png'
     thumb_env['registry'].add(broken, status_code=404)
-
     assert client.get(f'/thumb/{_b64(broken)}').status_code == 502
 
-    stats = client.get('/api/thumb/stats').get_json()
-    assert stats['total'] == 1
-    assert stats['by_reason'] == {'http_404': 1}
-    assert stats['by_host'] == {'i.pximg.net': 1}
-    assert stats['served'] == 0 and stats['cache_hits'] == 0
-    assert [s['url'] for s in stats['samples']] == [broken]
-    assert stats['samples'][0]['status'] == 404
-    assert stats['samples'][0]['reason'] == 'http_404'
-    assert stats['samples'][0]['at'], '样本要带时间戳，便于和发布/改动作对照'
-
-
-def test_thumb_stats_counts_cooldown_and_semaphore_timeout(thumb_env, client, monkeypatch):
-    """本地侧的两类失败也要各成一类：冷却命中（502）与槽位等超时（503）。"""
     missing = f'{THUMB}?stats-cooldown=1'   # registry 未预置 → 连接错误 → 记冷却
-    assert client.get(f'/thumb/{_b64(missing)}').status_code == 502
-    assert client.get(f'/thumb/{_b64(missing)}').status_code == 502
+    assert client.get(f'/thumb/{_b64(missing)}').status_code == 502, '首次失败应 502'
+    assert client.get(f'/thumb/{_b64(missing)}').status_code == 502, '冷却期内的第二次也应 502'
 
     monkeypatch.setattr(routes_gallery, '_thumb_sem', _NoSlotSemaphore())
     monkeypatch.setattr(runtime, 'THUMB_SEM_TIMEOUT', 0.01, raising=False)
     assert client.get(f'/thumb/{_b64(THUMB)}').status_code == 503
 
     stats = client.get('/api/thumb/stats').get_json()
-    assert stats['by_reason']['conn_error'] == 1, '首次失败按连接错误归类'
-    assert stats['by_reason']['cooldown'] == 1, '冷却期内的那次请求单独计数'
-    assert stats['by_reason']['sem_timeout'] == 1
-    assert stats['total'] == 3
+    assert stats['by_reason'] == {'http_404': 1, 'conn_error': 1, 'cooldown': 1,
+                                  'sem_timeout': 1}, f"原因分类不对：{stats['by_reason']}"
+    assert stats['by_host'] == {'i.pximg.net': 4}, f"主机聚合不对：{stats['by_host']}"
+    assert stats['total'] == 4
+    assert stats['served'] == 0 and stats['cache_hits'] == 0, '失败不该计入 served/cache_hits'
+    sample = next(s for s in stats['samples'] if s['url'] == broken)
+    assert (sample['status'], sample['reason']) == (404, 'http_404')
+    assert sample['at'], '样本要带时间戳，便于和发布/改动作对照'
 
 
 def test_thumb_stats_counts_served_and_cache_hits(thumb_env, client):

@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 738 用例约 20s，**当前 0 failed**，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 710 用例约 20s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -217,7 +217,8 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 738 条 = 736 passed / 2 skipped / 0 failed**，约 20s（2026-09-30：加入「搜索预览可查看」12 条 + 「中图扩展名」14 条 + `/thumb` 统计 3 条 + 滚动快照 7 条 + 凭据体检 11 条 + helpers 叶子 2 条 + 灯箱接线 1 条 + 图库删除/分页 6 条）。
+- **当前实测基线：收集 710 条 = 708 passed / 2 skipped / 0 failed**，约 20s（2026-09-30：本轮新增「搜索预览可查看」7 条 + 「中图扩展名」5 条 + `/thumb` 统计 2 条 + 滚动快照 5 条 + 凭据体检 4 条 + helpers 叶子 1 条 + 搜索页灯箱接线 1 条 + 图库删除/分页 4 条，共 29 条）。
+  **新增用例的粒度约定：一个用例 = 一个不变式**。同一不变式的多个输入变体（扩展名矩阵、终态枚举、HTTP 状态码矩阵、四种 advice）写成**函数内循环 + 每例断言消息**，不要拆成多条用例也不要 `parametrize` —— 本轮就是这么从 56 条合并到 29 条的（全量收集 738 → 710，断言一条没减）。判断标准：拆开之后会不会出现"两条用例的前置准备一模一样、只有输入与期望值不同"；会，就合成一条并在循环里带上 `f'{case} …'` 的失败消息。反过来，**不同不变式不要合并**（例：`done` 与 `cancelled` 都"不是预览来源"，但前者靠查库命中、后者靠事务回滚，断言不同）。
   **那 4 条长期失败的 `test_test_setup.py::test_temp_root_*` 已彻底修好，不再是"环境性失败"**：它们从此前把 `TEMP/TMP` 塞进**子进程环境**改为**在 PS 会话内部**赋值 —— 旧写法的 `C:/pixiv-test/environment-temp` 这种不存在的目录会让 Windows PowerShell 自己启动失败（它启动就要用 TMP），于是用例死在断言之前，多年来每个审计阶段都把它记成"预先存在、与本阶段无关"。现在 4 条真跑真断言（并做过变异验证：破坏 `PIXIV_TEST_TMP` 分支 → 对应 2 条失败）。**基线必须是 0 failed**：常红会让人在真回归面前失去判断力。
 
 ### 最重要的约定：app 命名空间是测试补丁 seam

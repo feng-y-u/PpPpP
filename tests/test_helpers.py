@@ -277,42 +277,41 @@ class TestOriginalToResized:
     """
 
     def test_png_original_maps_to_jpg_master(self):
-        """核心回归：PNG 原图的中图地址必须是 `.jpg`。"""
+        """核心回归：PNG 原图的中图地址必须是 `.jpg`，且地址形状完全正确。"""
         url = 'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/149022521_p0.png'
         assert helpers._original_to_resized(url) == (
             f'https://i.pximg.net/c/{config.MEDIUM_IMAGE_SIZE}x{config.MEDIUM_IMAGE_SIZE}'
             '/img-master/img/2026/08/29/17/21/55/149022521_p0_master1200.jpg')
 
-    @pytest.mark.parametrize('ext', ['jpg', 'jpeg', 'png', 'gif', 'webp'])
-    def test_extension_is_always_jpg(self, ext):
-        """任何原图扩展名都产出 `.jpg` 中图（不是"jpg 才转、其它照抄"）。"""
-        out = helpers._original_to_resized(
-            f'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.{ext}')
-        assert out.endswith('_master1200.jpg'), f'{ext} 原图的中图也必须是 .jpg'
+    def test_mapping_rules(self, monkeypatch):
+        """同一条代码路径上的三件事：扩展名恒 `.jpg`、query 被丢弃、尺寸走 `MEDIUM_IMAGE_SIZE`。"""
+        for ext in ('jpg', 'jpeg', 'png', 'gif', 'webp'):
+            out = helpers._original_to_resized(
+                f'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.{ext}')
+            assert out.endswith('_master1200.jpg'), f'{ext} 原图的中图也必须是 .jpg：{out}'
 
-    def test_query_string_is_dropped(self):
-        out = helpers._original_to_resized(
-            'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.png?foo=1')
-        assert out == ('https://i.pximg.net/c/600x600/img-master/img/2026/01/01/00/00/00/'
-                       '123_p0_master1200.jpg')
+        assert helpers._original_to_resized(
+            'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.png?foo=1'
+        ) == ('https://i.pximg.net/c/600x600/img-master/img/2026/01/01/00/00/00/'
+              '123_p0_master1200.jpg')
 
-    def test_uses_configured_medium_size(self, monkeypatch):
         monkeypatch.setattr(helpers, 'MEDIUM_IMAGE_SIZE', 540)
-        out = helpers._original_to_resized(
-            'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.jpg')
-        assert out.startswith('https://i.pximg.net/c/540x540/img-master/')
+        assert helpers._original_to_resized(
+            'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.jpg'
+        ).startswith('https://i.pximg.net/c/540x540/img-master/')
 
-    @pytest.mark.parametrize('url', [
-        # 已经是中图/缩略图形态：没有 img-original 段，原样返回
-        'https://i.pximg.net/img-master/img/2026/01/01/00/00/00/123_p0_master1200.jpg',
-        'https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/123_p0_square1200.jpg',
-        # 非白名单主机
-        'https://example.com/img-original/img/2026/01/01/00/00/00/123_p0.jpg',
-        '',
-    ])
-    def test_non_original_url_is_returned_unchanged(self, url):
+    def test_non_original_url_is_returned_unchanged(self):
         """不匹配就原样返回：调用方的候选链本就有"原图"这一档，别造出畸形地址。"""
-        assert helpers._original_to_resized(url) == url
+        for url in (
+            # 已经是中图/缩略图形态：没有 img-original 段
+            'https://i.pximg.net/img-master/img/2026/01/01/00/00/00/123_p0_master1200.jpg',
+            'https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/01/01/00/00/00/'
+            '123_p0_square1200.jpg',
+            # 非白名单主机
+            'https://example.com/img-original/img/2026/01/01/00/00/00/123_p0.jpg',
+            '',
+        ):
+            assert helpers._original_to_resized(url) == url, f'应原样返回：{url!r}'
 
 
 # 模块级不得 import 的"上游"：models 会绑 engine，其余是业务/组装层
@@ -321,7 +320,7 @@ _FORBIDDEN_MODULE_IMPORTS = {'models', 'fetcher', 'app', 'background', 'middlewa
 
 
 def test_helpers_does_not_import_models_at_module_level():
-    """`helpers` 必须是叶子：模块级不得 import `models`（以及业务/组装层）。
+    """`helpers` 必须是叶子：模块级不得 import `models`（以及业务/组装层），且修法要在。
 
     为什么值得钉住：`models.py` 在 import 那一刻就 `create_engine(config.DATABASE_PATH)`，
     engine 建好后再改 `config` 也改不动它 —— 于是**谁先 import 到 models** 决定了本轮
@@ -329,14 +328,19 @@ def test_helpers_does_not_import_models_at_module_level():
     插件在模块级 `import helpers`（helpers 当时 `from models import ...`）→ engine 绑到
     真实库 → `clean_db` 清空了 1456 件作品。
 
+    后半段（延迟 import 必须存在）与前半段是一件事的两面：只断言"没在模块级 import"是
+    不够的 —— 把 models 的使用整段删掉同样能过，而那时 `query_cached_tag` 会在运行期抛
+    `NameError`。两段合在一个用例里，因为它们共用同一次 AST 解析，且违反任何一条都意味着
+    "这条边界已经不成立"。
+
     检查用 AST 而不是"新解释器里 import helpers 再看 sys.modules"：本文件跑在测试进程里，
     `models` 早已被 conftest/app 导入，运行期断言看不出差别；AST 直接回答"这份源码在
     模块级 import 了什么"，与被测进程状态无关。函数体内的延迟 import 不算（那正是修法）。
     """
-    source = pathlib.Path(helpers.__file__).read_text(encoding='utf-8')
-    offenders: list[str] = []
+    tree = ast.parse(pathlib.Path(helpers.__file__).read_text(encoding='utf-8'))
 
-    for node in ast.parse(source).body:      # 只看模块级顶层语句
+    offenders: list[str] = []
+    for node in tree.body:                   # 只看模块级顶层语句
         if isinstance(node, ast.ImportFrom):
             root = (node.module or '').split('.')[0]
             if root in _FORBIDDEN_MODULE_IMPORTS:
@@ -351,22 +355,9 @@ def test_helpers_does_not_import_models_at_module_level():
         f'需要 DB 的函数请在函数体内 `from models import ...`。'
     )
 
-
-def test_helpers_lazy_imports_models_only_where_needed():
-    """修法本身也要钉住：`query_cached_tag` 必须在函数体内 import models。
-
-    只断言"没在模块级 import"是不够的 —— 把 models 的使用整段删掉同样能通过上面的检查，
-    而那时 `query_cached_tag` 会在运行期抛 `NameError`。这里要求"延迟 import 存在"。
-    """
-    source = pathlib.Path(helpers.__file__).read_text(encoding='utf-8')
-    tree = ast.parse(source)
-
     func = next((node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name == 'query_cached_tag'), None)
     assert func is not None, 'query_cached_tag 不见了？'
-
-    lazy = [
-        node for node in ast.walk(func)
-        if isinstance(node, ast.ImportFrom) and (node.module or '') == 'models'
-    ]
+    lazy = [node for node in ast.walk(func)
+            if isinstance(node, ast.ImportFrom) and (node.module or '') == 'models']
     assert lazy, 'query_cached_tag 必须在函数体内延迟 import models（见该函数注释）'

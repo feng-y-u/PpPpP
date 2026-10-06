@@ -863,15 +863,14 @@ class TestFindRunningPreview:
         assert again['title'] == '原始标题'
         assert 'local_urls' not in again
 
-    def test_terminal_task_is_not_a_source(self, clean_db, preview_task):
-        """终态任务不返回：done/partial 的行已提交，error/cancelled 的行已回滚。"""
+    def test_only_running_tasks_are_a_source(self, clean_db, preview_task):
+        """终态任务与不存在的 pid 都不返回：done/partial 的行已提交，error/cancelled 的行已回滚。"""
         for n, status in enumerate(('done', 'partial', 'cancelled', 'error')):
             pid = 92100 + n
             preview_task([_preview_result(pid)], status=status)
             assert runtime.find_running_preview(pid) is None, f'{status} 不该被当成预览来源'
 
-    def test_unknown_pid_returns_none(self, clean_db):
-        assert runtime.find_running_preview(92099) is None
+        assert runtime.find_running_preview(92099) is None, '不存在的 pid 应返回 None'
 
     def test_newest_running_task_wins(self, clean_db, preview_task):
         """旧任务在自己的线程察觉取消之前仍是 running，此时它的快照已被取代。"""
@@ -909,16 +908,18 @@ class TestDetailPagePreviewFallback:
         assert clean_db.query(models.Illust).filter(models.Illust.pixiv_id == pid).first() is None, \
             '本用例前提：库里没有这行（兜底才是唯一数据来源）'
 
-    @pytest.mark.parametrize('status', ['done', 'partial', 'cancelled', 'error'])
-    def test_fallback_only_for_running_task(self, status, client, clean_db, preview_task):
-        """终态任务兜底 = 渲染出"不可信的结果"：done/partial 查库即命中，
-        error/cancelled 的行已随事务回滚（快照清空），都不该走内存快照。"""
-        pid = 91002
-        preview_task([_preview_result(pid)], status=status)
-        assert client.get(f'/detail/{pid}').status_code == 404
+    def test_no_trustworthy_source_is_404(self, client, clean_db, preview_task):
+        """终态任务一律 404（兜底会渲染出"不可信的结果"）：done/partial 查库即命中
+        —— 此处库里没有这行，所以是 404；error/cancelled 的行已随事务回滚。
 
-    def test_no_task_and_no_row_is_404(self, client, clean_db):
-        assert client.get('/detail/91003').status_code == 404
+        末尾一并覆盖"既无任务也无库行"这条最朴素的路径。
+        """
+        for n, status in enumerate(('done', 'partial', 'cancelled', 'error')):
+            pid = 91100 + n
+            preview_task([_preview_result(pid)], status=status)
+            assert client.get(f'/detail/{pid}').status_code == 404, f'{status} 不该被兜底渲染'
+
+        assert client.get('/detail/91199').status_code == 404, '既无任务也无库行 → 404'
 
     def test_preview_from_real_publisher_is_viewable(self, client, clean_db):
         """端到端：**真实 publisher** 发布的预览 → 详情页兜底渲染。
@@ -1269,8 +1270,15 @@ class TestGalleryDeleteTakesEffectImmediately:
         models.safe_commit(clean_db)
         return work
 
-    def test_delete_invalidates_scan_cache_so_card_disappears_at_once(
+    def test_delete_takes_effect_at_once_and_repeat_says_already_gone(
             self, client, clean_db, monkeypatch, tmp_path):
+        """一次删除要同时满足两件事：列表**立刻**不再有它；再删一次如实说"此前已删除"。
+
+        前者是回归主症状（不失效 `_scan_cache` 时，列表查询的
+        `pixiv_id IN (本地扫描到的 pid)` 那支会继续把卡片捞到 TTL 过期）；后者是这次
+        删除的收尾语义（旧实现回 "已删除 0 个文件"，与"删除失败"在界面上无法区分
+        —— 前端只看 `resp.ok` 与 `message`）。两件事共用同一套数据准备，故合在一起。
+        """
         pid = 70011
         self._done_illust(clean_db, monkeypatch, tmp_path, pid)
 
@@ -1287,19 +1295,9 @@ class TestGalleryDeleteTakesEffectImmediately:
         assert after['data'] == [], '删除后必须立刻消失，而不是等目录扫描缓存过期（最多 30s）'
         assert after['total'] == 0
 
-    def test_second_delete_reports_already_gone_instead_of_zero(
-            self, client, clean_db, monkeypatch, tmp_path):
-        """第二次删除要说"此前已删除"，不能说"已删除 0 个文件"（与失败无法区分）。"""
-        pid = 70012
-        self._done_illust(clean_db, monkeypatch, tmp_path, pid)
-
-        first = client.delete(f'/api/gallery/{pid}', headers={'X-CSRF-Token': self._token(client)})
-        assert first.get_json()['status'] == 'deleted'
-
-        second = client.delete(f'/api/gallery/{pid}', headers={'X-CSRF-Token': self._token(client)})
-
-        assert second.status_code == 200, '重复删除不是错误：卡片照常移掉即可'
-        body = second.get_json()
+        again = client.delete(f'/api/gallery/{pid}', headers={'X-CSRF-Token': self._token(client)})
+        assert again.status_code == 200, '重复删除不是错误：卡片照常移掉即可'
+        body = again.get_json()
         assert body['status'] == 'no_file'
         assert '此前已删除' in body['message'], f'实际提示：{body}'
 
@@ -1333,16 +1331,14 @@ class TestGalleryPageSize:
     50 写死在 JS 里（`col-lg-3` 一行 4 个 → 50 = 12×4 + 2）。
     """
 
-    def test_gallery_page_publishes_configured_page_size(self, client, monkeypatch):
+    def test_page_size_wiring_is_server_driven(self, client, monkeypatch):
+        """两端一起钉：服务端下发 meta，前端读 meta 且不再硬编码。"""
         monkeypatch.setattr(routes_gallery, 'ITEMS_PER_PAGE', 24)
 
         html = client.get('/gallery').get_data(as_text=True)
 
         assert '<meta name="items-per-page" content="24">' in html
-
-    def test_page_gallery_reads_page_size_from_meta(self):
         js = pathlib.Path('static/page-gallery.js').read_text(encoding='utf-8')
-
         assert 'meta[name="items-per-page"]' in js, '页大小必须读服务端下发的值'
         assert 'const PAGE_SIZE = 50' not in js, '不得再硬编码页大小'
 
@@ -1581,48 +1577,43 @@ class TestDownloadFileZip:
         assert resp.headers['Content-Disposition'].endswith('zip-me.jpg')
 
 
+def _decode_proxied(proxied: str) -> str:
+    """`/thumb/<b64>` → 真实图片 URL（前端候选链拿到的就是这个地址）。"""
+    assert proxied.startswith('/thumb/'), f'图源必须走 /thumb 代理：{proxied}'
+    encoded = proxied[len('/thumb/'):]
+    return base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
+
+
 class TestDetailApiMediumUrls:
-    def test_detail_api_includes_medium_urls(self, client, clean_db):
-        """/api/detail 返回 medium_urls：master1200 中图代理地址，数量与原图 URL 一致。"""
-        illust = models.Illust(pixiv_id=92001, title='multi-page', page_count=2)
-        illust.original_urls_list = [
+    def test_medium_urls_are_proxied_jpg_masters(self, client, clean_db):
+        """/api/detail 的 `medium_urls`：数量与原图一致、都走 /thumb、都指向 `_master1200.jpg`。
+
+        含 PNG 原图这一档：master 是图床**统一重编码的 JPEG**，拼成 `.png` 必然 404
+        —— 这正是"很多作品的中图加载不出来"的根因（中图 404 → 失败冷却 → 退到 1~5MB
+        的原图，常超过 /thumb 的 30s 读超时 → 只剩缩略图兜底）。
+        """
+        multi = models.Illust(pixiv_id=92001, title='multi-page', page_count=2)
+        multi.original_urls_list = [
             'https://i.pximg.net/img-original/img/0001/01/15/00/00/00/92001_p0.jpg',
             'https://i.pximg.net/img-original/img/0001/01/15/00/00/00/92001_p1.jpg',
         ]
-        clean_db.add(illust)
+        png = models.Illust(pixiv_id=92002, title='png-original', page_count=1)
+        png.original_urls_list = [
+            'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/92002_p0.png',
+        ]
+        clean_db.add_all([multi, png])
         clean_db.commit()
 
         r = client.get('/api/detail/92001')
         assert r.status_code == 200
         data = r.get_json()
-        assert data['pixiv_id'] == 92001
-        assert 'medium_urls' in data
-        assert len(data['medium_urls']) == len(illust.original_urls_list) == 2
-        for u in data['medium_urls']:
-            assert u.startswith('/thumb/')
-            encoded = u[len('/thumb/'):]
-            decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
-            assert '/img-master/' in decoded and decoded.endswith('_master1200.jpg')
+        medium = data['medium_urls']
+        assert len(medium) == len(multi.original_urls_list) == 2, '中图数量必须与原图页数一致'
+        for u in medium:
+            assert _decode_proxied(u).endswith('_master1200.jpg'), f'中图地址不对：{u}'
 
-    def test_png_original_maps_to_jpg_master(self, client, clean_db):
-        """PNG 原图的中图也必须是 `_master1200.jpg`（拼成 `.png` 在图床上必然 404）。
-
-        回归用例：这正是"很多作品的中图加载不出来"的根因 —— 中图 404 → 失败冷却 →
-        退到 1~5MB 的原图（常超过 /thumb 的 30s 读超时）→ 只剩缩略图兜底。
-        """
-        illust = models.Illust(pixiv_id=92002, title='png-original', page_count=1)
-        illust.original_urls_list = [
-            'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/92002_p0.png',
-        ]
-        clean_db.add(illust)
-        clean_db.commit()
-
-        r = client.get('/api/detail/92002')
-        assert r.status_code == 200
-        [proxied] = r.get_json()['medium_urls']
-        encoded = proxied[len('/thumb/'):]
-        decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
-        assert decoded == (
+        [proxied] = client.get('/api/detail/92002').get_json()['medium_urls']
+        assert _decode_proxied(proxied) == (
             'https://i.pximg.net/c/600x600/img-master/img/2026/08/29/17/21/55/'
             '92002_p0_master1200.jpg'), '中图扩展名必须固定 .jpg，不能沿用原图的 .png'
 
@@ -1650,7 +1641,5 @@ class TestDetailPageMediumUrls:
         data = json.loads(blob.group(1))
         assert data['mediumUrls'], 'PNG 原图的作品也必须有中图候选（否则首图只能退到缩略图）'
         [proxied] = data['mediumUrls']
-        encoded = proxied[len('/thumb/'):]
-        decoded = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)).decode()
-        assert decoded.endswith('92003_p0_master1200.jpg')
+        assert _decode_proxied(proxied).endswith('92003_p0_master1200.jpg')
         assert data['originalProxied'], '原图档作为兜底仍在'

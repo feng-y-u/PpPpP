@@ -685,88 +685,94 @@ def _reset_credential_health_cache():
 class TestCredentialProbe:
     """`pixiv_client.probe_credentials` 的分类口径。"""
 
-    def test_auth_envelope_is_classified_as_auth(self):
-        """上游以信封形式报认证失效（脱敏样本里有真实措辞）→ auth。"""
-        session = _ProbeSession(_ProbeResponse(200, _fixture('error_envelope_auth.json')))
+    def test_classification_matrix(self):
+        """一次覆盖全部分类口径：信封认证失效 / 401 / 403 / 连接错误。
 
-        result = pixiv_client.probe_credentials(session)
+        403 必须归成 `rate_limited` 而不是 `auth` —— 它是限流风控，说成"凭据失效"会把
+        用户引到错误的处置（换 Cookie 没用）。
+        """
+        cases = [
+            ('信封报认证失效（脱敏样本的真实措辞）',
+             _ProbeSession(_ProbeResponse(200, _fixture('error_envelope_auth.json'))), 'auth'),
+            ('HTTP 401', _ProbeSession(_ProbeResponse(401)), 'auth'),
+            ('HTTP 403（限流/风控，不是凭据失效）', _ProbeSession(_ProbeResponse(403)),
+             'rate_limited'),
+            ('连接错误', _ProbeSession(exc=requests.ConnectionError('boom')), 'network'),
+        ]
+        for label, session, expected in cases:
+            result = pixiv_client.probe_credentials(session)
+            assert result['result'] == expected, f'{label} 应归类为 {expected}，实际 {result}'
+            assert len(session.calls) == 1, f'{label}：探针只允许打一次上游'
 
-        assert result['result'] == 'auth'
-        assert len(session.calls) == 1, '探针只允许打一次上游'
+    def test_success_reports_works_and_empty_is_no_signal(self):
+        """成功分两种：真有数据（报 works），以及"没报错也没数据"。
 
-    def test_success_reports_ok_with_works(self):
+        后者必须如实标注为"无明确信号"：关注列表本来没有新作品时就是这样，不能据此
+        说凭据有问题（Pixiv 对失效凭据也常静默返回空页 —— 这正是要说清的那条边界）。
+        """
         payload = _fixture('follow_latest.json')
-        session = _ProbeSession(_ProbeResponse(200, payload))
+        with_works = pixiv_client.probe_credentials(
+            _ProbeSession(_ProbeResponse(200, payload)))
+        assert with_works['result'] == 'ok'
+        assert with_works['works'] == len(payload['body']['thumbnails']['illust'])
 
-        result = pixiv_client.probe_credentials(session)
-
-        expected = len(payload['body']['thumbnails']['illust'])
-        assert result['result'] == 'ok'
-        assert result['works'] == expected
-
-    def test_empty_success_is_reported_as_no_signal(self):
-        """"上游没报错但也没数据"必须如实标注：关注列表本来没有新作品时就是这样，
-        不能据此说凭据有问题。"""
-        session = _ProbeSession(_ProbeResponse(200, {
+        empty = pixiv_client.probe_credentials(_ProbeSession(_ProbeResponse(200, {
             'error': False, 'body': {'thumbnails': {'illust': []},
-                                     'page': {'isLastPage': True}}}))
-
-        result = pixiv_client.probe_credentials(session)
-
-        assert result['result'] == 'ok'
-        assert result['works'] == 0
-        assert '无明确信号' in result['detail']
-
-    @pytest.mark.parametrize('case,expected', [
-        ('401', 'auth'),
-        ('403', 'rate_limited'),      # 403 是限流/风控，不是凭据失效
-        ('conn', 'network'),
-    ])
-    def test_http_and_network_failures_are_classified(self, case, expected):
-        if case == 'conn':
-            session = _ProbeSession(exc=requests.ConnectionError('boom'))
-        else:
-            session = _ProbeSession(_ProbeResponse(int(case)))
-
-        assert pixiv_client.probe_credentials(session)['result'] == expected
+                                     'page': {'isLastPage': True}}})))
+        assert empty['result'] == 'ok'
+        assert empty['works'] == 0
+        assert '无明确信号' in empty['detail']
 
 
 class TestPixivHealthEndpoint:
     """`GET /api/pixiv/health` 的接口行为（autouse 夹具已把 Cookie 落点指向临时文件）。"""
 
-    def test_missing_cookie_is_reported_without_hitting_the_network(self, client):
-        """本地没有 Cookie 文件时结论就是 cookie_missing，不必再去打一次上游。"""
+    def test_advice_matches_probe_result(self, client, tmp_path):
+        """四种结论各自的 advice：缺 Cookie / 凭据失效 / 网络问题 / 一切正常。
+
+        advice 是"把空结果的原因说清楚"的唯一出口（前端只在搜索空结果时读它），四种结论
+        必须一一对应、且不能互相冒充。共用同一套 Cookie 落点准备，故合在一个用例里 ——
+        每段之前清掉 30s TTL 缓存，保证每段都真的重新判定一次。
+        """
+        import runtime
+        cookie = tmp_path / 'cookies.txt'
+
+        def call(session=None, exc=None):
+            runtime._credential_health_cache['ts'] = 0.0
+            runtime._credential_health_cache['data'] = None
+            probe = session if session is not None else _ProbeSession(exc=exc)
+            with patch('pixiv_client.build_pixiv_session', return_value=probe):
+                return client.get('/api/pixiv/health').get_json(), probe
+
+        # ① 本地没有 Cookie 文件：结论是 cookie_missing，且不该联网
+        assert not cookie.exists()
         with patch('pixiv_client.build_pixiv_session',
                    side_effect=AssertionError('缺 Cookie 时不该联网')):
-            data = client.get('/api/pixiv/health').get_json()
+            missing = client.get('/api/pixiv/health').get_json()
+        assert missing['ok'] is False
+        assert missing['probe']['result'] == 'cookie_missing'
+        assert missing['cookie']['present'] is False
+        assert 'cookies.txt' in missing['advice']
 
-        assert data['ok'] is False
-        assert data['probe']['result'] == 'cookie_missing'
-        assert data['cookie']['present'] is False
-        assert 'cookies.txt' in data['advice']
-
-    def test_auth_failure_surfaces_actionable_advice(self, client, tmp_path):
-        cookie = tmp_path / 'cookies.txt'
+        # ② 有 Cookie 但上游报认证失效 → 建议里必须给出"去更新"的动作
         cookie.write_text('PHPSESSID=stale', encoding='utf-8')
-        session = _ProbeSession(_ProbeResponse(200, _fixture('error_envelope_auth.json')))
-
-        with patch('pixiv_client.build_pixiv_session', return_value=session):
-            data = client.get('/api/pixiv/health').get_json()
-
+        data, probe = call(_ProbeSession(_ProbeResponse(
+            200, _fixture('error_envelope_auth.json'))))
         assert data['cookie']['present'] is True
         assert data['probe']['result'] == 'auth'
         assert '失效' in data['advice'] and '更新' in data['advice']
-        assert session.closed, '探针用完必须关掉连接池'
+        assert probe.closed, '探针用完必须关掉连接池'
 
-    def test_network_failure_advice_does_not_claim_missing_works(self, client, tmp_path):
-        (tmp_path / 'cookies.txt').write_text('PHPSESSID=x', encoding='utf-8')
-        session = _ProbeSession(exc=requests.ConnectionError('proxy down'))
-
-        with patch('pixiv_client.build_pixiv_session', return_value=session):
-            data = client.get('/api/pixiv/health').get_json()
-
+        # ③ 网络/代理问题：不能说成"没作品"，也不该说成"凭据失效"
+        data, _ = call(exc=requests.ConnectionError('proxy down'))
         assert data['probe']['result'] == 'network'
         assert '网络' in data['advice'] or '代理' in data['advice']
+
+        # ④ 一切正常：不硬塞建议（空状态保持原来的措辞）
+        data, _ = call(_ProbeSession(_ProbeResponse(200, _fixture('follow_latest.json'))))
+        assert data['ok'] is True
+        assert data['probe']['result'] == 'ok'
+        assert data['advice'] == '', f'正常时不该有建议：{data["advice"]}'
 
     def test_probe_result_is_cached_for_ttl(self, client, tmp_path):
         """用户连点搜索时会连着调它：TTL 内只允许打一次上游。"""
@@ -781,14 +787,3 @@ class TestPixivHealthEndpoint:
 
         assert first['probe']['result'] == second['probe']['result'] == 'ok'
         assert len(session.calls) == 1, 'TTL 内不应重复打上游'
-
-    def test_ok_has_no_advice(self, client, tmp_path):
-        """一切正常时不该硬塞建议（空状态要保持原来的措辞）。"""
-        (tmp_path / 'cookies.txt').write_text('PHPSESSID=x', encoding='utf-8')
-        session = _ProbeSession(_ProbeResponse(200, _fixture('follow_latest.json')))
-
-        with patch('pixiv_client.build_pixiv_session', return_value=session):
-            data = client.get('/api/pixiv/health').get_json()
-
-        assert data['ok'] is True
-        assert data['advice'] == ''
