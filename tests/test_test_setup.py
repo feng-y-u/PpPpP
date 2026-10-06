@@ -73,48 +73,57 @@ def _resolve_temp_root(prelude: str) -> Path:
     return Path(output[-1])
 
 
-@pytest.mark.parametrize("variable", ["TEMP", "TMP"])
-def test_temp_root_uses_explicit_override(variable):
-    override = Path(f"C:/pixiv-test/override-{variable.lower()}")
+def test_temp_root_fallback_chain_is_ordered():
+    """`Resolve-PixivTestTempRoot` 的回退链，逐级钉住。
 
+    顺序：PIXIV_TEST_TMP → `LOCALAPPDATA/pixiv-viewer-test-tmp` → TEMP/… → TMP/… →
+    `[IO.Path]::GetTempPath()`（最后一级由下面那条用例单独覆盖，因为它的期望值必须在
+    **同一次会话里**取）。
+
+    每一级的期望值不同、prelude 也不同，但"设置哪几个 $env: → 得到哪个根"是同一条
+    不变式，故合为一条用例：每个分支的 prelude 与断言逐条保留，并各带自己的失败消息，
+    这样"哪一级坏了"仍然一眼可见（原先 5 条用例，其中 2 条是 TEMP/TMP 参数矩阵）。
+    """
+    # ① PIXIV_TEST_TMP 优先：TEMP 有值也一样
     root = _resolve_temp_root(
-        f"$env:PIXIV_TEST_TMP = '{override}'\n"
-        f"$env:LOCALAPPDATA = 'C:/pixiv-test/local'\n"
-        f"$env:{variable} = 'C:/pixiv-test/environment-temp'"
+        "$env:PIXIV_TEST_TMP = 'C:/pixiv-test/override-temp'\n"
+        "$env:LOCALAPPDATA = 'C:/pixiv-test/local'\n"
+        "$env:TEMP = 'C:/pixiv-test/environment-temp'"
     )
+    assert root == Path("C:/pixiv-test/override-temp"), f'PIXIV_TEST_TMP 应优先于 TEMP：{root}'
 
-    assert root == override
+    # ② PIXIV_TEST_TMP 优先：TMP 有值也一样
+    root = _resolve_temp_root(
+        "$env:PIXIV_TEST_TMP = 'C:/pixiv-test/override-tmp'\n"
+        "$env:LOCALAPPDATA = 'C:/pixiv-test/local'\n"
+        "$env:TMP = 'C:/pixiv-test/environment-temp'"
+    )
+    assert root == Path("C:/pixiv-test/override-tmp"), f'PIXIV_TEST_TMP 应优先于 TMP：{root}'
 
-
-def test_temp_root_defaults_to_local_app_data():
+    # ③ 没有 PIXIV_TEST_TMP → 在 LOCALAPPDATA 下派生
     root = _resolve_temp_root(
         "$env:PIXIV_TEST_TMP = $null\n"
         "$env:LOCALAPPDATA = 'C:/pixiv-test/local'"
     )
+    assert root == Path("C:/pixiv-test/local/pixiv-viewer-test-tmp"), f'应回退到 LOCALAPPDATA：{root}'
 
-    assert root == Path("C:/pixiv-test/local/pixiv-viewer-test-tmp")
-
-
-def test_temp_root_falls_back_to_temp_environment_variable():
+    # ④ LOCALAPPDATA 也没有 → TEMP（TMP 有值也不抢）
     root = _resolve_temp_root(
         "$env:PIXIV_TEST_TMP = ''\n"
         "$env:LOCALAPPDATA = ''\n"
         "$env:TEMP = 'C:/pixiv-test/temp'\n"
         "$env:TMP = 'C:/pixiv-test/tmp'"
     )
+    assert root == Path("C:/pixiv-test/temp/pixiv-viewer-test-tmp"), f'应回退到 TEMP：{root}'
 
-    assert root == Path("C:/pixiv-test/temp/pixiv-viewer-test-tmp")
-
-
-def test_temp_root_falls_back_to_tmp_when_temp_is_empty():
+    # ⑤ TEMP 为空 → 才轮到 TMP
     root = _resolve_temp_root(
         "$env:PIXIV_TEST_TMP = ''\n"
         "$env:LOCALAPPDATA = ''\n"
         "$env:TEMP = ''\n"
         "$env:TMP = 'C:/pixiv-test/tmp'"
     )
-
-    assert root == Path("C:/pixiv-test/tmp/pixiv-viewer-test-tmp")
+    assert root == Path("C:/pixiv-test/tmp/pixiv-viewer-test-tmp"), f'TEMP 为空时应回退到 TMP：{root}'
 
 
 def test_temp_root_falls_back_when_temp_environment_is_empty():
@@ -254,22 +263,33 @@ def test_instance_dir_isolated_in_tests():
         assert _same_path(os.path.dirname(path), config._instance_dir)
 
 
-def test_instance_dir_defaults_to_repo_instance(tmp_path, monkeypatch):
-    """未设置 PIXIV_INSTANCE_DIR（生产默认）时仍是仓库内的 instance/。"""
-    module = _load_config_probe(tmp_path, monkeypatch)
+def test_instance_dir_derives_all_paths_from_one_source(tmp_path, monkeypatch):
+    """`_instance_dir` 是**单点派生**：四条路径必须同源。
 
-    expected = os.path.join(str(tmp_path), 'instance')
+    两个输入：未设置 PIXIV_INSTANCE_DIR（生产默认 = 仓库内 `instance/`）与设置覆盖值。
+    断言形状完全同构（实例目录 / DB / settings / cursor secret / 秘密文件确实生成），
+    只有输入与期望值不同，故合为一条用例。
+
+    两段各用独立临时目录：默认分支会就地创建 `instance/`，共用目录会让覆盖分支的
+    "不得再创建默认目录" 断言假失败。
+    """
+    # ① 未设置 PIXIV_INSTANCE_DIR（生产默认）时仍是仓库内的 instance/
+    default_base = tmp_path / 'default'
+    default_base.mkdir()
+    module = _load_config_probe(default_base, monkeypatch)
+
+    expected = os.path.join(str(default_base), 'instance')
     assert _same_path(module._instance_dir, expected)
     assert _same_path(module.DATABASE_PATH, os.path.join(expected, 'pixiv.db'))
     assert _same_path(module._settings_path, os.path.join(expected, 'settings.json'))
     assert _same_path(module._cursor_secret_path, os.path.join(expected, '.cursor_secret'))
     assert os.path.isfile(module._cursor_secret_path)
 
-
-def test_instance_dir_env_override_rederives_all_paths(tmp_path, monkeypatch):
-    """设置 PIXIV_INSTANCE_DIR 后四条派生路径全部跟着走，且不再创建默认实例目录。"""
-    custom = tmp_path / 'custom-instance'
-    module = _load_config_probe(tmp_path, monkeypatch, instance_dir=custom)
+    # ② 设置 PIXIV_INSTANCE_DIR 后四条派生路径全部跟着走，且不再创建默认实例目录
+    override_base = tmp_path / 'override'
+    override_base.mkdir()
+    custom = override_base / 'custom-instance'
+    module = _load_config_probe(override_base, monkeypatch, instance_dir=custom)
 
     assert _same_path(module._instance_dir, str(custom))
     assert _same_path(module.DATABASE_PATH, os.path.join(module._instance_dir, 'pixiv.db'))
@@ -277,7 +297,7 @@ def test_instance_dir_env_override_rederives_all_paths(tmp_path, monkeypatch):
     assert _same_path(module._cursor_secret_path, os.path.join(module._instance_dir, '.cursor_secret'))
     assert os.path.isfile(module._cursor_secret_path)
     # 覆盖生效时不得再创建默认目录：否则实例数据会分裂在两处
-    assert not os.path.exists(os.path.join(str(tmp_path), 'instance'))
+    assert not os.path.exists(os.path.join(str(override_base), 'instance'))
 
 
 def test_instance_dir_override_pointing_at_file_fails_loudly(tmp_path, monkeypatch):

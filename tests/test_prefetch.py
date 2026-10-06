@@ -14,7 +14,17 @@ from models import SearchCache, Illust, get_session, safe_commit
 
 class TestPrefetchOneTag:
     def test_prefetch_one_tag_marks_source(self, clean_db, monkeypatch):
-        clean_db.add_all([Illust(pixiv_id=1, title='a'), Illust(pixiv_id=2, title='b')])
+        """入库前的来源标记口径：搜索结果里的作品标 `prefetch_source=1`，
+        **已下载的不标** —— 标了就会计入容量，而它按定义永远清不掉。
+
+        同一轮里既有新作品又有已下载作品，故合并成一条（原先拆成两条时，
+        两条的前置准备与断言同构，只有"搜索返回了什么"不同）。
+        """
+        clean_db.add_all([
+            Illust(pixiv_id=1, title='a'),
+            Illust(pixiv_id=2, title='b'),
+            Illust(pixiv_id=42, title='dl', download_status='done'),
+        ])
         safe_commit(clean_db)
 
         calls = []
@@ -22,7 +32,7 @@ class TestPrefetchOneTag:
         def _fake_search(tag, **kwargs):
             calls.append(tag)
             if len(calls) == 1:
-                return [{'pixiv_id': 1}, {'pixiv_id': 2}], True
+                return [{'pixiv_id': 1}, {'pixiv_id': 2}, {'pixiv_id': 42}], True
             return [], False
 
         monkeypatch.setattr(app, 'search_by_tag', _fake_search)
@@ -31,22 +41,39 @@ class TestPrefetchOneTag:
         row = clean_db.query(SearchCache).filter(SearchCache.tag == 'テスト').first()
         assert row is not None
         assert row.status == 'done'
-        assert row.total == 2
-        assert json.loads(row.illust_ids) == [1, 2]
+        assert row.total == 3
+        assert json.loads(row.illust_ids) == [1, 2, 42]
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first().prefetch_source == 1
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 2).first().prefetch_source == 1
+        downloaded = clean_db.query(Illust).filter(Illust.pixiv_id == 42).first()
+        assert downloaded is not None
+        assert downloaded.download_status == 'done'
+        assert downloaded.prefetch_source == 0, '已下载的作品不该被标成预取来源'
 
     def test_prefetch_one_tag_error_sets_status(self, clean_db, monkeypatch):
+        """搜索失败：状态转 error 并记下原因，但**上次成功累积的 illust_ids 不受损**。
+
+        ① 全新标签的失败要留下一行 error（不能无声无息）；② 已有累积的标签失败时
+        旧 id 原样保留（缓存列表只增不减，失败不能把已有作品一起抹掉）。两条同属
+        "失败时的状态口径"、断言同构，故合为一条。
+        """
         def _boom(tag, **kwargs):
             raise RuntimeError('network down')
 
         monkeypatch.setattr(app, 'search_by_tag', _boom)
-        app._prefetch_one_tag('x')
 
+        app._prefetch_one_tag('x')
         row = clean_db.query(SearchCache).filter(SearchCache.tag == 'x').first()
         assert row is not None
         assert row.status == 'error'
         assert row.error
+
+        clean_db.add(SearchCache(tag='keep', illust_ids='[1, 2]', status='done'))
+        safe_commit(clean_db)
+        app._prefetch_one_tag('keep')
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'keep').first()
+        assert row.status == 'error'
+        assert json.loads(row.illust_ids) == [1, 2], '失败不该丢掉上次成功的累积'
 
     def test_prefetch_one_tag_accumulates(self, clean_db, monkeypatch):
         # 已有缓存 [1, 2]，第二次预取抓 [2, 3, 4] → 合并去重为 [2, 3, 4, 1]
@@ -69,21 +96,6 @@ class TestPrefetchOneTag:
         assert json.loads(row.illust_ids) == [2, 3, 4, 1]
         assert row.total == 4
 
-    def test_prefetch_one_tag_error_keeps_old_ids(self, clean_db, monkeypatch):
-        # 预取失败时保持上次成功的 illust_ids 不变
-        clean_db.add(SearchCache(tag='keep', illust_ids='[1, 2]', status='done'))
-        safe_commit(clean_db)
-
-        def _boom(tag, **kwargs):
-            raise RuntimeError('network down')
-
-        monkeypatch.setattr(app, 'search_by_tag', _boom)
-        app._prefetch_one_tag('keep')
-
-        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'keep').first()
-        assert row.status == 'error'
-        assert json.loads(row.illust_ids) == [1, 2]
-
     def test_prefetch_one_tag_skips_when_fetching(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='y', status='fetching'))
         safe_commit(clean_db)
@@ -101,26 +113,6 @@ class TestPrefetchOneTag:
         row = clean_db.query(SearchCache).filter(SearchCache.tag == 'y').first()
         assert row.status == 'fetching'
 
-    def test_prefetch_one_tag_does_not_mark_downloaded(self, clean_db, monkeypatch):
-        clean_db.add(Illust(pixiv_id=42, title='dl', download_status='done'))
-        safe_commit(clean_db)
-
-        calls = []
-
-        def _fake_search(tag, **kwargs):
-            calls.append(tag)
-            if len(calls) == 1:
-                return [{'pixiv_id': 42}], True
-            return [], False
-
-        monkeypatch.setattr(app, 'search_by_tag', _fake_search)
-        app._prefetch_one_tag('dl_tag')
-
-        row = clean_db.query(Illust).filter(Illust.pixiv_id == 42).first()
-        assert row is not None
-        assert row.download_status == 'done'
-        assert row.prefetch_source == 0
-
 
 class TestIsUserOwned:
     """保护判定收窄后的语义：只认下载意图，收藏夹不再是保护来源。
@@ -129,41 +121,48 @@ class TestIsUserOwned:
     判定负责，本类只钉 `_is_user_owned` 自己的 DownloadLog 口径。
     """
 
-    def test_plain_illust_is_not_user_owned(self, clean_db):
-        clean_db.add(Illust(pixiv_id=6001, title='plain'))
-        safe_commit(clean_db)
+    def test_download_log_scope_decides_ownership(self, clean_db):
+        """`_is_user_owned` 的 DownloadLog 口径（四行一表，原先拆成三条）。
 
-        assert background._is_user_owned(clean_db, 6001) is False
-
-    def test_user_download_log_is_user_owned(self, clean_db):
-        """失败/取消待重试也是用户意图：用户点过下载，不能当缓存垃圾。"""
+        - 没有任何下载日志 → 不保护；
+        - `failed` / `cancelled`（失败/取消待重试）也是用户意图：用户点过下载，
+          不能当缓存垃圾；
+        - `prefetch_deleted` 不算 —— 那是缓存清理自己写的，认它等于给作品永久保护。
+        """
         from models import DownloadLog
         clean_db.add_all([
+            Illust(pixiv_id=6001, title='plain'),
             Illust(pixiv_id=6002, title='failed'),
             Illust(pixiv_id=6003, title='cancelled'),
+            Illust(pixiv_id=6004, title='evicted-before'),
             DownloadLog(pixiv_id=6002, action='failed', message='下载失败待重试'),
             DownloadLog(pixiv_id=6003, action='cancelled', message='用户取消待重试'),
-        ])
-        safe_commit(clean_db)
-
-        assert background._is_user_owned(clean_db, 6002) is True
-        assert background._is_user_owned(clean_db, 6003) is True
-
-    def test_prefetch_deleted_log_is_not_user_owned(self, clean_db):
-        """`prefetch_deleted` 是缓存清理自己写的，认它等于给作品永久保护。"""
-        from models import DownloadLog
-        clean_db.add_all([
-            Illust(pixiv_id=6004, title='evicted-before'),
             DownloadLog(pixiv_id=6004, action='prefetch_deleted', message='之前被清理过'),
         ])
         safe_commit(clean_db)
 
-        assert background._is_user_owned(clean_db, 6004) is False
+        assert background._is_user_owned(clean_db, 6001) is False, '没有任何下载日志 → 不保护'
+        assert background._is_user_owned(clean_db, 6002) is True, '失败待重试也是用户意图'
+        assert background._is_user_owned(clean_db, 6003) is True, '用户取消待重试也是用户意图'
+        assert background._is_user_owned(clean_db, 6004) is False, \
+            'prefetch_deleted 是缓存清理自己写的，不算用户拥有'
+
+
+def _wipe_illusts_and_tags(clean_db):
+    """清掉作品与标签行（合并用例里第二段要从同一套初始数据重新开始）。"""
+    clean_db.query(Illust).delete()
+    clean_db.query(SearchCache).delete()
+    safe_commit(clean_db)
 
 
 class TestCapacityCleanup:
-    def test_capacity_cleanup_skips_user_download_logged(self, clean_db, monkeypatch):
-        """用户点过下载的作品（DownloadLog）不当缓存垃圾清掉。"""
+    def test_capacity_cleanup_protects_user_download_log_only(self, clean_db, monkeypatch):
+        """容量清理的保护口径 = 用户下载日志：`failed` 保护、`prefetch_deleted` 不保护。
+
+        两者必须相反：认 `prefetch_deleted` 等于让"被清过一次"变成永久保护
+        （同一 pid 再次入库后就再也清不掉了）。同一套造数据方式、断言同构，
+        只有喂进去的 action 不同，故合为一条。
+        """
         from models import DownloadLog
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
@@ -179,7 +178,21 @@ class TestCapacityCleanup:
         app._prefetch_capacity_cleanup()
 
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
-        assert remaining == {2}  # 只有无下载日志的低收藏作品被淘汰
+        assert remaining == {2}, '只有无下载日志的低收藏作品被淘汰'
+
+        # 换成缓存清理自己写的 prefetch_deleted：不构成保护，照样被淘汰
+        clean_db.add_all([
+            Illust(pixiv_id=3, title='low', prefetch_source=1, bookmark_count=1,
+                   prefetch_refresh_at=refreshed),
+            DownloadLog(pixiv_id=3, action='prefetch_deleted', message='之前被清理过'),
+        ])
+        safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 1)
+
+        app._prefetch_capacity_cleanup()
+
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 3).first() is None, \
+            'prefetch_deleted 不算"用户拥有"，否则会永久保护'
 
     def test_capacity_cleanup_keeps_queued_download(self, clean_db, monkeypatch):
         """排队中（worker 还没把状态写成 downloading）的作品不能被容量清理删掉。
@@ -210,24 +223,12 @@ class TestCapacityCleanup:
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
         assert remaining == {2}, '排队中的下载不能被容量清理淘汰'
 
-    def test_capacity_cleanup_ignores_prefetch_deleted_log(self, clean_db, monkeypatch):
-        """缓存清理自己写的 prefetch_deleted 不算"用户拥有"，否则会永久保护。"""
-        from models import DownloadLog
-        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
-        clean_db.add_all([
-            Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=1,
-                   prefetch_refresh_at=refreshed),
-            DownloadLog(pixiv_id=1, action='prefetch_deleted', message='之前被清理过'),
-        ])
-        safe_commit(clean_db)
-        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 0)
-
-        app._prefetch_capacity_cleanup()
-
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is None
-
     def test_capacity_cleanup_low_bookmark_first(self, clean_db):
-        # 超过上限时优先删除最终收藏数最低的预取作品，并从所有标签列表移除
+        """超过上限时优先淘汰最终收藏数最低的作品，并从**所有**标签列表里摘掉。
+
+        行删了列表还留着 id，缓存页就会指向一条不存在的记录（"幽灵引用"）。
+        两段同属"淘汰顺序 + 列表同步"这一个不变式，只有数据不同，故合为一条。
+        """
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_a', illust_ids='[1, 2, 3]',
@@ -256,8 +257,37 @@ class TestCapacityCleanup:
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
         assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == []
 
+        # 被多个标签引用的作品：淘汰后同样要从每一个标签的列表里摘掉
+        _wipe_illusts_and_tags(clean_db)
+        clean_db.add_all([
+            SearchCache(tag='tag_a', illust_ids='[1, 2]',
+                        cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+            SearchCache(tag='tag_b', illust_ids='[2]',
+                        cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
+            Illust(pixiv_id=1, title='a', prefetch_source=1, bookmark_count=10,
+                   prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=2, title='b', prefetch_source=1, bookmark_count=100,
+                   prefetch_refresh_at=refreshed),
+        ])
+        safe_commit(clean_db)
+        try:
+            app._prefetch_state['max_illusts'] = 1
+            app._prefetch_capacity_cleanup()
+        finally:
+            app._prefetch_state['max_illusts'] = old
+
+        # pid1(10) 收藏最低被删；pid2(100) 保留，且在两个标签列表里都还在
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is None
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 2).first() is not None
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
+        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [2]
+
     def test_capacity_cleanup_protection_is_download_only(self, clean_db, monkeypatch):
-        """保护只看"已下载 / 用户点过下载"：普通未刷新作品与它们一视同仁。"""
+        """保护只看"已下载 / 用户点过下载"：普通未刷新作品与它们一视同仁。
+
+        受保护的作品不仅要留在库里，还要**留在标签列表里**（列表与行必须一起对齐）。
+        两段共用同一套"再造两行未受保护作品"的准备，只有上限压得多狠不同，故合为一条。
+        """
         from models import DownloadLog
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
@@ -283,58 +313,21 @@ class TestCapacityCleanup:
             SearchCache.tag == 'tag_old').first().illust_ids)
         assert ids == [1, 3]
 
-    def test_capacity_cleanup_keeps_protected_in_list(self, clean_db):
-        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        # 上限压到 0：受保护的照样留下，列表里也只剩它们
         clean_db.add_all([
-            SearchCache(tag='tag_a', illust_ids='[1, 2, 3]',
-                        cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='dl', prefetch_source=1, download_status='done',
-                   prefetch_refresh_at=refreshed),
-            Illust(pixiv_id=2, title='b', prefetch_source=1, prefetch_refresh_at=refreshed),
-            Illust(pixiv_id=3, title='c', prefetch_source=1, prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=4, title='b', prefetch_source=1, prefetch_refresh_at=refreshed),
+            Illust(pixiv_id=5, title='c', prefetch_source=1, prefetch_refresh_at=refreshed),
         ])
         safe_commit(clean_db)
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 0)
 
-        old = app._prefetch_state['max_illusts']
-        try:
-            app._prefetch_state['max_illusts'] = 0
-            app._prefetch_capacity_cleanup()
-        finally:
-            app._prefetch_state['max_illusts'] = old
+        app._prefetch_capacity_cleanup()
 
-        # 可删的 pid 2、3 被删除并从列表移除；已下载的 pid 1 保留在列表中
-        ids = json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids)
-        assert ids == [1]
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
-        assert remaining == {1}
-
-    def test_capacity_cleanup_removes_from_all_tag_lists(self, clean_db):
-        # 被多个标签引用的低收藏作品也会被删，且从所有标签的列表移除
-        refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
-        clean_db.add_all([
-            SearchCache(tag='tag_a', illust_ids='[1, 2]',
-                        cached_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
-            SearchCache(tag='tag_b', illust_ids='[2]',
-                        cached_at=datetime(2021, 1, 1, tzinfo=timezone.utc)),
-            Illust(pixiv_id=1, title='a', prefetch_source=1, bookmark_count=10,
-                   prefetch_refresh_at=refreshed),
-            Illust(pixiv_id=2, title='b', prefetch_source=1, bookmark_count=100,
-                   prefetch_refresh_at=refreshed),
-        ])
-        safe_commit(clean_db)
-
-        old = app._prefetch_state['max_illusts']
-        try:
-            app._prefetch_state['max_illusts'] = 1
-            app._prefetch_capacity_cleanup()
-        finally:
-            app._prefetch_state['max_illusts'] = old
-
-        # pid1(10) 收藏最低被删；pid2(100) 保留
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is None
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 2).first() is not None
-        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_a').first().illust_ids) == [2]
-        assert json.loads(clean_db.query(SearchCache).filter(SearchCache.tag == 'tag_b').first().illust_ids) == [2]
+        assert remaining == {1, 3}, '受保护的作品哪怕上限为 0 也不能删'
+        ids = json.loads(clean_db.query(SearchCache).filter(
+            SearchCache.tag == 'tag_old').first().illust_ids)
+        assert ids == [1, 3], '受保护的作品必须留在标签列表里'
 
     def test_capacity_cleanup_prefers_refreshed_rows(self, clean_db, monkeypatch):
         """三层淘汰：已刷新作品优先淘汰，未刷新作品在够用时不动。"""
@@ -360,24 +353,42 @@ class TestCapacityCleanup:
         assert ids == [2, 3]
 
     def test_capacity_cleanup_evicts_failed_unrefreshed_as_tier2(self, clean_db, monkeypatch):
-        """第二层：已刷新不够时，淘汰"刷新失败过"的未刷新作品（队列推不动就别占容量）。"""
+        """层序：tier1（已最终刷新）不够时用 tier2（刷新失败过），且 tier1 **必须先于** tier2。
+
+        两段是同一不变式（三层淘汰的**先后**）的两个输入：`need_free=2` 时两层都要动，
+        `need_free=1` 时才区分得出"先删哪一层"。
+
+        ⚠️ 第二段是变异验证挖出来的补钉：原用例只跑了 `need_free=2`，那时两层都要删，
+        把实现里的 tier 顺序**整个反过来**（tier2 先删）用例依然全绿 —— 也就是说
+        "已刷新的信号可信、先淘汰它"这条文档里的层序当时其实没人钉。别把第二段删掉。
+        """
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         failed_at = datetime.now(timezone.utc)
-        clean_db.add_all([
-            Illust(pixiv_id=1, title='refreshed', prefetch_source=1, bookmark_count=5,
-                   prefetch_refresh_at=refreshed),
-            Illust(pixiv_id=2, title='failed', prefetch_source=1, bookmark_count=1,
-                   refresh_failed_at=failed_at),
-            Illust(pixiv_id=3, title='fresh', prefetch_source=1, bookmark_count=2),
-        ])
-        safe_commit(clean_db)
+
+        def seed():
+            _wipe_illusts_and_tags(clean_db)
+            clean_db.add_all([
+                Illust(pixiv_id=1, title='refreshed', prefetch_source=1, bookmark_count=5,
+                       prefetch_refresh_at=refreshed),
+                Illust(pixiv_id=2, title='failed', prefetch_source=1, bookmark_count=1,
+                       refresh_failed_at=failed_at),
+                Illust(pixiv_id=3, title='fresh', prefetch_source=1, bookmark_count=2),
+            ])
+            safe_commit(clean_db)
+
+        # ① tier1 不够 → 接着删 tier2；全新的 pid3 保留（还没到兜底层）
+        seed()
         monkeypatch.setitem(app._prefetch_state, 'max_illusts', 1)  # need_free = 2
-
         app._prefetch_capacity_cleanup()
+        assert {i.pixiv_id for i in clean_db.query(Illust).all()} == {3}
 
-        # tier1 删 pid1，tier2 删 pid2；全新的 pid3 保留（还没到兜底层）
+        # ② tier1 够用 → 只删 tier1，tier2 原样保留（层序反了这里就会留下 pid1、删掉 pid2）
+        seed()
+        monkeypatch.setitem(app._prefetch_state, 'max_illusts', 2)  # need_free = 1
+        app._prefetch_capacity_cleanup()
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
-        assert remaining == {3}
+        assert remaining == {2, 3}, \
+            f'tier1（已刷新）必须先于 tier2 淘汰，实际留下 {remaining}'
 
     def test_capacity_cleanup_last_resort_enforces_cap(self, clean_db, monkeypatch):
         """第三层兜底：全是全新未刷新作品时也把上限压回去（不靠暂停入库）。"""
@@ -407,28 +418,6 @@ class TestCapacityCleanup:
         app._prefetch_capacity_cleanup()
 
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is not None
-
-    def test_prefetch_loop_survives_cleanup_error(self, clean_db, monkeypatch):
-        clean_db.add(SearchCache(tag='t'))
-        safe_commit(clean_db)
-        monkeypatch.setattr(app, 'search_by_tag', lambda tag, **kwargs: ([], False))
-
-        def _boom():
-            raise RuntimeError('cleanup failed')
-
-        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', _boom)
-        # 容量清理异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
-        app._prefetch_loop()
-        assert app._prefetch_state['running'] is False
-
-    def test_prefetch_loop_survives_tags_query_error(self, clean_db, monkeypatch):
-        def _boom_session():
-            raise RuntimeError('database is locked')
-
-        monkeypatch.setattr(app, 'get_session', _boom_session)
-        # 标签列表查询异常不应逃逸出 _prefetch_loop（守护线程靠它继续存活）
-        app._prefetch_loop()
-        assert app._prefetch_state['running'] is False
 
     def test_prefetch_loop_always_ingests(self, clean_db, monkeypatch):
         """入库永不停：积压再大也照常预取（容量由三层淘汰压住，不靠暂停入库）。"""
@@ -472,7 +461,11 @@ class TestQueryCachedTagSort:
 
 class TestResetStuckPrefetch:
     def test_reset_stuck_fetching_tags(self, clean_db):
-        """fetching 残留（进程重启打断预取）应被启动重置为 done。"""
+        """fetching 残留（进程重启打断预取）应被启动重置为 done。
+
+        末尾一并覆盖"没有残留时是纯 no-op"：`done` 行与它的 error 都不许被动到
+        —— 两者是同一个函数的两种输入，断言同构，故合为一条。
+        """
         clean_db.add_all([
             SearchCache(tag='stuck', status='fetching', illust_ids='[1, 2]'),
             SearchCache(tag='normal', status='done', illust_ids='[3]'),
@@ -488,15 +481,12 @@ class TestResetStuckPrefetch:
         assert rows['normal'].status == 'done'  # done 状态不受影响
         assert rows['normal'].error == ''
 
-    def test_no_stuck_tags_is_noop(self, clean_db):
-        clean_db.add(SearchCache(tag='x', status='done', illust_ids='[]'))
-        safe_commit(clean_db)
-
+        # 已经没有 fetching 残留了：再跑一次必须是纯 no-op
         app._reset_stuck_prefetch()
-
-        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'x').first()
-        assert row.status == 'done'
-        assert row.error == ''
+        clean_db.expire_all()
+        rows = {sc.tag: sc for sc in clean_db.query(SearchCache).all()}
+        assert rows['normal'].status == 'done'
+        assert rows['normal'].error == ''
 
 
 class TestPrefetchThreadLiveness:
@@ -586,9 +576,14 @@ class TestPrefetchRefreshBookmarks:
         return calls
 
     def test_refresh_updates_bookmark_once(self, clean_db, monkeypatch):
-        from datetime import timedelta
+        """满 1 天才入选：拉一次详情写回最终收藏数，且只刷这一次。
+
+        "该刷的"与"今天刚入库、还没满一天不该刷的"是同一入口的两种输入，故合为一条：
+        后者必须既不发请求、也不动任何标记。
+        """
         self._old_illust(clean_db, 5001)
         clean_db.add(SearchCache(tag='t', illust_ids='[5001]', status='done'))
+        self._old_illust(clean_db, 5004, days=0)  # 今天入库 → 不满足满 1 天
         safe_commit(clean_db)
         calls = self._mock_detail(monkeypatch, 250)
 
@@ -598,14 +593,23 @@ class TestPrefetchRefreshBookmarks:
         assert illust.bookmark_count == 250
         assert illust.prefetch_refresh_at is not None
         assert calls == [5001]
+        fresh = clean_db.query(Illust).filter(Illust.pixiv_id == 5004).first()
+        assert fresh.prefetch_refresh_at is None, '今天入库的作品不参与本轮刷新'
+        assert fresh.refresh_failed_at is None, '没到一天的作品不该被写退避标记'
 
         # 只刷新一次：第二次调用不再请求详情
         app._prefetch_refresh_bookmarks()
         assert calls == [5001]
 
     def test_refresh_deletes_low_bookmark(self, clean_db, monkeypatch):
+        """最终收藏数 < 10：未受保护的当场删除并摘除缓存引用；受保护的原地更新、保留。
+
+        同一分支"受保护与否"的两种输入，断言同构，故合为一条。
+        """
         self._old_illust(clean_db, 5002)
+        self._old_illust(clean_db, 5003, download_status='done')
         clean_db.add(SearchCache(tag='t', illust_ids='[5002]', status='done'))
+        clean_db.add(SearchCache(tag='t_keep', illust_ids='[5003]', status='done'))
         safe_commit(clean_db)
         self._mock_detail(monkeypatch, 3)
 
@@ -614,19 +618,10 @@ class TestPrefetchRefreshBookmarks:
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 5002).first() is None
         sc = clean_db.query(SearchCache).filter(SearchCache.tag == 't').first()
         assert json.loads(sc.illust_ids) == []
-
-    def test_refresh_keeps_downloaded_low_bookmark(self, clean_db, monkeypatch):
-        self._old_illust(clean_db, 5003, download_status='done')
-        clean_db.add(SearchCache(tag='t', illust_ids='[5003]', status='done'))
-        safe_commit(clean_db)
-        self._mock_detail(monkeypatch, 3)
-
-        app._prefetch_refresh_bookmarks()
-
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5003).first()
-        assert illust is not None  # 已下载保护，不删
-        assert illust.bookmark_count == 3
-        assert illust.prefetch_refresh_at is not None
+        kept = clean_db.query(Illust).filter(Illust.pixiv_id == 5003).first()
+        assert kept is not None, '已下载保护，不删'
+        assert kept.bookmark_count == 3
+        assert kept.prefetch_refresh_at is not None
 
     def test_refresh_pass_keeps_queued_download(self, clean_db, monkeypatch):
         """排队中的作品即使详情已永久失效（DEAD_DETAIL）也不能被刷新清理删掉。
@@ -673,23 +668,12 @@ class TestPrefetchRefreshBookmarks:
         assert app._prefetch_state['refresh_stats']['aborted'] == 'unknown'
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 5012).first() is not None
 
-    def test_refresh_skips_fresh_illusts(self, clean_db, monkeypatch):
-        from datetime import timedelta
-        self._old_illust(clean_db, 5004, days=0)  # 今天入库 → 不满足满 1 天
-        safe_commit(clean_db)
-        calls = self._mock_detail(monkeypatch, 100)
+    def test_refresh_backoff_marker_lifecycle(self, clean_db, monkeypatch):
+        """暂时性失败的退避状态机：写标记 → 退避期内不再入选 → 过期后重试并清标记。
 
-        app._prefetch_refresh_bookmarks()
-
-        assert calls == []
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5004).first()
-        assert illust.prefetch_refresh_at is None
-
-    def test_refresh_failure_writes_backoff_marker(self, clean_db, monkeypatch):
-        """暂时性失败：写 refresh_failed_at，退避期内下一轮不再入选。
-
-        回归背景：旧实现失败静默 continue、无任何标记，永久失败的死作品
-        每轮占满 100 个名额（head-of-line blocking），后续作品被饿死。
+        回归背景：旧实现失败静默 continue、无任何标记，永久失败的死作品每轮占满
+        100 个名额（head-of-line blocking），后续作品被饿死。三段是同一条状态机的
+        前后相继（同一套"老作品 + 假详情"），故合为一条。
         """
         self._old_illust(clean_db, 5005)
         safe_commit(clean_db)
@@ -698,11 +682,13 @@ class TestPrefetchRefreshBookmarks:
             def close(self):
                 pass
 
-        calls = []
         monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
+
+        # ① 暂时性失败（详情返回 None）→ 写退避标记，但不标记刷新完成
+        failed = []
         monkeypatch.setattr(app.fetcher, '_get_illust_detail',
                             lambda s, pid, limiter=None, return_dead=False:
-                            (calls.append(pid) or None))  # 暂时性失败
+                            (failed.append(pid) or None))
 
         app._prefetch_refresh_bookmarks()
 
@@ -711,29 +697,28 @@ class TestPrefetchRefreshBookmarks:
         assert illust.prefetch_refresh_at is None
         assert illust.refresh_failed_at is not None  # 退避标记已写
 
-        # 退避期内第二轮：不再尝试该作品
+        # ② 刚写过标记的那条：第二轮不再尝试（标记生效）
         app._prefetch_refresh_bookmarks()
-        assert calls == [5005]
 
-    def test_refresh_failure_within_backoff_skipped(self, clean_db, monkeypatch):
-        """1 小时前刚失败 → 本轮不入选（不浪费名额）。"""
+        assert failed == [5005], '刚写过退避标记的作品，退避期内不该再发一次详情请求'
+
+        # ③ 退避期内（1 小时前失败）的其它作品：同样不入选，不浪费名额
         recent = datetime.now(timezone.utc) - timedelta(hours=1)
         self._old_illust(clean_db, 5006)
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5006).first()
-        illust.refresh_failed_at = recent
+        self._old_illust(clean_db, 5007)
+        for pid in (5006, 5007):
+            row = clean_db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            row.refresh_failed_at = recent
         safe_commit(clean_db)
-        calls = self._mock_detail(monkeypatch, 100)
 
         app._prefetch_refresh_bookmarks()
 
-        assert calls == []
+        assert failed == [5005], '仍在退避期内的作品一个都不该入选'
 
-    def test_refresh_retries_after_backoff_expired(self, clean_db, monkeypatch):
-        """退避过期（2 天前失败）→ 重新入选并重试，成功后清掉失败标记。"""
+        # ④ 退避过期（2 天前失败）→ 重新入选并重试，成功后清掉失败标记
         old = datetime.now(timezone.utc) - timedelta(days=2)
-        self._old_illust(clean_db, 5007)
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5007).first()
-        illust.refresh_failed_at = old
+        row = clean_db.query(Illust).filter(Illust.pixiv_id == 5007).first()
+        row.refresh_failed_at = old
         safe_commit(clean_db)
         calls = self._mock_detail(monkeypatch, 200)
 
@@ -745,10 +730,17 @@ class TestPrefetchRefreshBookmarks:
         assert illust.refresh_failed_at is None  # 成功清标记
 
     def test_refresh_deletes_permanently_dead(self, clean_db, monkeypatch):
-        """永久失败（DEAD_DETAIL，404/删除类）：未下载且无用户下载日志 → 删行 + 摘除全部缓存引用。"""
+        """永久失败（DEAD_DETAIL，404/删除类）：未下载且无用户下载日志 → 删行。
+
+        删除要同时满足三件事：行没了、**全部**标签列表里的引用摘掉、留一条
+        `prefetch_deleted` 日志（该 action 不构成保护，否则同一作品再次入库后
+        会获得永久豁免）。三件事都发生在同一次删除里，故合为一条。
+        """
+        from models import DownloadLog
         self._old_illust(clean_db, 5008)
         clean_db.add(SearchCache(tag='t', illust_ids='[5008]', status='done'))
         clean_db.add(SearchCache(tag='t2', illust_ids='[5008, 900]', status='done'))
+        self._old_illust(clean_db, 5013)
         safe_commit(clean_db)
         self._mock_dead_detail(monkeypatch)
 
@@ -760,22 +752,19 @@ class TestPrefetchRefreshBookmarks:
         sc2 = clean_db.query(SearchCache).filter(SearchCache.tag == 't2').first()
         assert json.loads(sc2.illust_ids) == [900]
 
-    def test_refresh_keeps_dead_downloaded(self, clean_db, monkeypatch):
-        """永久失败但已下载 → 保留行、标记刷新完成退出队列。"""
-        self._old_illust(clean_db, 5009, download_status='done')
-        safe_commit(clean_db)
-        self._mock_dead_detail(monkeypatch)
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5013).first() is None
+        log = clean_db.query(DownloadLog).filter(DownloadLog.pixiv_id == 5013).first()
+        assert log is not None
+        assert log.action == 'prefetch_deleted'
+        assert background._is_user_owned(clean_db, 5013) is False
 
-        app._prefetch_refresh_bookmarks()
+    def test_refresh_keeps_dead_protected(self, clean_db, monkeypatch):
+        """永久失败但受保护（已下载 / 用户点过下载）→ 保留行、标记刷新完成退出队列。
 
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5009).first()
-        assert illust is not None
-        assert illust.prefetch_refresh_at is not None
-        assert illust.refresh_failed_at is None
-
-    def test_refresh_keeps_dead_with_download_log(self, clean_db, monkeypatch):
-        """永久失败但用户点过下载（DownloadLog）→ 保留行、标记完成。"""
+        两条保护渠道共用同一条守卫，只有"保护从哪来"不同，故合为一条。
+        """
         from models import DownloadLog
+        self._old_illust(clean_db, 5009, download_status='done')
         self._old_illust(clean_db, 5012)
         clean_db.add(DownloadLog(pixiv_id=5012, action='failed', message='下载失败'))
         safe_commit(clean_db)
@@ -783,24 +772,13 @@ class TestPrefetchRefreshBookmarks:
 
         app._prefetch_refresh_bookmarks()
 
-        illust = clean_db.query(Illust).filter(Illust.pixiv_id == 5012).first()
-        assert illust is not None
-        assert illust.prefetch_refresh_at is not None
-
-    def test_dead_deletion_writes_prefetch_deleted_log(self, clean_db, monkeypatch):
-        """死作品被清理时写 DownloadLog(action='prefetch_deleted')，且该 action 不构成保护。"""
-        from models import DownloadLog
-        self._old_illust(clean_db, 5013)
-        safe_commit(clean_db)
-        self._mock_dead_detail(monkeypatch)
-
-        app._prefetch_refresh_bookmarks()
-
-        assert clean_db.query(Illust).filter(Illust.pixiv_id == 5013).first() is None
-        log = clean_db.query(DownloadLog).filter(DownloadLog.pixiv_id == 5013).first()
-        assert log is not None
-        assert log.action == 'prefetch_deleted'
-        assert background._is_user_owned(clean_db, 5013) is False
+        downloaded = clean_db.query(Illust).filter(Illust.pixiv_id == 5009).first()
+        assert downloaded is not None
+        assert downloaded.prefetch_refresh_at is not None
+        assert downloaded.refresh_failed_at is None
+        logged = clean_db.query(Illust).filter(Illust.pixiv_id == 5012).first()
+        assert logged is not None
+        assert logged.prefetch_refresh_at is not None
 
     def test_refresh_force_done_after_long_failure(self, clean_db, monkeypatch):
         """失败超过 FORCE_DONE（14 天）→ 无网络请求，直接强制标记完成。
@@ -823,11 +801,14 @@ class TestPrefetchRefreshBookmarks:
         assert illust.refresh_failed_at is None
 
     def test_refresh_auth_error_aborts_without_backoff_marker(self, clean_db, monkeypatch):
-        """认证失效（PixivAuthError）：中止本轮、不写退避标记、异常不逃逸。
+        """认证失效（PixivAuthError）：中止本轮、不写退避标记、异常不逃逸，
+        且整轮走完后容量清理照常执行。
 
         回归背景：① 异常冒泡到 `_prefetch_loop` 会让容量清理被跳过 → 上限彻底失效；
-        ② 若给作品写退避标记，Cookie 修好后这批作品还要白等 24h。
+        ② 若给作品写退避标记，Cookie 修好后这批作品还要白等 24h。刷新级与循环级是
+        同一件事的两面（"中止但不冒泡"），故合为一条：走 `_prefetch_loop` 跑完整一轮。
         """
+        clean_db.add(SearchCache(tag='t'))
         self._old_illust(clean_db, 5020)
         self._old_illust(clean_db, 5021)
         safe_commit(clean_db)
@@ -837,15 +818,19 @@ class TestPrefetchRefreshBookmarks:
                 pass
 
         calls = []
+        cleaned = []
 
         def _raise_auth(s, pid, limiter=None, return_dead=False):
             calls.append(pid)
             raise fetcher.PixivAuthError('HTTP 401')
 
+        monkeypatch.setattr(app, 'search_by_tag', lambda tag, **kwargs: ([], False))
         monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
         monkeypatch.setattr(app.fetcher, '_get_illust_detail', _raise_auth)
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup',
+                            lambda: cleaned.append(1))
 
-        app._prefetch_refresh_bookmarks()  # 不应抛异常
+        app._prefetch_loop()  # 不应抛异常
 
         assert calls == [5020]  # 第一条即认证失败 → 中止，不再请求第二条
         for pid in (5020, 5021):
@@ -853,47 +838,26 @@ class TestPrefetchRefreshBookmarks:
             assert illust is not None
             assert illust.prefetch_refresh_at is None
             assert illust.refresh_failed_at is None  # 全局问题不记在作品头上
+        assert cleaned == [1], '认证失效只中止刷新，容量清理必须照常执行（否则上限失效）'
 
-    def test_prefetch_loop_runs_cleanup_after_auth_error(self, clean_db, monkeypatch):
-        """认证失效只中止刷新，容量清理必须照常执行（否则 10000 上限失效）。"""
-        clean_db.add(SearchCache(tag='t'))
-        safe_commit(clean_db)
-        self._old_illust(clean_db, 5022)
-        safe_commit(clean_db)
+    def test_refresh_global_failure_streak(self, clean_db, monkeypatch):
+        """限流/连接错误的连续计数：连满 N 条即熔断，普通失败会重置计数。
 
+        限流是账户级状态：按单作品记退避会把整队列刷上 24h，Pixiv 恢复后还要多等一天；
+        但偶发的一条失败也不能误熔断。两个方向共用同一套"老作品 + 按序列返回的假详情"，
+        只有喂进去的序列不同，故合为一条。
+        """
         class _FakeSession:
             def close(self):
                 pass
 
-        def _raise_auth(s, pid, limiter=None, return_dead=False):
-            raise fetcher.PixivAuthError('HTTP 401')
-
-        monkeypatch.setattr(app, 'search_by_tag', lambda tag, **kwargs: ([], False))
         monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
-        monkeypatch.setattr(app.fetcher, '_get_illust_detail', _raise_auth)
-        cleaned = []
-        monkeypatch.setattr(app, '_prefetch_capacity_cleanup',
-                            lambda: cleaned.append(1))
 
-        app._prefetch_loop()
-
-        assert cleaned == [1]
-
-    def test_refresh_aborts_on_consecutive_global_failures(self, clean_db, monkeypatch):
-        """连续 N 条限流/连接失败 → 中止本轮，且不给这些作品写退避标记。
-
-        限流是账户级状态：按单作品记退避会把整队列刷上 24h，Pixiv 恢复后还要多等一天。
-        """
+        # ① 连续 3 条全局性失败 → 熔断，且一条退避标记都不写
         for pid in range(5030, 5036):
             self._old_illust(clean_db, pid)
         safe_commit(clean_db)
-
-        class _FakeSession:
-            def close(self):
-                pass
-
         calls = []
-        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
         monkeypatch.setattr(app.fetcher, '_get_illust_detail',
                             lambda s, pid, limiter=None, return_dead=False:
                             (calls.append(pid) or fetcher.RETRYABLE_GLOBAL_DETAIL))
@@ -906,16 +870,11 @@ class TestPrefetchRefreshBookmarks:
             assert illust.refresh_failed_at is None
             assert illust.prefetch_refresh_at is None
 
-    def test_refresh_global_failure_resets_streak(self, clean_db, monkeypatch):
-        """普通失败会重置连续计数：偶发失败不会导致误熔断。"""
+        # ② 中间夹一条普通失败 → 连续计数被重置，不会误熔断
+        _wipe_illusts_and_tags(clean_db)
         for pid in range(5040, 5046):
             self._old_illust(clean_db, pid)
         safe_commit(clean_db)
-
-        class _FakeSession:
-            def close(self):
-                pass
-
         seq = [fetcher.RETRYABLE_GLOBAL_DETAIL, None,
                fetcher.RETRYABLE_GLOBAL_DETAIL, fetcher.RETRYABLE_GLOBAL_DETAIL,
                fetcher.RETRYABLE_GLOBAL_DETAIL, {'bookmark_count': 50}]
@@ -925,7 +884,6 @@ class TestPrefetchRefreshBookmarks:
             calls.append(pid)
             return seq[len(calls) - 1]
 
-        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
         monkeypatch.setattr(app.fetcher, '_get_illust_detail', _fake)
 
         app._prefetch_refresh_bookmarks()
@@ -936,7 +894,11 @@ class TestPrefetchRefreshBookmarks:
         assert marked.refresh_failed_at is not None  # 普通失败照常写退避
 
     def test_refresh_stats_recorded(self, clean_db, monkeypatch):
-        """每轮刷新写入结构化统计（供 /api/prefetch/status 与设置页展示）。"""
+        """每轮刷新写入结构化统计（供 /api/prefetch/status 与设置页展示）。
+
+        一并覆盖中止原因：认证失效要能在设置页看见"这轮为什么没刷完"。两段都是
+        "跑完一轮后读统计"，断言同构，故合为一条。
+        """
         self._old_illust(clean_db, 5060)                          # 成功
         self._old_illust(clean_db, 5061)                          # 低收藏 → 删除
         self._old_illust(clean_db, 5062)                          # 暂时性失败
@@ -972,19 +934,14 @@ class TestPrefetchRefreshBookmarks:
         assert stats['aborted'] == ''
         assert stats['at'] is not None
 
-    def test_refresh_stats_records_abort_reason(self, clean_db, monkeypatch):
-        """中止原因写进统计（认证失效/限流熔断要能在设置页看见）。"""
+        # 认证失效：中止原因也要如实写进统计（否则设置页只说"这轮没刷完"）
+        _wipe_illusts_and_tags(clean_db)
         self._old_illust(clean_db, 5070)
         safe_commit(clean_db)
-
-        class _FakeSession:
-            def close(self):
-                pass
 
         def _raise_auth(s, pid, limiter=None, return_dead=False):
             raise fetcher.PixivAuthError('HTTP 401')
 
-        monkeypatch.setattr(app, 'build_pixiv_session', lambda: _FakeSession())
         monkeypatch.setattr(app.fetcher, '_get_illust_detail', _raise_auth)
 
         app._prefetch_refresh_bookmarks()
@@ -998,6 +955,10 @@ class TestResetPrefetchRefresh:
     """手动把作品放回刷新队列：必须指定范围，只影响预取来源作品。"""
 
     def test_reset_requires_scope(self, clean_db):
+        """两种"范围无效"都必须原地返回 0：完全没给范围 / 给的标签不存在。
+
+        范围无效等于什么都不做（绝不能退化成"清全库"），两条断言同构，故合为一条。
+        """
         clean_db.add(Illust(pixiv_id=9200, title='a', prefetch_source=1,
                             refresh_failed_at=datetime.now(timezone.utc)))
         safe_commit(clean_db)
@@ -1007,7 +968,6 @@ class TestResetPrefetchRefresh:
         illust = clean_db.query(Illust).filter(Illust.pixiv_id == 9200).first()
         assert illust.refresh_failed_at is not None
 
-    def test_reset_missing_tag_returns_zero(self, clean_db):
         assert app.reset_prefetch_refresh(tag='nope') == 0
 
     def test_reset_tag_ignores_non_prefetch_and_other_tags(self, clean_db):
@@ -1060,25 +1020,24 @@ class TestDownloadLockRegistry:
         yield
         background.download_locks.clear()
 
-    def test_release_removes_own_lock(self):
-        import background
+    def test_release_only_unregisters_own_lock(self):
+        """三种输入一表验完：自己那把要注销、被别人顶替的那把不能误删、无条目是 no-op。
+
+        三者是同一个函数的行为矩阵（原先三条用例的前置准备与断言同构），故合为一条。
+        """
         lock = threading.Lock()
         background.download_locks[555] = lock
         background._release_download_lock(555, lock)
-        assert 555 not in background.download_locks
+        assert 555 not in background.download_locks, '自己那把要注销'
 
-    def test_release_keeps_superseding_lock(self):
-        import background
         old, new = threading.Lock(), threading.Lock()
         background.download_locks[555] = old
         background.download_locks[555] = new      # 新任务已顶替
         background._release_download_lock(555, old)
         assert background.download_locks[555] is new, '新任务的锁不能被旧任务误删'
 
-    def test_release_without_entry_is_noop(self):
-        import background
         background._release_download_lock(999, threading.Lock())   # 不应抛异常
-        assert 999 not in background.download_locks
+        assert 999 not in background.download_locks, '不存在的条目是纯 no-op'
 
 
 class TestPrefetchRoundResilience:
@@ -1092,37 +1051,54 @@ class TestPrefetchRoundResilience:
         clean_db.add(SearchCache(tag='t'))
         safe_commit(clean_db)
 
-    def test_prefetch_loop_runs_cleanup_when_refresh_raises(self, clean_db, monkeypatch):
+    def test_prefetch_loop_survives_any_stage_error(self, clean_db, monkeypatch):
+        """单轮里三处异常源（刷新阶段 / 单个标签 / 容量清理自己）都不许逃逸出循环，
+        且只要走到清理那一步就必须真的执行它。
+
+        三段的共同不变式就是本类的类注释：容量清理是上限的唯一执行者，任何一段异常
+        都不能让它被跳过或让守护线程死掉；三段只有"哪一段炸"不同，故合为一条。
+        """
         self._one_tag(clean_db)
         monkeypatch.setattr(app, 'search_by_tag', lambda tag, **kwargs: ([], False))
 
-        def _boom():
-            raise RuntimeError('refresh exploded')
-
         # 循环里用的是裸名，解析发生在 background 的全局命名空间 → 补丁必须打在
         # background（打 app 命名空间对裸名调用无效）
-        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', _boom)
+        def _boom_refresh():
+            raise RuntimeError('refresh exploded')
+
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', _boom_refresh)
         cleaned = []
         monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
 
         app._prefetch_loop()
 
         assert cleaned == [1], '刷新阶段抛异常时容量清理仍必须执行'
+        assert app._prefetch_state['running'] is False, '异常不得逃逸出循环'
 
-    def test_prefetch_loop_runs_cleanup_when_tag_raises(self, clean_db, monkeypatch):
-        self._one_tag(clean_db)
+        # ② 单个标签抛异常
+        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
 
         def _boom_tag(tag):
             raise RuntimeError('tag exploded')
 
         monkeypatch.setattr(background, '_prefetch_one_tag', _boom_tag)
-        monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
-        cleaned = []
-        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: cleaned.append(1))
+        cleaned.clear()
 
         app._prefetch_loop()
 
         assert cleaned == [1], '单个标签抛异常时容量清理仍必须执行'
+
+        # ③ 容量清理自己抛异常：同样不许逃逸（守护线程靠它继续存活）
+        monkeypatch.setattr(background, '_prefetch_one_tag', lambda tag: None)
+
+        def _boom_cleanup():
+            raise RuntimeError('cleanup failed')
+
+        monkeypatch.setattr(app, '_prefetch_capacity_cleanup', _boom_cleanup)
+
+        app._prefetch_loop()
+
+        assert app._prefetch_state['running'] is False, '清理自身抛异常也不得逃逸出循环'
 
     def test_prefetch_one_tag_status_write_failure_does_not_raise(self, clean_db, monkeypatch,
                                                                  caplog):
@@ -1321,14 +1297,30 @@ def test_remove_pids_empty_list_does_not_touch_guard(clean_db, monkeypatch):
 
 # ── 后台线程心跳（审计 S12）──
 
-def test_prefetch_loop_records_last_error(clean_db, monkeypatch):
-    """单轮异常不退出线程，但要留痕：last_error 记下 → 下一轮干净收尾时清空。"""
+def test_prefetch_loop_records_failures(clean_db, monkeypatch):
+    """单轮异常不退出线程，但要留痕：last_error 记下 → 下一轮干净收尾时清空。
+
+    覆盖两处异常源（读标签列表都失败 / 单个标签失败）—— 它们共同的不变式是
+    "不冒泡 + 留痕 + `running` 复位"，断言同构，故合为一条。
+    """
+    state = background._prefetch_state
+    monkeypatch.setitem(state, 'last_error', None)
+
+    def _boom_session():
+        raise RuntimeError('database is locked')
+
+    with monkeypatch.context() as m:
+        # 标签列表都读不出来（DB 不可用）也要留痕，并且不能把线程打死
+        m.setattr(app, 'get_session', _boom_session)
+        background._prefetch_loop()          # 关键：不抛
+
+    assert 'database is locked' in state['last_error']
+    assert state['running'] is False, 'finally 必须复位 running'
+
     clean_db.add(SearchCache(tag='boom', status='done'))
     safe_commit(clean_db)
     monkeypatch.setattr(background, '_prefetch_refresh_bookmarks', lambda: None)
     monkeypatch.setattr(app, '_prefetch_capacity_cleanup', lambda: None)
-    state = background._prefetch_state
-    monkeypatch.setitem(state, 'last_error', None)
 
     def _boom(tag):
         raise RuntimeError('网络挂了')
@@ -1341,18 +1333,3 @@ def test_prefetch_loop_records_last_error(clean_db, monkeypatch):
     monkeypatch.setattr(background, '_prefetch_one_tag', lambda tag: None)
     background._prefetch_loop()
     assert state['last_error'] is None, '整轮干净收尾才清空：非空即代表最近一轮就有问题'
-
-
-def test_prefetch_loop_records_tag_list_failure(monkeypatch):
-    """标签列表都读不出来（DB 不可用）也要留痕，并且不能把线程打死。"""
-    state = background._prefetch_state
-    monkeypatch.setitem(state, 'last_error', None)
-
-    def _boom_session():
-        raise RuntimeError('database is locked')
-
-    monkeypatch.setattr(app, 'get_session', _boom_session)
-    background._prefetch_loop()          # 关键：不抛
-
-    assert 'database is locked' in state['last_error']
-    assert state['running'] is False, 'finally 必须复位 running'

@@ -22,30 +22,27 @@ def _get_token(client):
 
 
 class TestAuthRequired:
-    def test_page_redirects_to_login(self, client, auth_enabled):
-        resp = client.get('/')
-        assert resp.status_code == 302
-        assert resp.headers['Location'].startswith('/login')
+    def test_unauthenticated_requests_are_blocked(self, client, auth_enabled):
+        """登录墙的三种形态：页面 302 到 /login，API 与 POST 一律 401（不重定向）。
 
-    def test_api_returns_401(self, client, auth_enabled):
-        resp = client.get('/api/blocked-tags')
-        assert resp.status_code == 401
-        assert resp.get_json()['error_code'] == 'AUTH_REQUIRED'
+        同一个不变式（未认证请求的处置），只有请求类型与期望形态不同，故合成一条。
+        """
+        page = client.get('/')
+        assert page.status_code == 302
+        assert page.headers['Location'].startswith('/login')
 
-    def test_post_returns_401_not_redirect(self, client, auth_enabled):
-        resp = client.post('/api/blocked-tags', json={'tag': 'x'})
-        assert resp.status_code == 401
+        api = client.get('/api/blocked-tags')
+        assert api.status_code == 401
+        assert api.get_json()['error_code'] == 'AUTH_REQUIRED'
 
-    def test_login_page_exempt(self, client, auth_enabled):
-        assert client.get('/login').status_code == 200
+        assert client.post('/api/blocked-tags', json={'tag': 'x'}).status_code == 401
 
-    def test_static_exempt(self, client, auth_enabled):
-        assert client.get('/static/app.js').status_code == 200
-
-    def test_static_subpath_still_exempt(self, client, auth_enabled):
-        # 边界收紧后，嵌套静态资源（vendor 子目录）必须照旧免认证
-        resp = client.get('/static/vendor/bootstrap-5.3.3/bootstrap.min.css')
-        assert resp.status_code == 200
+    def test_exempt_paths_reach_their_handlers(self, client, auth_enabled):
+        """豁免矩阵：登录页与 `/static` 前缀（含 vendor 子目录）照旧免认证。"""
+        for path in ('/login',
+                     '/static/app.js',
+                     '/static/vendor/bootstrap-5.3.3/bootstrap.min.css'):
+            assert client.get(path).status_code == 200, f'{path} 必须免认证'
 
     def test_static_prefix_requires_path_boundary(self, client, auth_enabled):
         # 前缀豁免必须以 '/' 为边界。裸 startswith('/static') 会让
@@ -141,15 +138,22 @@ class TestLogin:
                            headers={'X-CSRF-Token': token})
         assert resp.get_json()['next'] == '/'
 
-    def test_rate_limit_after_5_attempts(self, client, auth_enabled):
-        for _ in range(5):
-            token = _get_token(client)
-            client.post('/login', json={'password': 'wrong'},
-                        headers={'X-CSRF-Token': token})
-        token = _get_token(client)
-        resp = client.post('/login', json={'password': 'wrong'},
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 429
+    def test_http_login_is_capped_at_5_per_minute(self, client, auth_enabled):
+        """端到端：限流装饰器确实接在 `/login` 上，阈值就是 5 次/分钟。
+
+        两种密码各跑一遍（两遍之间清空限流存储）。正确密码那一遍证明"限额不是失败
+        延迟凑出来的"（这条路径不睡，5 次成功登录照常计数）；错误密码那一遍证明失败
+        尝试同样计入窗口 —— 否则爆破可以靠 403 无限重试。
+        """
+        import app as app_module
+
+        for password, first_five in (('test-secret', [200] * 5), ('wrong', [403] * 5)):
+            app_module._rate_limit_store.clear()
+            codes = [client.post('/login', json={'password': password},
+                                 headers={'X-CSRF-Token': _get_token(client)}).status_code
+                     for _ in range(7)]
+            assert codes == first_five + [429, 429], \
+                f'密码 {password!r}：第 6、7 次必须被限流，实际 {codes}'
 
 
 class TestRateLimitConcurrency:
@@ -213,52 +217,39 @@ class TestRateLimitConcurrency:
             f'限流被绕过：{rounds} 轮并发里最多放行了 {max(seen)} 个'
             f'（上限 {limit}），观察到 {sorted(seen)}')
 
-    def test_http_login_still_capped_at_5(self, client, auth_enabled):
-        """端到端冒烟：装饰器确实接到了限流上（用正确密码，避免失败延迟）。"""
-        codes = [client.post('/login', json={'password': 'test-secret'},
-                             headers={'X-CSRF-Token': _get_token(client)}).status_code
-                 for _ in range(7)]
-        assert codes == [200] * 5 + [429, 429]
-
     def test_login_requires_csrf(self, client, auth_enabled):
         resp = client.post('/login', json={'password': 'test-secret'})
         assert resp.status_code == 403
 
 
 class TestSafeNext:
-    def test_relative_path_allowed(self):
+    def test_unsafe_values_fall_back_to_root(self):
+        """`_safe_next` 的拒绝矩阵：只有站内相对路径放行，其余一律回退到 '/'。
+
+        两个容易漏的规整：`/\\evil.com` 会被浏览器规整为 `//evil.com`（开放重定向）；
+        控制字符（回车换行）是往 `Location` 里注入的老手法，空串则无人可跳。
+        """
         import app
+        for value in ('//evil.com', '/\\evil.com', '\\evil.com', '/a\r\nb', ''):
+            assert app._safe_next(value) == '/', f'{value!r} 必须回退到 /（开放重定向）'
         assert app._safe_next('/detail/123') == '/detail/123'
-
-    def test_protocol_relative_rejected(self):
-        import app
-        assert app._safe_next('//evil.com') == '/'
-
-    def test_backslash_variant_rejected(self):
-        """回归：/\\evil.com 会被浏览器规整为 //evil.com（开放重定向）。"""
-        import app
-        assert app._safe_next('/\\evil.com') == '/'
-        assert app._safe_next('\\evil.com') == '/'
-
-    def test_control_chars_rejected(self):
-        import app
-        assert app._safe_next('/a\r\nb') == '/'
-        assert app._safe_next('') == '/'
 
 
 class TestSettingsCompat:
-    def test_authed_session_skips_settings_lock(self, client, auth_enabled, monkeypatch):
+    def test_authed_session_skips_settings_gates(self, client, auth_enabled, monkeypatch):
+        """已全局登录 → 设置页与设置 API 直通；解锁接口同样直接放行（旧流程兼容）。
+
+        设了 `SETTINGS_PASSWORD` 也拦不住已登录会话，这正是"直通"要比"没设密码所以
+        放行"更强的地方，故两个接口与解锁接口共用这一次登录。
+        """
         monkeypatch.setattr('app.SETTINGS_PASSWORD', 'settings-pw')
         token = _get_token(client)
         client.post('/login', json={'password': 'test-secret'},
                     headers={'X-CSRF-Token': token})
+
         assert client.get('/settings').status_code == 200
         assert client.get('/api/settings').status_code == 200
 
-    def test_unlock_passthrough_when_authed(self, client, auth_enabled):
-        token = _get_token(client)
-        client.post('/login', json={'password': 'test-secret'},
-                    headers={'X-CSRF-Token': token})
         token = _get_token(client)
         resp = client.post('/api/settings/unlock', json={},
                            headers={'X-CSRF-Token': token})
@@ -284,12 +275,25 @@ class TestSettingsCompat:
 
 
 class TestOpenDir:
-    def test_non_localhost_forbidden(self, client):
+    def test_forwarded_for_always_rejected(self, client, monkeypatch, tmp_path):
+        """只要请求带 `X-Forwarded-For` 就直接 403（fail-closed），不管它声称是谁。
+
+        两类 XFF 合成一条：外部地址（8.8.8.8）与伪造的 `127.0.0.1`。旧实现只看
+        `remote_addr`：XFF 被 ProxyFix 还原成 127.0.0.1 后即放行，于是任何
+        "反代原样透传 XFF"的部署都能远程打开服务器本地目录。
+        """
+        import app as app_module
+        called = []
+        monkeypatch.setattr(app_module.os, 'startfile',
+                            lambda p: called.append(p), raising=False)
         token = _get_token(client)
-        resp = client.post('/api/open-dir', json={'path': '/tmp'},
-                           headers={'X-CSRF-Token': token,
-                                    'X-Forwarded-For': '8.8.8.8'})
-        assert resp.status_code == 403
+
+        for xff in ('8.8.8.8', '127.0.0.1'):
+            resp = client.post('/api/open-dir', json={'path': str(tmp_path)},
+                               headers={'X-CSRF-Token': token, 'X-Forwarded-For': xff})
+            assert resp.status_code == 403, f'XFF={xff} 必须拒绝'
+
+        assert called == [], '被拒绝的请求不能产生任何本地副作用'
 
     def test_localhost_allowed(self, client, monkeypatch, tmp_path):
         import app as app_module
@@ -303,30 +307,18 @@ class TestOpenDir:
         assert resp.status_code == 200
         assert called == [str(tmp_path)]
 
-    def test_rejects_spoofed_loopback_via_xff(self, client, monkeypatch, tmp_path):
-        """伪造 `X-Forwarded-For: 127.0.0.1` 让 ProxyFix 还原出本机地址 —— 仍必须拒绝。
-
-        旧实现只看 `remote_addr`：XFF 被 ProxyFix 还原成 127.0.0.1 后即放行，
-        于是任何"反代原样透传 XFF"的部署都能远程打开服务器本地目录。
-        """
-        import app as app_module
-        called = []
-        monkeypatch.setattr(app_module.os, 'startfile',
-                            lambda p: called.append(p), raising=False)
-        token = _get_token(client)
-        resp = client.post('/api/open-dir', json={'path': str(tmp_path)},
-                           headers={'X-CSRF-Token': token,
-                                    'X-Forwarded-For': '127.0.0.1'})
-        assert resp.status_code == 403
-        assert called == [], '被拒绝的请求不能产生任何本地副作用'
-
 
 class TestPublicDeploymentPosture:
     """审计 S6：公网/反代部署下的默认姿态必须是安全的。"""
 
     def test_dev_server_bind_defaults_to_loopback(self, monkeypatch):
-        """`python app.py` 默认只监听 loopback（旧实现硬编码 0.0.0.0）。"""
+        """`python app.py` 默认只监听 loopback（旧实现硬编码 0.0.0.0）。
+
+        本应用默认无访问密码，且 `/api/open-dir` 能在服务器上打开本地目录 —— 直跑
+        等于把这些能力暴露给整个局域网。
+        """
         import app as app_module
+
         monkeypatch.delenv('HOST', raising=False)
         monkeypatch.delenv('PORT', raising=False)
         assert app_module._dev_server_bind() == ('127.0.0.1', 5000)
@@ -340,6 +332,7 @@ class TestPublicDeploymentPosture:
 
         `__main__` 块没有可 patch 的 seam（执行它等于起服务器），所以这里直接看源码：
         旧实现是 `app.run(debug=False, host='0.0.0.0', port=5000)` 一行字面量。
+        与上一条分开：那条测运行期默认值，这条测源码接线（机制不同）。
         """
         import inspect
         import app as app_module
@@ -365,51 +358,45 @@ class TestPublicDeploymentPosture:
         ]
         assert '_warn_if_unprotected' in module_level_calls
 
-    def test_warns_when_access_password_missing(self, monkeypatch, caplog):
-        """未设访问密码 = 全站免认证，启动必须留下告警痕迹。"""
+    def test_warns_only_when_access_password_missing(self, monkeypatch, caplog):
+        """未设访问密码 = 全站免认证，启动必须留下告警痕迹；设了就不能有噪声。"""
         import app as app_module
-        monkeypatch.setattr(app_module, 'ACCESS_PASSWORD', '')
-        with caplog.at_level(logging.WARNING, logger='app'):
-            app_module._warn_if_unprotected()
-        assert 'ACCESS_PASSWORD 未设置' in caplog.text
 
-    def test_silent_when_access_password_set(self, monkeypatch, caplog):
-        import app as app_module
-        monkeypatch.setattr(app_module, 'ACCESS_PASSWORD', 'secret-pw')
-        with caplog.at_level(logging.WARNING, logger='app'):
-            app_module._warn_if_unprotected()
-        assert 'ACCESS_PASSWORD 未设置' not in caplog.text
+        for password, expected in (('', True), ('secret-pw', False)):
+            caplog.clear()
+            monkeypatch.setattr(app_module, 'ACCESS_PASSWORD', password)
+            with caplog.at_level(logging.WARNING, logger='app'):
+                app_module._warn_if_unprotected()
+            assert ('ACCESS_PASSWORD 未设置' in caplog.text) is expected, \
+                f'ACCESS_PASSWORD={password!r} 时告警状态不对：{caplog.text!r}'
 
-    def test_warns_when_tls_verify_disabled(self, monkeypatch, caplog):
-        """关掉 TLS 校验必须留下告警（默认已开启，只有显式设 false 才走到这里）。"""
+    def test_warns_only_when_tls_verify_disabled(self, monkeypatch, caplog):
+        """关掉 TLS 校验必须留下告警；默认已开启，只有显式设 false 才走到这里。"""
         import app as app_module
-        monkeypatch.setattr(app_module, 'SSL_VERIFY', False)
-        with caplog.at_level(logging.WARNING, logger='app'):
-            app_module._warn_if_tls_unverified()
-        assert 'TLS 校验已关闭' in caplog.text
 
-    def test_silent_when_tls_verify_enabled(self, monkeypatch, caplog):
-        import app as app_module
-        monkeypatch.setattr(app_module, 'SSL_VERIFY', True)
-        with caplog.at_level(logging.WARNING, logger='app'):
-            app_module._warn_if_tls_unverified()
-        assert 'TLS 校验已关闭' not in caplog.text
+        for verify, expected in ((False, True), (True, False)):
+            caplog.clear()
+            monkeypatch.setattr(app_module, 'SSL_VERIFY', verify)
+            with caplog.at_level(logging.WARNING, logger='app'):
+                app_module._warn_if_tls_unverified()
+            assert ('TLS 校验已关闭' in caplog.text) is expected, \
+                f'SSL_VERIFY={verify} 时告警状态不对：{caplog.text!r}'
 
 
 class TestSecurityHeaders:
-    def test_headers_present(self, client):
+    def test_headers_present_and_csp_locked_down(self, client):
+        """一次响应上钉住全部安全头：三个固定头 + CSP 的 script/img 指令。
+
+        脚本已全部抽离到 `static/`，`script-src` 收紧为 `'self'`（不含 unsafe-inline）；
+        `img-src 'self' data:` 是占位图所需。它们同属"安全头字段"这一个不变式。
+        """
         resp = client.get('/')
         assert resp.headers['X-Content-Type-Options'] == 'nosniff'
         assert resp.headers['X-Frame-Options'] == 'DENY'
         assert resp.headers['Referrer-Policy'] == 'no-referrer'
-        # 脚本已全部抽离到 static/，script-src 收紧为 'self'（不含 unsafe-inline）
         csp = resp.headers['Content-Security-Policy']
         assert "script-src 'self';" in csp
         assert "'unsafe-inline'" not in csp.split('script-src')[1].split(';')[0]
-
-    def test_csp_allows_self_and_data_images(self, client):
-        resp = client.get('/')
-        csp = resp.headers['Content-Security-Policy']
         assert "img-src 'self' data:" in csp
 
 
@@ -421,59 +408,44 @@ class TestSecretFiles:
     `.cursor_secret` 连长度都不检查，`.secret_key` 只检查"是否为空"。
     """
 
-    def test_short_secret_regenerated(self, tmp_path):
+    def test_secret_file_content_validation_matrix(self, tmp_path, caplog):
+        """内容校验矩阵：缺失 / 截断 / 空白 / 够长四种输入 → 重新生成或原样沿用。
+
+        四种输入的期望不同（是否告警、是否沿用），但前置准备与判定入口完全一致
+        （同一个文件 + 同一个 `_load_or_create_secret`），故共用一次循环：
+          - 缺失：首次生成是正常路径，不该产生"内容过短"这类告警噪声；
+          - 截断（'abc'）：必须重新生成，且真出现截断文件要能看见（否则只会在密钥被
+            换掉后百思不得其解）；
+          - 空白（'   \\n'）：回归 —— 空密钥文件必须重新生成（原 app.py 的行为，现在两条
+            密钥共用）；空 key 的 HMAC 等于没有签名，游标/会话都可伪造，而旧
+            `.secret_key` 只检查"是否为空"；
+          - 够长：必须原样使用，每次启动换密钥会让所有会话/游标失效。
+        """
         import config
-        path = tmp_path / '.cursor_secret'
-        path.write_text('abc', encoding='utf-8')     # 截断的残留
 
-        secret = config._load_or_create_secret(str(path))
+        cases = (
+            ('缺失', '.cursor_secret', None, False, False),
+            ('截断', '.cursor_secret', 'abc', True, False),
+            ('空白', '.secret_key', '   \n', False, False),
+            ('够长', '.cursor_secret', 'a' * 64, False, True),
+        )
+        for label, name, raw, expect_warning, expect_preserved in cases:
+            path = tmp_path / name
+            if raw is not None:
+                path.write_text(raw, encoding='utf-8')
 
-        assert secret != 'abc'
-        assert len(secret) >= 32
-        assert path.read_text(encoding='utf-8') == secret, '新密钥必须写回文件'
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger='config'):
+                secret = config._load_or_create_secret(str(path))
 
-    def test_empty_secret_regenerated(self, tmp_path):
-        """回归：空密钥文件必须重新生成（原 app.py 的行为，现在两条密钥共用）。"""
-        import config
-        path = tmp_path / '.secret_key'
-        path.write_text('   \n', encoding='utf-8')
-
-        secret = config._load_or_create_secret(str(path))
-
-        assert len(secret) >= 32
-        assert path.read_text(encoding='utf-8') == secret
-
-    def test_missing_file_created_without_warning(self, tmp_path, caplog):
-        """首次生成是正常路径，不该产生"内容过短"这类告警噪声。"""
-        import config
-        path = tmp_path / '.cursor_secret'
-
-        with caplog.at_level(logging.WARNING, logger='config'):
-            secret = config._load_or_create_secret(str(path))
-
-        assert len(secret) >= 32 and path.is_file()
-        assert '内容过短' not in caplog.text
-
-    def test_short_secret_logs_warning(self, tmp_path, caplog):
-        """真出现了截断文件要能看见（否则只会在密钥被换掉后百思不得其解）。"""
-        import config
-        path = tmp_path / '.cursor_secret'
-        path.write_text('abc', encoding='utf-8')
-
-        with caplog.at_level(logging.WARNING, logger='config'):
-            config._load_or_create_secret(str(path))
-
-        assert '内容过短' in caplog.text
-
-    def test_valid_secret_preserved(self, tmp_path):
-        """长度够就必须原样使用：每次启动换密钥会让所有会话/游标失效。"""
-        import config
-        path = tmp_path / '.cursor_secret'
-        good = 'a' * 64
-        path.write_text(good, encoding='utf-8')
-
-        assert config._load_or_create_secret(str(path)) == good
-        assert path.read_text(encoding='utf-8') == good
+            assert len(secret) >= 32, f'{label}：密钥长度必须 ≥32，实际 {len(secret)}'
+            assert path.is_file(), f'{label}：密钥文件必须存在'
+            assert path.read_text(encoding='utf-8') == secret, \
+                f'{label}：文件内容必须与返回的密钥一致（新密钥必须写回）'
+            assert (secret == raw) is expect_preserved, \
+                f'{label}：{"必须原样沿用" if expect_preserved else "必须重新生成"}，实际 {secret!r}'
+            assert ('内容过短' in caplog.text) is expect_warning, \
+                f'{label}：告警状态不对（真出现截断文件必须能看见）：{caplog.text!r}'
 
     def test_secret_file_mode_0600(self, tmp_path):
         """写入后权限必须是 0600（Windows 上 POSIX 权限语义不适用，跳过）。"""

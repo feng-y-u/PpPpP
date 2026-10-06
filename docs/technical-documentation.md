@@ -170,7 +170,8 @@ E:\pixiv\
 │   ├── sandbox_pytest_shim.py     # DSH 沙箱专用插件：剥 os.mkdir 的 mode（0o700 → ACL 问题）
 │   ├── pixiv-cleanup.sh           # 仅清理已下载原图（30 天前 + 收藏 <100），realpath 越界保护
 │   └── _inspect_db.py             # 巡检：打印表名与硬编码表名行数（表名清单已同步 v5 删表）
-├── tests/                         # conftest + 测试文件（实测收集 682 条 = 676 passed / 2 skipped / 4 failed(env)）
+├── tests/                         # conftest + 测试文件（实测收集 431 条 = 429 passed / 2 skipped / 0 failed，约 19s；
+│                                  #   2026-09-30 全量重排为"一个用例 = 一个不变式"，同构变体走循环，见 AGENTS.md「测试」）
 ├── templates/                     # 8 个 Jinja2 模板（index/gallery/detail/downloads/cache/settings/settings_unlock/login）
 ├── static/
 │   ├── app.js                     # 共享工具（$ / escHtml / proxyThumb / fmtSize / pvCache / showToast ...）
@@ -1024,9 +1025,9 @@ graph TD
 | 级别 | 问题 | 文件 | 行为/风险 | 影响 | 建议 |
 | --- | --- | --- | --- | --- | --- |
 | High | SSL 校验默认关闭 | `config.py`（`SSL_VERIFY = False`） | 所有 Pixiv 请求不校验 TLS 证书 | 公网部署时中间人可窃取 PHPSESSID/图片内容；内网/本机部署风险低 | 生产装 CA 后设 `SSL_VERIFY=True`（环境变量或 settings.json 无此键，需改 config 或 .env） |
-| Medium | 设置页 Cookie 写入路径与 COOKIE_PATH 不一致 | `routes_settings.py`（写项目根 cookies.txt）vs `config.py`（Linux 优先 `/etc/pixiv-viewer/cookies.txt`） | Linux 生产上设置页更新的 Cookie 重启后失效（当前进程内因直接赋值 `fetcher._cookie_value` 而立即生效） | 功能不一致，重启后需重设 | **已修（2026-09-11）**：写盘改用 `app.COOKIE_PATH`（即 `config.COOKIE_PATH` 的再导出，与 fetcher 读的同一值）；路径不可写时 500 并在信息里给出实际路径（此前会静默写一个没人读的文件）。附带效果：`get_pooled_session` 的失效戳盯的就是 `COOKIE_PATH`，因此新 Cookie 现在当轮即可对连接池生效。回归用例：`tests/test_settings_api.py::TestSettingsCookie::test_cookie_lands_where_the_fetcher_reads_it`。**同日 S21 续修**：写盘仍非原子（`open(...,'w')` 先截断），并发读侧 `fetcher._load_cookie()` 读到空串会把空值连 mtime 一起缓存住（症状："保存成功但搜索仍 401，重启才恢复"）→ 改用 `helpers._atomic_write_text`（同目录 tmp + `os.replace`）；代价是**该文件所在目录必须可写**。回归用例：`TestSettingsCookie::test_cookie_write_is_an_atomic_swap`、`test_concurrent_reader_never_sees_a_truncated_cookie`、`test_failed_cookie_write_keeps_the_previous_cookie`（+ `tests/test_helpers.py::TestAtomicWriteText`） |
+| Medium | 设置页 Cookie 写入路径与 COOKIE_PATH 不一致 | `routes_settings.py`（写项目根 cookies.txt）vs `config.py`（Linux 优先 `/etc/pixiv-viewer/cookies.txt`） | Linux 生产上设置页更新的 Cookie 重启后失效（当前进程内因直接赋值 `fetcher._cookie_value` 而立即生效） | 功能不一致，重启后需重设 | **已修（2026-09-11）**：写盘改用 `app.COOKIE_PATH`（即 `config.COOKIE_PATH` 的再导出，与 fetcher 读的同一值）；路径不可写时 500 并在信息里给出实际路径（此前会静默写一个没人读的文件）。附带效果：`get_pooled_session` 的失效戳盯的就是 `COOKIE_PATH`，因此新 Cookie 现在当轮即可对连接池生效。回归用例：`tests/test_settings_api.py::TestSettingsCookie::test_cookie_lands_where_the_adapter_reads_it`。**同日 S21 续修**：写盘仍非原子（`open(...,'w')` 先截断），并发读侧 `fetcher._load_cookie()` 读到空串会把空值连 mtime 一起缓存住（症状："保存成功但搜索仍 401，重启才恢复"）→ 改用 `helpers._atomic_write_text`（同目录 tmp + `os.replace`）；代价是**该文件所在目录必须可写**。回归用例：`TestSettingsCookie::test_cookie_write_is_an_atomic_swap`、`test_concurrent_reader_never_sees_a_truncated_cookie`、`test_failed_cookie_write_keeps_the_previous_cookie`（+ `tests/test_helpers.py::TestAtomicWriteText`） |
 | Medium | 登录限流按 IP + 进程内存，且 `remote_addr or 'unknown'` 共享桶 | `middleware.py` | 多 worker 不支持（已强制 -w 1）；「unknown」IP 共享一个桶可被放大占用 | 低实际风险（单用户） | 接受或改为 token 桶 |
-| Medium（运维） | 无日常自动备份 | `migrations/runner.py`（仅迁移前备份） | 误删/损坏数据无自动恢复点 | 数据丢失风险 | 按 maintenance.md 建议加 cron 备份；可将备份纳入 pixiv-cleanup 流程 |
+| Medium（运维） | 无日常自动备份 | `migrations/runner.py`（仅迁移前备份） | 误删/损坏数据无自动恢复点 | 数据丢失风险 | **已修（2026-09-30）**：新增 `backups.py` + 第三条后台线程做**滚动快照**（`BACKUP_INTERVAL` 默认每天一份、`BACKUP_KEEP` 默认留 7 份，只清理自己命名的 `pixiv.db.snapshot-*.bak`）；快照前 `wal_checkpoint(TRUNCATE)` 保证 WAL 里已提交的事务也在快照内；观测走 `GET /api/backups`，恢复步骤见 `docs/maintenance.md` §4b |
 | Low | CSRF token 同会话恒定 | `middleware.py` | 会话内 token 不轮换（非缺陷，业界常见；SameSite=Lax 兜底） | 低 | 可选：登录后轮换 |
 | Low | `/api/open-dir` 依赖 ProxyFix 单跳 XFF 信任 | `app.py` + `routes_gallery.py` | 若 gunicorn 直接暴露且反代未清 XFF，可伪造 `X-Forwarded-For: 127.0.0.1` | 需同时绕过认证+CSRF；生产绑定 127.0.0.1 时无暴露 | 生产确保 gunicorn 仅监听 127.0.0.1/内网 |
 | Low | 密钥文件权限未显式收紧 | `app.py`、`config.py` | Linux 下默认 umask 权限创建（推测 0644/0755） | 同机他用户可读 instance 目录（单用户部署影响低） | 启动脚本 chmod 700 instance/ |

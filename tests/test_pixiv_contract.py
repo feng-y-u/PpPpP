@@ -86,35 +86,43 @@ def _fast_limiters(monkeypatch):
 # ── 端点契约：URL 形状（Ajax 路径变了的唯一防线）──
 
 class TestEndpointContract:
-    def test_illust_detail_path(self):
-        assert pixiv_client.endpoint_illust_detail(100000001) == \
-            f'{config.PIXIV_BASE_URL}/ajax/illust/100000001'
+    def test_endpoint_url_shapes(self):
+        """五个端点函数各自拼出的 URL 形状（Ajax 路径/参数名变了的唯一防线）。
 
-    def test_search_illustrations_path_and_params(self):
+        每个端点占一段，断言消息里带端点名与那个参数片段 —— 虽然是一条用例，
+        但红了必须**一眼看出是哪个端点、缺了哪个片段**。
+        """
+        # 详情：作品 id 直接进路径段
+        assert pixiv_client.endpoint_illust_detail(100000001) == \
+            f'{config.PIXIV_BASE_URL}/ajax/illust/100000001', '详情端点路径不对'
+
+        # 检索：检索词必须**同时**出现在路径段与 word= 参数里，且都被 URL-encode
         url = pixiv_client.endpoint_search_illustrations(
             'サンプル', order='date_d', mode='all', page=2)
         path, _, query = url.partition('?')
-        # 检索词必须**同时**出现在路径段与 word= 参数里，且都被 URL-encode
         quoted = requests.utils.quote('サンプル')
-        assert path == f'{config.PIXIV_BASE_URL}/ajax/search/illustrations/{quoted}'
+        assert path == f'{config.PIXIV_BASE_URL}/ajax/search/illustrations/{quoted}', \
+            f'检索端点路径不对（检索词要 URL-encode 后进路径段）：{url}'
         for fragment in (f'word={quoted}', 'order=date_d', 'mode=all',
                          'p=2', 's_mode=s_tag', 'type=illust'):
             assert fragment in query, f'搜索端点缺少参数片段 {fragment!r}: {url}'
 
-    def test_discovery_artworks_path_and_params(self):
+        # 发现页：limit/order 由调用方给，但必须原样出现在查询串里
         url = pixiv_client.endpoint_discovery_artworks(
             mode='all', page=3, limit=60, order='popular_d')
-        assert url.startswith(f'{config.PIXIV_BASE_URL}/ajax/discovery/artworks?')
+        assert url.startswith(f'{config.PIXIV_BASE_URL}/ajax/discovery/artworks?'), \
+            f'发现页端点路径不对：{url}'
         for fragment in ('mode=all', 'p=3', 'limit=60', 'order=popular_d'):
             assert fragment in url, f'发现页端点缺少参数片段 {fragment!r}: {url}'
 
-    def test_user_profile_all_path(self):
+        # 作者全量作品：作者 id 直接进路径段
         assert pixiv_client.endpoint_user_profile_all('9000001') == \
-            f'{config.PIXIV_BASE_URL}/ajax/user/9000001/profile/all'
+            f'{config.PIXIV_BASE_URL}/ajax/user/9000001/profile/all', '作者作品端点路径不对'
 
-    def test_follow_latest_path_and_params(self):
+        # 关注最新
         url = pixiv_client.endpoint_follow_latest_illust(mode='safe', page=2)
-        assert url.startswith(f'{config.PIXIV_BASE_URL}/ajax/follow_latest/illust?')
+        assert url.startswith(f'{config.PIXIV_BASE_URL}/ajax/follow_latest/illust?'), \
+            f'关注端点路径不对：{url}'
         for fragment in ('mode=safe', 'p=2'):
             assert fragment in url, f'关注端点缺少参数片段 {fragment!r}: {url}'
 
@@ -225,13 +233,18 @@ def _resolves(payload, path: str) -> bool:
 class TestFieldDrift:
     """样本里必须仍然存在"代码读过的字段"。红了就是 Pixiv 改了结构。"""
 
-    @pytest.mark.parametrize('fixture', sorted(_DEPENDENCIES))
-    def test_sample_still_has_every_field_we_read(self, fixture):
-        payload = _load(fixture)
-        missing = [p for p in _DEPENDENCIES[fixture] if not _resolves(payload, p)]
-        assert not missing, (
-            f'{fixture} 缺少代码依赖的字段路径（Pixiv 改了字段名/结构，或样本过期）：'
-            f'{missing}')
+    def test_sample_still_has_every_field_we_read(self):
+        """逐个样本核对字段清单。
+
+        失败消息必须同时带上**样本名**与**缺失的 JSON 路径**：字段漂移会被立刻定位
+        正是这份契约的全部价值，退化成"某条断言失败但不知道是哪个字段"就等于没写。
+        """
+        for fixture in sorted(_DEPENDENCIES):
+            payload = _load(fixture)
+            missing = [p for p in _DEPENDENCIES[fixture] if not _resolves(payload, p)]
+            assert not missing, (
+                f'{fixture} 缺少代码依赖的字段路径（Pixiv 改了字段名/结构，或样本过期）：'
+                f'{missing}')
 
     def test_every_fixture_is_covered_by_the_manifest(self):
         """新增样本必须同时登记契约，否则测试会静默漏掉它。"""
@@ -273,19 +286,23 @@ class TestIllustDetailContract:
         assert 'R-18' in detail['tags'], 'R18 标签必须被原样带出（下游按它过滤）'
 
     def test_legacy_urls_derives_every_page_from_p0(self):
-        """旧形态没有 metaPages：按 `_p0` → `_pN` 推导全部页面。"""
+        """旧形态没有 metaPages：按 `_p0` → `_pN` 推导全部页面；单页时就是原图本身。
+
+        两条是同一个代码路径的两个输入：`pageCount` 决定推导出几页，`pageCount=1`
+        时必须**原样**给出 `urls.original`（不是"尾巴相同"）。
+        """
         body = _load('illust_detail_legacy_urls.json')['body']
         detail = pixiv_client.parse_illust_detail(body)
 
         p0_tail = body['urls']['original'].rsplit('/', 1)[-1]
         expected = [p0_tail.replace('_p0', f'_p{i}') for i in range(body['pageCount'])]
-        assert [u.rsplit('/', 1)[-1] for u in detail['original_urls']] == expected
+        assert [u.rsplit('/', 1)[-1] for u in detail['original_urls']] == expected, \
+            f'旧形态必须从 p0 推导出 {body["pageCount"]} 页：{detail["original_urls"]}'
 
-    def test_single_page_legacy_keeps_original_as_is(self):
-        body = _load('illust_detail_legacy_urls.json')['body']
-        body['pageCount'] = 1
-        detail = pixiv_client.parse_illust_detail(body)
-        assert detail['original_urls'] == [body['urls']['original']]
+        single = _load('illust_detail_legacy_urls.json')['body']
+        single['pageCount'] = 1
+        assert pixiv_client.parse_illust_detail(single)['original_urls'] == \
+            [single['urls']['original']], '单页旧形态必须原样保留原图地址'
 
     def test_upload_date_falls_back_to_create_date(self):
         """Pixiv 有的响应只有 createDate：解析必须回退，不能返回空串。"""
@@ -315,17 +332,52 @@ class TestIllustDetailContract:
 
 # ── 列表端点：信封遍历路径 + 条目透传 ──
 
-class TestSearchContract:
-    def test_items_and_total_come_from_body_illust(self):
+class TestListEnvelopePaths:
+    """四个列表端点的信封形状各不相同，但它们回答的是同一个问题：适配层从哪条路径取
+    条目 / 总数 / 是否还有下一页。合成一条用例逐端点核对 —— 路径变了，消息里的端点名
+    与路径名会直接指出是哪一处。
+    """
+
+    def test_every_list_endpoint_reads_the_documented_path(self):
+        # 搜索：条目**原样透传**（字段访问由 item_* / parse_illust_summary 负责）
         payload = _load('search_illustrations.json')
         session = _FixtureSession(payload)
         items, total = pixiv_client.fetch_search_illusts(
             session, 'サンプル', sort_order='date_d', r18_mode='all', page=1)
+        assert items == payload['body']['illust']['data'], '搜索条目必须取自 body.illust.data'
+        assert total == payload['body']['illust']['total'], '搜索总数必须取自 body.illust.total'
 
-        # 条目**原样透传**（字段访问由 item_* / parse_illust_summary 负责）
-        assert items == payload['body']['illust']['data']
-        assert total == payload['body']['illust']['total']
+        # 发现页：条目来自 body.thumbnails.illust，但**非插画条目（漫画/小说）被剔除**
+        payload = _load('discovery_artworks.json')
+        session = _FixtureSession(payload)
+        items, total = pixiv_client.fetch_discovery_artworks(
+            session, sort_order='popular_d', r18_mode='all', page=1)
+        entries = payload['body']['thumbnails']['illust']
+        expected = [t for t in entries if t.get('type') in (None, 'illust')]
+        assert items == expected, '发现页条目必须取自 body.thumbnails.illust（非插画条目已剔除）'
+        assert len(items) < len(entries), '样本里必须留一条非插画条目，否则这条断言是空的'
+        assert total == payload['body']['total'], '发现页总数必须取自 body.total'
 
+        # 作者全量作品：id 来自 body.illusts 的**键**（字符串键 → int，且倒序）
+        payload = _load('user_profile_all.json')
+        session = _FixtureSession(payload)
+        ids = pixiv_client.fetch_user_profile_ids(session, '9000001')
+        assert ids == sorted((int(k) for k in payload['body']['illusts']), reverse=True), \
+            '作者作品 id 必须取自 body.illusts 的键并倒序'
+        assert all(isinstance(i, int) for i in ids), '作者作品 id 必须是 int，不能留字符串键'
+
+        # 关注最新：条目来自 body.thumbnails.illust，是否有下一页来自 body.page.isLastPage
+        payload = _load('follow_latest.json')
+        session = _FixtureSession(payload)
+        items, has_next = pixiv_client.fetch_following_latest(
+            session, r18_mode='all', page=1)
+        assert items == payload['body']['thumbnails']['illust'], \
+            '关注条目必须取自 body.thumbnails.illust'
+        assert has_next is (not payload['body']['page']['isLastPage']), \
+            '是否有下一页必须由 body.page.isLastPage 取反得到'
+
+
+class TestSearchContract:
     def test_summary_normalises_every_field_we_store(self):
         payload = _load('search_illustrations.json')
         item = payload['body']['illust']['data'][0]
@@ -355,19 +407,6 @@ class TestSearchContract:
 
 
 class TestDiscoveryContract:
-    def test_items_come_from_body_thumbnails_illust(self):
-        payload = _load('discovery_artworks.json')
-        session = _FixtureSession(payload)
-        items, total = pixiv_client.fetch_discovery_artworks(
-            session, sort_order='popular_d', r18_mode='all', page=1)
-
-        # 条目来自 body.thumbnails.illust，但**非插画条目（漫画/小说）被剔除**
-        entries = payload['body']['thumbnails']['illust']
-        expected = [t for t in entries if t.get('type') in (None, 'illust')]
-        assert items == expected
-        assert len(items) < len(entries), '样本里必须留一条非插画条目，否则这条断言是空的'
-        assert total == payload['body']['total']
-
     def test_non_illust_entries_are_dropped(self):
         """`type != illust` 的条目（漫画/小说）不能进图库。"""
         payload = _load('discovery_artworks.json')
@@ -383,26 +422,7 @@ class TestDiscoveryContract:
         assert pixiv_client.parse_discovery_items({'illusts': entries}) == expected
 
 
-class TestUserProfileContract:
-    def test_ids_come_from_the_keys_of_body_illusts(self):
-        payload = _load('user_profile_all.json')
-        session = _FixtureSession(payload)
-        ids = pixiv_client.fetch_user_profile_ids(session, '9000001')
-
-        assert ids == sorted((int(k) for k in payload['body']['illusts']), reverse=True)
-        assert all(isinstance(i, int) for i in ids)
-
-
 class TestFollowLatestContract:
-    def test_items_and_is_last_page(self):
-        payload = _load('follow_latest.json')
-        session = _FixtureSession(payload)
-        items, has_next = pixiv_client.fetch_following_latest(
-            session, r18_mode='all', page=1)
-
-        assert items == payload['body']['thumbnails']['illust']
-        assert has_next is (not payload['body']['page']['isLastPage'])
-
     def test_missing_page_block_means_no_next_page(self):
         """`body.page` 缺失时必须当作"没有下一页"，不能抛错。"""
         items, has_next = pixiv_client.parse_follow_latest(
@@ -413,76 +433,90 @@ class TestFollowLatestContract:
 # ── 错误信封与请求异常分类 ──
 
 class TestEnvelopeContract:
-    def test_auth_envelope_raises_auth_error(self):
+    def test_envelope_error_classification(self):
+        """`envelope_error` 的三种结论：认证类抛错、`error:true` 带出判死消息、正常信封返回 None。
+
+        三种输入走的是同一次判定，故合成一条；但每段都把结论写进消息 —— 认证类冒泡与
+        "这条 message 算不算判死"是两个不同的下游动作，红了必须能分清是哪一段。
+        """
         with pytest.raises(pixiv_client.PixivAuthError):
             pixiv_client.envelope_error(_load('error_envelope_auth.json'))
 
-    def test_deleted_envelope_is_permanent_death(self):
         msg = pixiv_client.envelope_error(_load('error_envelope_deleted.json'))
         assert msg, 'error:true 必须带出 message（判死/采样都靠它）'
-        assert pixiv_client.is_permanently_removed_message(msg)
+        assert pixiv_client.is_permanently_removed_message(msg), \
+            f'删除类 message 必须被判死：{msg!r}'
 
-    def test_ok_envelope_is_not_an_error(self):
         for fixture in ('search_illustrations.json', 'illust_detail_meta_pages.json',
                         'follow_latest.json'):
-            assert pixiv_client.envelope_error(_load(fixture)) is None
+            assert pixiv_client.envelope_error(_load(fixture)) is None, \
+                f'{fixture} 是正常信封，不该被判成错误'
 
-    @pytest.mark.parametrize('fixture,call', [
-        ('error_envelope_auth.json',
-         lambda s: pixiv_client.fetch_search_illusts(
-             s, 'サンプル', sort_order='date_d', r18_mode='all', page=1)),
-        ('error_envelope_deleted.json',
-         lambda s: pixiv_client.fetch_search_illusts(
-             s, 'サンプル', sort_order='date_d', r18_mode='all', page=1)),
-    ])
-    def test_search_envelope_classification(self, fixture, call):
-        """认证类冒泡（让用户去更新 Cookie）；其余按失败返回空结果。"""
-        session = _FixtureSession(_load(fixture))
-        if 'auth' in fixture:
-            with pytest.raises(pixiv_client.PixivAuthError):
-                call(session)
-        else:
-            assert call(session) == ([], 0)
+    def test_error_envelope_classification_per_list_endpoint(self):
+        """认证类信封冒泡（让用户去更新 Cookie）；其余按失败返回空结果（不许 500）。
 
-    @pytest.mark.parametrize('fixture', [
-        'error_envelope_deleted.json',
-    ])
-    def test_non_auth_envelope_returns_empty_from_every_list_endpoint(self, fixture):
-        payload = _load(fixture)
+        搜索端点两种信封各验一次；其余三个列表端点只验非认证那一档 —— 它们共用同一条
+        "信封失败即退化成空结果"的降级路径。
+        """
+        for fixture, expect_auth in (('error_envelope_auth.json', True),
+                                     ('error_envelope_deleted.json', False)):
+            session = _FixtureSession(_load(fixture))
+            if expect_auth:
+                with pytest.raises(pixiv_client.PixivAuthError):
+                    pixiv_client.fetch_search_illusts(
+                        session, 'サンプル', sort_order='date_d', r18_mode='all', page=1)
+            else:
+                assert pixiv_client.fetch_search_illusts(
+                    session, 'サンプル', sort_order='date_d',
+                    r18_mode='all', page=1) == ([], 0), \
+                    f'{fixture}: 非认证信封在搜索端点必须按失败返回空结果'
+
+        payload = _load('error_envelope_deleted.json')
         assert pixiv_client.fetch_discovery_artworks(
             _FixtureSession(payload), sort_order='popular_d',
-            r18_mode='all', page=1)[0] == []
+            r18_mode='all', page=1)[0] == [], '发现页：非认证信封必须退化成空结果'
         assert pixiv_client.fetch_following_latest(
-            _FixtureSession(payload), r18_mode='all', page=1)[0] == []
+            _FixtureSession(payload), r18_mode='all', page=1)[0] == [], \
+            '关注端点：非认证信封必须退化成空结果'
         assert pixiv_client.fetch_user_profile_ids(
-            _FixtureSession(payload), '9000001') == []
+            _FixtureSession(payload), '9000001') == [], \
+            '作者作品端点：非认证信封必须退化成空结果'
 
-    def test_http_401_is_auth_error_for_list_endpoints(self):
-        session = _FixtureSession(_load('search_illustrations.json'), status=401)
-        with pytest.raises(pixiv_client.PixivAuthError):
-            pixiv_client.fetch_search_illusts(
-                session, 'サンプル', sort_order='date_d', r18_mode='all', page=1)
+    def test_list_endpoint_http_status_classification(self):
+        """401 = 认证失效（冒泡，让用户去换 Cookie）；403 = 限流（Pixiv 并发过高也回 403），
+        必须按失败返回空、不冒泡认证错误。"""
+        for status, expect_auth in ((401, True), (403, False)):
+            session = _FixtureSession(_load('search_illustrations.json'), status=status)
+            if expect_auth:
+                with pytest.raises(pixiv_client.PixivAuthError):
+                    pixiv_client.fetch_search_illusts(
+                        session, 'サンプル', sort_order='date_d', r18_mode='all', page=1)
+            else:
+                assert pixiv_client.fetch_search_illusts(
+                    session, 'サンプル', sort_order='date_d',
+                    r18_mode='all', page=1) == ([], 0), \
+                    f'HTTP {status} 是限流信号，必须按失败返回空而不是认证错误'
 
-    def test_http_403_is_not_auth_error_for_list_endpoints(self):
-        """403 = 限流（Pixiv 并发过高也回 403），必须按失败返回空、不冒泡认证错误。"""
-        session = _FixtureSession(_load('search_illustrations.json'), status=403)
-        assert pixiv_client.fetch_search_illusts(
-            session, 'サンプル', sort_order='date_d', r18_mode='all', page=1) == ([], 0)
+    def test_detail_error_classification(self):
+        """详情路径的错误分类：404 = 确定性永久失败（默认 None，`return_dead=True` 才给
+        判死哨兵）、删除类信封同样判死、认证类信封冒泡。
 
-    def test_detail_404_is_dead_sentinel_only_when_requested(self):
-        """404 = 确定性永久失败：默认 None（旧语义），return_dead=True 才给哨兵。"""
+        三条合并的依据是它们回答同一个问题："这次详情拉取失败该被归成哪一类"；哨兵是
+        刷新路径删死作品的依据，认证错误是提示用户换 Cookie 的依据，不能混。
+        """
         session = _FixtureSession({}, status=404)
-        assert pixiv_client.fetch_illust_detail(session, 100000001) is None
+        assert pixiv_client.fetch_illust_detail(session, 100000001) is None, \
+            '404 的旧语义：默认返回 None'
         session = _FixtureSession({}, status=404)
         assert pixiv_client.fetch_illust_detail(
-            session, 100000001, return_dead=True) is pixiv_client.DEAD_DETAIL
+            session, 100000001, return_dead=True) is pixiv_client.DEAD_DETAIL, \
+            'return_dead=True 时 404 必须是判死哨兵'
 
-    def test_detail_deleted_envelope_is_dead_sentinel(self):
         session = _FixtureSession(_load('error_envelope_deleted.json'))
         assert pixiv_client.fetch_illust_detail(
-            session, 100000001, return_dead=True) is pixiv_client.DEAD_DETAIL
+            session, 100000001, return_dead=True) is pixiv_client.DEAD_DETAIL, \
+            '删除类信封同样必须判死（刷新路径据此删掉死作品）'
 
-    def test_detail_auth_envelope_raises(self):
         session = _FixtureSession(_load('error_envelope_auth.json'))
         with pytest.raises(pixiv_client.PixivAuthError):
             pixiv_client.fetch_illust_detail(session, 100000001)
@@ -491,11 +525,18 @@ class TestEnvelopeContract:
 # ── 检索词拼装（Pixiv 查询语法）──
 
 class TestSearchQueryContract:
-    @pytest.mark.parametrize('keyword,tag_mode,expected', [
-        ('初音ミク', 'or', '初音ミク'),
-        ('初音ミク,オリジナル', 'or', '(初音ミク OR オリジナル)'),
-        ('初音ミク，オリジナル', 'or', '(初音ミク OR オリジナル)'),
-        ('初音ミク,オリジナル', 'and', '初音ミク オリジナル'),
-    ])
-    def test_query_syntax(self, keyword, tag_mode, expected):
-        assert pixiv_client.build_search_query(keyword, tag_mode) == expected
+    def test_query_syntax(self):
+        """Pixiv 检索词语法矩阵：逗号（半角/全角）分隔的 or 组合要包一层括号，
+        and 组合用空格连接，单个词原样透传。
+
+        每个失败消息都带上"哪个输入、哪种 tag_mode" —— 拼装错了要能直接看出是哪一档。
+        """
+        for keyword, tag_mode, expected in (
+            ('初音ミク', 'or', '初音ミク'),
+            ('初音ミク,オリジナル', 'or', '(初音ミク OR オリジナル)'),
+            ('初音ミク，オリジナル', 'or', '(初音ミク OR オリジナル)'),
+            ('初音ミク,オリジナル', 'and', '初音ミク オリジナル'),
+        ):
+            got = pixiv_client.build_search_query(keyword, tag_mode)
+            assert got == expected, \
+                f'{keyword!r}（tag_mode={tag_mode}）拼装不对：{got!r} != {expected!r}'

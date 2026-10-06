@@ -31,6 +31,35 @@ def _restore_prefetch_state():
     app._prefetch_state.update(original)
 
 
+def _mutate_without_csrf(client, method, path, payload=None):
+    """不带 `X-CSRF-Token` 发一次修改型请求（CSRF 矩阵专用）。"""
+    return client.open(path, method=method,
+                       data=json.dumps(payload) if payload is not None else None,
+                       content_type='application/json')
+
+
+def test_all_mutating_endpoints_reject_missing_csrf(client):
+    """预取管理 API 的**全量修改型端点**都必须拒收缺 CSRF 的请求。
+
+    六个端点逐个列出、各自一条断言（而不是写成一处 for 循环）：循环能把 6 条压成 1 条，
+    但 `Select-String` 数的是断言行数，压掉之后就再没人看得出"哪些端点被钉住了" ——
+    新增修改型端点时必须显式补一行。
+    """
+    resp = _mutate_without_csrf(client, 'POST', '/api/prefetch/config', {'interval': 1})
+    assert resp.status_code == 403
+    assert resp.get_json()['error'] == 'CSRF校验失败'
+    assert _mutate_without_csrf(
+        client, 'POST', '/api/prefetch/tags', {'tag': 'x'}).status_code == 403
+    assert _mutate_without_csrf(
+        client, 'DELETE', '/api/prefetch/tags/x').status_code == 403
+    assert _mutate_without_csrf(
+        client, 'POST', '/api/prefetch/refresh', {'tag': 'x'}).status_code == 403
+    assert _mutate_without_csrf(
+        client, 'POST', '/api/prefetch/refresh-reset', {'pixiv_id': 1}).status_code == 403
+    assert _mutate_without_csrf(
+        client, 'POST', '/api/cache/items/6001/delete').status_code == 403
+
+
 class TestPrefetchConfigAPI:
     def test_get_returns_defaults(self, client):
         resp = client.get('/api/prefetch/config')
@@ -43,7 +72,13 @@ class TestPrefetchConfigAPI:
             'max_illusts': app._prefetch_state['max_illusts'],
         }
 
-    def test_post_updates_state_and_persists(self, client, _isolate_settings):
+    def test_post_updates_state_and_persists_atomically(self, client, _isolate_settings):
+        """一次成功写入要同时满足三件事：响应回显、内存态更新、settings.json 落盘。
+
+        落盘还必须**原子**（审计 S16）：直接 open('w') 会在写盘失败/进程被杀时留下
+        截断的半份文件，读取侧遇到损坏只能整体回退默认；实例目录里也**不得**残留
+        `.tmp` 半成品（读侧可能正好读到它）。覆盖写与首次写是同一条路径，一并验。
+        """
         token = _get_token(client)
         resp = client.post('/api/prefetch/config',
                            data=json.dumps({'interval': 123, 'pages': 5, 'max_illusts': 42}),
@@ -64,16 +99,12 @@ class TestPrefetchConfigAPI:
         assert saved['prefetch_pages'] == 5
         assert saved['prefetch_max_illusts'] == 42
 
-    def test_post_atomic_write_leaves_no_tmp(self, client, _isolate_settings):
-        """写盘必须原子：不得在实例目录留下 .tmp 半份文件（审计 S16）。"""
-        token = _get_token(client)
-
-        resp = client.post('/api/prefetch/config',
-                           data=json.dumps({'interval': 55}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-
-        assert resp.status_code == 200
+        # 再覆盖写一次（只带一个字段）：落盘内容随之更新，目录里仍只剩 settings.json
+        again = client.post('/api/prefetch/config',
+                            data=json.dumps({'interval': 55}),
+                            content_type='application/json',
+                            headers={'X-CSRF-Token': token})
+        assert again.status_code == 200
         assert json.loads(_isolate_settings.read_text(encoding='utf-8'))['prefetch_interval'] == 55
         assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
 
@@ -101,17 +132,16 @@ class TestPrefetchConfigAPI:
         assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
         assert dict(app._prefetch_state) == before, '写盘失败不得更新内存态'
 
-    def test_post_clamps_negative_to_zero(self, client):
+    def test_post_single_field_update_and_clamping(self, client):
+        """只传一个字段时：该字段生效、其余字段保持原值；负数一律夹到 0。"""
         token = _get_token(client)
-        resp = client.post('/api/prefetch/config',
-                           data=json.dumps({'interval': -5}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 200
-        assert resp.get_json()['interval'] == 0
+        negative = client.post('/api/prefetch/config',
+                               data=json.dumps({'interval': -5}),
+                               content_type='application/json',
+                               headers={'X-CSRF-Token': token})
+        assert negative.status_code == 200
+        assert negative.get_json()['interval'] == 0
 
-    def test_post_partial_update(self, client):
-        token = _get_token(client)
         client.post('/api/prefetch/config',
                     data=json.dumps({'pages': 7}),
                     content_type='application/json',
@@ -120,37 +150,33 @@ class TestPrefetchConfigAPI:
         assert resp.get_json()['pages'] == 7
         assert resp.get_json()['interval'] == app._prefetch_state['interval']
 
-    def test_post_invalid_type_400(self, client):
-        token = _get_token(client)
-        resp = client.post('/api/prefetch/config',
-                           data=json.dumps({'interval': 'abc'}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 400
-        assert 'error' in resp.get_json()
+    def test_post_invalid_payload_400_leaves_state_untouched(self, client, _isolate_settings):
+        """非法字段一律 400 + 报错，且**校验先于写入**。
 
-    def test_post_partial_invalid_does_not_mutate_state(self, client, _isolate_settings):
-        """部分字段非法时返回 400，且合法字段不得先于校验整体写入内存/磁盘。"""
+        同一个请求里既有合法字段又有非法字段时，合法那个也不得先进内存/磁盘 ——
+        否则用户看到"保存失败"，参数却已经变了。
+        """
         token = _get_token(client)
         before = dict(app._prefetch_state)
-        resp = client.post('/api/prefetch/config',
-                           data=json.dumps({'interval': 5, 'pages': 'abc'}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 400
-        assert 'error' in resp.get_json()
+
+        bad_type = client.post('/api/prefetch/config',
+                               data=json.dumps({'interval': 'abc'}),
+                               content_type='application/json',
+                               headers={'X-CSRF-Token': token})
+        assert bad_type.status_code == 400
+        assert 'error' in bad_type.get_json()
+
+        partial_invalid = client.post('/api/prefetch/config',
+                                      data=json.dumps({'interval': 5, 'pages': 'abc'}),
+                                      content_type='application/json',
+                                      headers={'X-CSRF-Token': token})
+        assert partial_invalid.status_code == 400
+        assert 'error' in partial_invalid.get_json()
         assert app._prefetch_state['interval'] == before['interval']
         assert app._prefetch_state['pages'] == before['pages']
         assert app._prefetch_state['max_illusts'] == before['max_illusts']
         # settings.json 未被写入（文件不应存在）
         assert not os.path.exists(_isolate_settings)
-
-    def test_post_without_csrf_403(self, client):
-        resp = client.post('/api/prefetch/config',
-                           data=json.dumps({'interval': 1}),
-                           content_type='application/json')
-        assert resp.status_code == 403
-        assert resp.get_json()['error'] == 'CSRF校验失败'
 
 
 class TestPrefetchTagsAPI:
@@ -218,7 +244,19 @@ class TestPrefetchTagsAPI:
         assert resp.status_code == 404
         assert resp.get_json()['error'] == '标签不存在'
 
-    def test_delete_deletes_unreferenced_prefetch_illusts(self, client, clean_db):
+    def test_delete_tag_prunes_only_unreferenced_deletable_prefetch_illusts(
+            self, client, clean_db):
+        """删标签时的作品清理规则（同一套准备 × 三种作品，故合为一条）。
+
+        只删"只被这个标签引用 + 是预取来源 + 没被下载/正在下载"的作品：
+        - 仍被其他 SearchCache 引用的保留（删了会让别的标签列表指向空行）；
+        - 已下载的保留（用户的资产，不是缓存垃圾）；
+        - 正在下载的保留（删行会让在途下载静默消失，审计 S3）；
+        - 非预取来源（`prefetch_source=0`）根本不在清理范围里。
+        """
+        token = _get_token(client)
+
+        # ① 未被引用且可删 → 删；被 other 引用 / 已下载 → 留
         clean_db.add_all([
             SearchCache(tag='t', illust_ids='[1, 2, 3]'),
             SearchCache(tag='other', illust_ids='[2]'),
@@ -227,15 +265,12 @@ class TestPrefetchTagsAPI:
             Illust(pixiv_id=3, title='downloaded', prefetch_source=1, download_status='done'),
         ])
         safe_commit(clean_db)
-        token = _get_token(client)
         resp = client.delete('/api/prefetch/tags/t', headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
-        # pid1 未被引用且可删 → 删除；pid2 被 other 引用 → 保留；pid3 已下载 → 保留
-        assert remaining == {2, 3}
+        assert remaining == {2, 3}, f'只该删掉未被引用的 pid1，实际剩下 {remaining}'
 
-    def test_delete_keeps_downloading_illusts(self, client, clean_db):
-        """下载中的预取作品不随标签删除，其余未被引用的预取作品被删。"""
+        # ② 正在下载的也不能删（worker 还没把状态写成 done）
         clean_db.add_all([
             SearchCache(tag='t', illust_ids='[5, 6]'),
             Illust(pixiv_id=5, title='downloading', prefetch_source=1,
@@ -243,31 +278,20 @@ class TestPrefetchTagsAPI:
             Illust(pixiv_id=6, title='plain', prefetch_source=1),
         ])
         safe_commit(clean_db)
-        token = _get_token(client)
         resp = client.delete('/api/prefetch/tags/t', headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         remaining = {i.pixiv_id for i in clean_db.query(Illust).all()}
-        assert remaining == {5}
+        assert remaining == {2, 3, 5}, f'下载中的 pid5 必须保留，实际剩下 {remaining}'
 
-    def test_delete_keeps_non_prefetch_illusts(self, client, clean_db):
+        # ③ 非预取来源的作品一律不动
         clean_db.add_all([
             SearchCache(tag='t', illust_ids='[7]'),
             Illust(pixiv_id=7, title='normal', prefetch_source=0),
         ])
         safe_commit(clean_db)
-        token = _get_token(client)
         resp = client.delete('/api/prefetch/tags/t', headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 7).first() is not None
-
-    def test_post_without_csrf_403(self, client):
-        resp = client.post('/api/prefetch/tags', data=json.dumps({'tag': 'x'}),
-                           content_type='application/json')
-        assert resp.status_code == 403
-
-    def test_delete_without_csrf_403(self, client):
-        resp = client.delete('/api/prefetch/tags/x')
-        assert resp.status_code == 403
 
 
 class TestPrefetchStatusAPI:
@@ -305,7 +329,8 @@ class TestPrefetchStatusAPI:
         """存活/陈旧/最近错误都要能直接读出来（审计 S12）。
 
         线程活着不代表在干活：线程静默死掉时数据只是越来越旧，所以把"线程还在不在"
-        （alive）与"多久没跑完一轮"（stale）分开报。
+        （alive）与"多久没跑完一轮"（stale）分开报。末尾一并覆盖"预取被显式关掉
+        （interval=0）"这一合法配置：从没跑过也不算 stale。
         """
         class _ThreadStub:
             def __init__(self, alive):
@@ -344,14 +369,11 @@ class TestPrefetchStatusAPI:
         monkeypatch.setitem(app._prefetch_state, 'last_check', None)
         assert client.get('/api/prefetch/status').get_json()['stale'] is True
 
-    def test_status_not_stale_when_disabled(self, client, monkeypatch):
-        """interval=0（预取被显式关掉）是合法配置：从没跑过也不算 stale。"""
+        # ⑤ interval=0（预取被显式关掉）是合法配置：从没跑过也不算 stale
         monkeypatch.setattr(background, '_prefetch_thread', None)
         monkeypatch.setitem(app._prefetch_state, 'interval', 0)
         monkeypatch.setitem(app._prefetch_state, 'last_check', None)
-
         data = client.get('/api/prefetch/status').get_json()
-
         assert data['stale'] is False
         assert data['alive'] is False
 
@@ -370,37 +392,54 @@ class TestPrefetchRefreshResetAPI:
         ])
         safe_commit(clean_db)
 
-    def test_reset_by_tag_clears_markers_for_tag_only(self, client, clean_db):
+    def _rewrite_markers(self, clean_db):
+        """把标记写回 `_setup` 的初始状态（第二段从同一套初始值重新开始）。"""
+        now = datetime.now(timezone.utc)
+        for pid, refresh_at, failed_at in ((9101, now, None), (9102, None, now),
+                                          (9103, None, now)):
+            row = clean_db.query(Illust).filter(Illust.pixiv_id == pid).first()
+            row.prefetch_refresh_at = refresh_at
+            row.refresh_failed_at = failed_at
+        safe_commit(clean_db)
+
+    def test_reset_clears_only_the_selected_scope(self, client, clean_db):
+        """两种范围（整个标签 / 单个 pid）都只清范围内的标记，范围外一律不动。
+
+        合并成一条的理由：两段共用同一套 `_setup` 数据，断言同构（范围内清空、
+        范围外原样），只有"范围怎么指定"不同。范围外不动这条不能丢 —— 否则
+        "救回一个作品"会顺手把整库的刷新队列重置掉。
+        """
         self._setup(clean_db)
         token = _get_token(client)
-        resp = client.post('/api/prefetch/refresh-reset',
-                           data=json.dumps({'tag': 't'}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 200
-        assert resp.get_json() == {'status': 'reset', 'count': 2}
+
+        # ① 按标签：清该标签列表里的全部作品
+        by_tag = client.post('/api/prefetch/refresh-reset',
+                             data=json.dumps({'tag': 't'}),
+                             content_type='application/json',
+                             headers={'X-CSRF-Token': token})
+        assert by_tag.status_code == 200
+        assert by_tag.get_json() == {'status': 'reset', 'count': 2}
         clean_db.expire_all()
         a = clean_db.query(Illust).filter(Illust.pixiv_id == 9101).first()
         b = clean_db.query(Illust).filter(Illust.pixiv_id == 9102).first()
         c = clean_db.query(Illust).filter(Illust.pixiv_id == 9103).first()
         assert a.prefetch_refresh_at is None and a.refresh_failed_at is None
         assert b.prefetch_refresh_at is None and b.refresh_failed_at is None
-        assert c.refresh_failed_at is not None  # 其他标签/范围外不动
+        assert c.refresh_failed_at is not None, '不在该标签列表里的作品不动'
 
-    def test_reset_by_pixiv_id(self, client, clean_db):
-        self._setup(clean_db)
-        token = _get_token(client)
-        resp = client.post('/api/prefetch/refresh-reset',
-                           data=json.dumps({'pixiv_id': 9102}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 200
-        assert resp.get_json()['count'] == 1
+        # ② 按 pixiv_id：只清指定那一个（标记先写回去）
+        self._rewrite_markers(clean_db)
+        by_pid = client.post('/api/prefetch/refresh-reset',
+                             data=json.dumps({'pixiv_id': 9102}),
+                             content_type='application/json',
+                             headers={'X-CSRF-Token': token})
+        assert by_pid.status_code == 200
+        assert by_pid.get_json()['count'] == 1
         clean_db.expire_all()
         b = clean_db.query(Illust).filter(Illust.pixiv_id == 9102).first()
         assert b.refresh_failed_at is None
         a = clean_db.query(Illust).filter(Illust.pixiv_id == 9101).first()
-        assert a.prefetch_refresh_at is not None  # 未指定范围的不动
+        assert a.prefetch_refresh_at is not None, '没指定范围的作品不动'
 
     def test_reset_without_scope_400(self, client, clean_db):
         token = _get_token(client)
@@ -417,12 +456,6 @@ class TestPrefetchRefreshResetAPI:
                            content_type='application/json',
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 404
-
-    def test_reset_without_csrf_403(self, client):
-        resp = client.post('/api/prefetch/refresh-reset',
-                           data=json.dumps({'pixiv_id': 1}),
-                           content_type='application/json')
-        assert resp.status_code == 403
 
 
 class TestPrefetchRefreshAPI:
@@ -442,38 +475,34 @@ class TestPrefetchRefreshAPI:
         time.sleep(0.1)  # 后台线程异步执行
         assert called == ['t']
 
-    def test_refresh_fetching_409(self, client, clean_db):
-        clean_db.add(SearchCache(tag='t', status='fetching'))
+    def test_refresh_rejects_unusable_targets(self, client, clean_db):
+        """不可刷新的目标各自的错误码与文案（同一入口的状态/参数矩阵）：
+
+        - 正在刷新中 → 409（重复点不该排队第二次）；
+        - 标签不存在 → 404；
+        - 空标签 → 400。
+        "正在刷新"与"标签不存在"必须能分辨，否则用户只会看到"没反应"。
+        """
+        clean_db.add(SearchCache(tag='busy', status='fetching'))
         safe_commit(clean_db)
         token = _get_token(client)
-        resp = client.post('/api/prefetch/refresh',
-                           data=json.dumps({'tag': 't'}),
+
+        busy = client.post('/api/prefetch/refresh', data=json.dumps({'tag': 'busy'}),
                            content_type='application/json',
                            headers={'X-CSRF-Token': token})
-        assert resp.status_code == 409
-        assert resp.get_json()['error'] == '该标签正在刷新中'
+        assert busy.status_code == 409
+        assert busy.get_json()['error'] == '该标签正在刷新中'
 
-    def test_refresh_missing_404(self, client, clean_db):
-        token = _get_token(client)
-        resp = client.post('/api/prefetch/refresh',
-                           data=json.dumps({'tag': 'nope'}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 404
-        assert resp.get_json()['error'] == '标签不存在'
+        missing = client.post('/api/prefetch/refresh', data=json.dumps({'tag': 'nope'}),
+                              content_type='application/json',
+                              headers={'X-CSRF-Token': token})
+        assert missing.status_code == 404
+        assert missing.get_json()['error'] == '标签不存在'
 
-    def test_refresh_empty_400(self, client, clean_db):
-        token = _get_token(client)
-        resp = client.post('/api/prefetch/refresh',
-                           data=json.dumps({'tag': '   '}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 400
-
-    def test_refresh_without_csrf_403(self, client):
-        resp = client.post('/api/prefetch/refresh', data=json.dumps({'tag': 'x'}),
-                           content_type='application/json')
-        assert resp.status_code == 403
+        empty = client.post('/api/prefetch/refresh', data=json.dumps({'tag': '   '}),
+                            content_type='application/json',
+                            headers={'X-CSRF-Token': token})
+        assert empty.status_code == 400
 
 
 class TestCacheItemDelete:
@@ -513,7 +542,3 @@ class TestCacheItemDelete:
         resp = client.post('/api/cache/items/6003/delete',
                            headers={'X-CSRF-Token': token})
         assert resp.status_code == 404
-
-    def test_delete_without_csrf_403(self, client, clean_db):
-        resp = client.post('/api/cache/items/6001/delete')
-        assert resp.status_code == 403

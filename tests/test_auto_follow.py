@@ -79,34 +79,45 @@ def _wait_for(predicate, timeout: float = 5.0, message: str = '') -> bool:
 def worker(monkeypatch):
     """启动一个**受控**的自动关注线程。
 
-    - 自己一份 stop event（`monkeypatch` 换掉模块全局）：收尾时只停本用例起的线程，
-      不碰 app 级别那个（`app.py` import 时就启动了，conftest 把它设成 interval=0）。
+    - 每次 `worker()` 调用各给自己一份 stop event（`monkeypatch` 换掉模块全局）：收尾时
+      只停本用例起的线程，不碰 app 级别那个（`app.py` import 时就启动了，conftest 把它
+      设成 interval=0）。
+    - `worker.halt()` 停掉本用例已起的**全部**线程并 join。同一个用例里跑多轮
+      （如 `test_new_illust_is_persisted` 的日期形状矩阵）必须在每轮之间调它，否则上一轮
+      的线程会继续跑，并跟着下一轮换过的 `fetch_following` 替身把 `last_count` 搅成 0。
     - interval 设成 0.05s 让用例秒级跑完；`auto_download` 关掉，绝不真下载。
     - 三个进程级共享状态（interval / auto_download / `_queued_downloads`）都在收尾还原：
       worker 会把新作品的 pid 丢进 `_queued_downloads`，留给后面的用例就是脏状态。
     """
-    stop = threading.Event()
-    monkeypatch.setattr(background, '_auto_follow_stop', stop)
     original_interval = runtime._auto_follow_state['interval']
     original_auto_download = runtime._auto_follow_state['auto_download']
     queued_before = set(runtime._queued_downloads)
     runtime._auto_follow_state['interval'] = 0.05
     runtime._auto_follow_state['auto_download'] = False
     started: list[threading.Thread] = []
+    stops: list[threading.Event] = []
 
     def start() -> threading.Thread:
+        stop = threading.Event()
+        stops.append(stop)
+        monkeypatch.setattr(background, '_auto_follow_stop', stop)
         thread = threading.Thread(target=background._auto_follow_worker, daemon=True)
         thread.start()
         started.append(thread)
         return thread
 
+    def halt() -> None:
+        for stop in stops:
+            stop.set()
+        for thread in started:
+            thread.join(timeout=5)
+
+    start.halt = halt
     yield start
 
     runtime._auto_follow_state['interval'] = original_interval
     runtime._auto_follow_state['auto_download'] = original_auto_download
-    stop.set()
-    for thread in started:
-        thread.join(timeout=5)
+    halt()
     with runtime._download_queue_lock:
         runtime._queued_downloads.clear()
         runtime._queued_downloads.update(queued_before)
@@ -219,12 +230,7 @@ def test_status_key_set_is_stable_while_worker_writes(client, clean_db, monkeypa
     assert STATUS_KEYS <= set(next(iter(seen_shapes))), 'S20/S21 的字段一个都不能少'
 
 
-@pytest.mark.parametrize('raw_date,expected', [
-    ('2026-09-11T00:00:00+00:00', (2026, 9, 11)),   # 常见：UTC 偏移
-    ('2026-09-11T09:30:00+09:00', (2026, 9, 11)),   # Pixiv 的 updateDate 常带 +09:00
-    ('2026-09-11T00:00:00', (2026, 9, 11)),         # 朴素时间（无偏移）
-], ids=['utc_offset', 'jst_offset', 'naive'])
-def test_new_illust_is_persisted(clean_db, monkeypatch, worker, raw_date, expected):
+def test_new_illust_is_persisted(clean_db, monkeypatch, worker):
     """**新作品必须真的入库** —— 这条路径此前必然抛异常（见审计报告 §33.5）。
 
     `fetch_following` 返回的是 `Illust.to_dict()` 形状，`upload_date` 是 isoformat
@@ -232,31 +238,41 @@ def test_new_illust_is_persisted(clean_db, monkeypatch, worker, raw_date, expect
     抛 TypeError → 被宽 `except` 吞成一行日志。只在"该轮有新作品"时触发，症状是
     "一有新作品就静默失败、下一轮重试再失败"，而 `last_check` 永远不更新。
 
-    参数化的是 `to_dict()` 实际会输出的几种字符串形状（它就是 `datetime.isoformat()`
-    的产物），确保解析往返不挑形状。
+    循环里换的是 `to_dict()` 实际会输出的几种字符串形状（它就是 `datetime.isoformat()`
+    的产物），确保解析往返不挑形状；每轮换一个 pid 并 `worker.halt()` 收掉上一轮的线程，
+    所以每轮都是"该 pid 全新、只跑一轮"的干净前提。
     """
-    pid = 900101
-    item = _item(pid)
-    item['upload_date'] = raw_date
-    monkeypatch.setattr(background, 'fetch_following', lambda page=1: ([item], False))
-    monkeypatch.setitem(runtime._auto_follow_state, 'last_check', None)
-    monkeypatch.setitem(runtime._auto_follow_state, 'last_error', None)
+    cases = (
+        # raw_date, 期望日期（年, 月, 日）, 说明
+        ('2026-09-11T00:00:00+00:00', (2026, 9, 11), '常见：UTC 偏移'),
+        ('2026-09-11T09:30:00+09:00', (2026, 9, 11), 'Pixiv 的 updateDate 常带 +09:00'),
+        ('2026-09-11T00:00:00', (2026, 9, 11), '朴素时间（无偏移）'),
+    )
+    for n, (raw_date, expected, label) in enumerate(cases):
+        pid = 900101 + n
+        item = _item(pid)
+        item['upload_date'] = raw_date
+        monkeypatch.setattr(background, 'fetch_following', lambda page=1: ([item], False))
+        monkeypatch.setitem(runtime._auto_follow_state, 'last_check', None)
+        monkeypatch.setitem(runtime._auto_follow_state, 'last_error', None)
 
-    worker()
+        worker()
 
-    assert _wait_for(lambda: runtime._auto_follow_state['last_check']), \
-        '有_new_illusts 的那一轮必须能走完（此前会卡在 safe_commit 的 TypeError）'
-    assert runtime._auto_follow_state['last_error'] is None, '这一轮不该出错'
-    assert runtime._auto_follow_state['last_count'] == 1
-    with models.get_session() as db:
-        row = db.query(models.Illust).filter(models.Illust.pixiv_id == pid).one()
-        assert isinstance(row.upload_date, datetime), \
-            f'upload_date 必须是 datetime 而不是 isoformat 字符串（拿到 {row.upload_date!r}）'
-        assert (row.upload_date.year, row.upload_date.month, row.upload_date.day) == expected, \
-            f'日期要按真实含义解析，不能丢（{raw_date} → {row.upload_date!r}）'
-        assert row.title == '作品 900101' and row.page_count == 1 and row.bookmark_count == 5, \
-            '其余字段照旧入库'
-        assert row.tags_list == [] and row.original_urls_list == []
+        assert _wait_for(lambda: runtime._auto_follow_state['last_check']), \
+            f'{label}：有_new_illusts 的那一轮必须能走完（此前会卡在 safe_commit 的 TypeError）'
+        assert runtime._auto_follow_state['last_error'] is None, f'{label}：这一轮不该出错'
+        assert runtime._auto_follow_state['last_count'] == 1, f'{label}：应当记下 1 件新作品'
+        with models.get_session() as db:
+            row = db.query(models.Illust).filter(models.Illust.pixiv_id == pid).one()
+            assert isinstance(row.upload_date, datetime), \
+                f'upload_date 必须是 datetime 而不是 isoformat 字符串（拿到 {row.upload_date!r}）'
+            assert (row.upload_date.year, row.upload_date.month, row.upload_date.day) == expected, \
+                f'{label}：日期要按真实含义解析，不能丢（{raw_date} → {row.upload_date!r}）'
+            assert row.title == f'作品 {pid}' and row.page_count == 1 and row.bookmark_count == 5, \
+                f'{label}：其余字段照旧入库'
+            assert row.tags_list == [] and row.original_urls_list == []
+
+        worker.halt()
 
 
 def test_item_without_upload_date_is_still_persisted(clean_db, monkeypatch, worker):

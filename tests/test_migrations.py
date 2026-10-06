@@ -70,7 +70,13 @@ def test_runner_backs_up_file_database_only_when_versions_are_pending(tmp_path):
     assert len(list(backup_dir.iterdir())) == 1
 
 
-def test_runner_applies_pending_versions_once_in_order():
+def test_runner_advances_version_only_for_successful_migrations():
+    """`user_version` 只在迁移**真正成功**后推进。
+
+    两段共用同一套"内存库 + 合成迁移"的准备，断言的也是同一个量（user_version），
+    只有迁移成功/失败这一个输入不同，故合为一条用例（各自断言逐条保留）。
+    """
+    # ① 成功的迁移按序执行一次（重复调用是 no-op），版本推进到 2
     engine = create_engine("sqlite://")
     applied = []
 
@@ -89,8 +95,7 @@ def test_runner_applies_pending_versions_once_in_order():
     assert applied == [1, 2]
     assert _user_version(engine) == 2
 
-
-def test_runner_does_not_advance_version_when_migration_fails():
+    # ② 失败的迁移：不推进版本（下次启动会重试）
     engine = create_engine("sqlite://")
 
     def failing_migration(conn):
@@ -340,25 +345,52 @@ def _rows_in(db_file):
         con.close()
 
 
-def test_backup_captures_wal_uncheckpointed_data(tmp_path):
-    """备份前必须 checkpoint：否则停在 -wal 里的已提交数据不会进备份。"""
-    engine, database = _wal_engine(tmp_path)
+def test_backup_captures_all_committed_data_in_both_journal_modes(tmp_path):
+    """备份内容必须完整：WAL 库（数据可能只在 -wal 里）与普通回滚日志库都要覆盖。
+
+    同一不变式（`run_migrations` 落下的备份读得到全部已提交数据），只有 journal 模式
+    这一个输入不同，故合为一条用例；两段各自的准备与断言逐段保留（各自的临时库，
+    避免互相污染）。原 `test_backup_still_works_on_non_wal_db` 的断言也在这里。
+    """
+    # ① WAL 库：备份前必须 checkpoint，否则停在 -wal 里的已提交数据不会进备份
+    wal_dir = tmp_path / "wal"
+    wal_dir.mkdir()
+    engine, database = _wal_engine(wal_dir)
     # 前置条件：此刻主库文件单独拿出来是读不到这行的（数据确实只在 WAL 里）
-    lone_before = tmp_path / "lone-before.db"
+    lone_before = wal_dir / "lone-before.db"
     shutil.copy2(database, lone_before)
     with pytest.raises(sqlite3.OperationalError):
         _rows_in(lone_before)
 
     run_migrations(engine, ((1, lambda conn: None),))
 
-    backups = sorted((tmp_path / "backups").glob("*.bak"))
+    backups = sorted((wal_dir / "backups").glob("*.bak"))
     assert len(backups) == 1
     assert _rows_in(backups[0]) == [("only-in-wal",)]
 
     # 证明是 checkpoint（而非复制侧车）起的作用：主库文件本身已含该行
-    lone_after = tmp_path / "lone-after.db"
+    lone_after = wal_dir / "lone-after.db"
     shutil.copy2(database, lone_after)
     assert _rows_in(lone_after) == [("only-in-wal",)]
+
+    # ② 非 WAL 库：checkpoint 是 no-op，备份行为与既有实现一致
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    database = plain_dir / "pixiv.db"
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() != "wal"
+        conn.commit()
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.exec_driver_sql("INSERT INTO t (v) VALUES ('rollback-journal')")
+
+    run_migrations(engine, ((1, lambda conn: None),))
+
+    backups = sorted((plain_dir / "backups").glob("*.bak"))
+    assert len(backups) == 1
+    assert _rows_in(backups[0]) == [("rollback-journal",)]
+    assert not list((plain_dir / "backups").glob("*-wal")), "非 WAL 库不该产生侧车副本"
 
 
 def test_backup_copies_wal_when_checkpoint_fails(tmp_path, monkeypatch):
@@ -378,22 +410,3 @@ def test_backup_copies_wal_when_checkpoint_fails(tmp_path, monkeypatch):
     assert len(backups) == 1
     assert (tmp_path / "backups" / f"{backups[0].name}-wal").is_file(), "-wal 必须一并复制"
     assert _rows_in(backups[0]) == [("only-in-wal",)], "副本必须包含已提交数据"
-
-
-def test_backup_still_works_on_non_wal_db(tmp_path):
-    """非 WAL 库：checkpoint 是 no-op，备份行为与既有实现一致。"""
-    database = tmp_path / "pixiv.db"
-    engine = create_engine(f"sqlite:///{database}")
-    with engine.connect() as conn:
-        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() != "wal"
-        conn.commit()
-    with engine.begin() as conn:
-        conn.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
-        conn.exec_driver_sql("INSERT INTO t (v) VALUES ('rollback-journal')")
-
-    run_migrations(engine, ((1, lambda conn: None),))
-
-    backups = sorted((tmp_path / "backups").glob("*.bak"))
-    assert len(backups) == 1
-    assert _rows_in(backups[0]) == [("rollback-journal",)]
-    assert not list((tmp_path / "backups").glob("*-wal")), "非 WAL 库不该产生侧车副本"

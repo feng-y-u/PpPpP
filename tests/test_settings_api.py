@@ -107,16 +107,21 @@ class TestSettingsGet:
         assert 'super-secret' not in body
         assert 'leaked-token' not in body
 
-    def test_defaults_when_file_missing(self, client, _isolate_settings):
-        """没有 settings.json 时回默认值；密码类不在设置页可编辑键里。"""
+    def test_missing_or_corrupt_file_falls_back_to_defaults(self, client, _isolate_settings):
+        """settings.json 读不出来（不存在 / 损坏）时一律回默认值，且不能让设置页 500。
+
+        损坏文件尤其要守住：整体回退默认值是用户**唯一**能改回正确配置的入口，
+        这里回 500 就等于"配置文件一坏，设置页也没了"。
+        密码类不在设置页可编辑键里，必须始终不出现。
+        """
+        # ① 文件不存在
         data = client.get('/api/settings').get_json()
 
         assert data['per_page'] == routes_settings._SETTINGS_DEFAULTS['per_page']
         assert 'access_password' not in data
         assert 'cookie_secure' not in data
 
-    def test_corrupt_file_falls_back_to_defaults(self, client, _isolate_settings):
-        """损坏文件不能让设置页 500（否则用户连改回默认值的机会都没有）。"""
+        # ② 文件损坏
         _isolate_settings.write_text('{broken json', encoding='utf-8')
 
         resp = client.get('/api/settings')
@@ -139,7 +144,13 @@ class TestSettingsLock:
 
 
 class TestSettingsPost:
-    def test_write_merges_known_keys_only(self, client, _isolate_settings):
+    def test_write_merges_known_keys_only_and_is_atomic(self, client, _isolate_settings):
+        """同一次写盘的两条契约：只合并白名单键、且是"tmp + replace"的原子写。
+
+        两段共用同一套准备（同一个落点文件 + 同一个 POST 入口），只是要看的侧面不同，
+        所以合在一条里各断言一次；拆开只会把这段准备抄两遍。
+        """
+        # ① 只合并白名单键：未知键与密码类字段不得经 UI 落盘
         resp = _post_settings(client, {
             'per_page': 30,
             'prefetch_pages': 4,
@@ -154,7 +165,7 @@ class TestSettingsPost:
         assert 'unknown_key' not in saved
         assert saved.get('access_password') != 'should-not-be-writable-through-the-ui'
 
-    def test_write_is_atomic_and_leaves_no_tmp(self, client, _isolate_settings):
+        # ② 原子写：同目录里只该有 settings.json，不得残留半份 .tmp
         resp = _post_settings(client, {'per_page': 30, 'prefetch_pages': 4})
 
         assert resp.status_code == 200
@@ -211,15 +222,17 @@ class TestSettingsPost:
 class TestSettingsCookie:
     """Cookie 字段：唯一会落盘到 cookies.txt 的入口，注入剔除必须守住。"""
 
-    def test_cookie_written_as_single_line(self, client, _isolate_cookies_txt):
-        resp = _post_settings(client, {'cookie': 'abc123def456'})
+    def test_control_chars_are_stripped_or_the_field_is_refused(self, client,
+                                                               _isolate_cookies_txt):
+        """Cookie 字段只有三种去向，必须分得清（每段都断言文件的最终状态）：
 
-        assert resp.status_code == 200
-        assert _isolate_cookies_txt.read_text(encoding='utf-8') == 'PHPSESSID=abc123def456\n'
-        assert pixiv_client._cookie_value == 'abc123def456'
+          ① 有内容 → 剔除控制字符后写成**单行**（否则 `\\r\\n` 就能写入第二行伪造其它 Cookie）；
+          ② 剔除后为空 → 400（用户根本没填有效内容），且**不碰文件**；
+          ③ 字段为空 → 不改 Cookie（设置页其它改动照常保存）。
 
-    def test_control_chars_cannot_inject_extra_lines(self, client, _isolate_cookies_txt):
-        """换行/回车/NUL 必须被剔除：否则可写入第二行伪造其它 Cookie。"""
+        三者是同一个输入判定的三个分支、共用同一套落点准备，故合在一条里。
+        """
+        # ① 换行/回车/Tab/NUL 必须被剔除
         resp = _post_settings(client, {'cookie': 'abc\r\nINJECTED=1\t\x00\n'})
 
         assert resp.status_code == 200
@@ -230,38 +243,19 @@ class TestSettingsCookie:
         assert written.startswith('PHPSESSID=abcINJECTED=1')
         assert pixiv_client._cookie_value == 'abcINJECTED=1'
 
-    def test_cookie_of_only_control_chars_is_rejected(self, client, _isolate_cookies_txt):
-        """剔除后为空说明用户根本没填有效内容 → 400，且不碰文件。"""
+        # ② 剔除后为空 → 400，且不碰文件（先清掉 ① 写下的那一份才检验得到"不碰"）
+        _isolate_cookies_txt.unlink()
         resp = _post_settings(client, {'cookie': '\r\n\t\x00'})
 
         assert resp.status_code == 400
         assert '无效' in resp.get_json()['error']
         assert not _isolate_cookies_txt.exists()
 
-    def test_empty_cookie_leaves_file_alone(self, client, _isolate_cookies_txt):
-        """空 Cookie 字段 = 不改 Cookie（设置页其它改动照常保存）。"""
+        # ③ 空字段 = 不改 Cookie，但同一请求里的其它改动照常保存
         resp = _post_settings(client, {'cookie': '', 'per_page': 25})
 
         assert resp.status_code == 200
         assert not _isolate_cookies_txt.exists()
-
-    def test_cookie_write_failure_500_and_settings_untouched(self, client,
-                                                            _isolate_cookies_txt,
-                                                            _isolate_settings):
-        """cookies.txt 写不进去 → 500，且 settings.json 一个字节都不写。
-
-        写序是先 Cookie 后设置，失败必须整体放弃：否则会出现"设置存了、Cookie 没存"
-        的半完成状态，用户看到 200 却仍在用旧 Cookie。
-        """
-        os.makedirs(_isolate_cookies_txt)     # 同名目录 → open(..., 'w') 必然 OSError
-
-        resp = _post_settings(client, {'cookie': 'will-fail', 'per_page': 31})
-
-        assert resp.status_code == 500
-        assert 'cookies.txt 写入失败' in resp.get_json()['error']
-        assert str(_isolate_cookies_txt) in resp.get_json()['error'], '错误信息要给出实际落点'
-        assert not _isolate_settings.exists()
-        assert pixiv_client._cookie_value != 'will-fail'
 
     def test_cookie_lands_where_the_adapter_reads_it(self, client, _isolate_cookies_txt):
         """写盘落点必须是适配层读的那个文件，而不是"项目根下的同名文件"。
@@ -271,9 +265,22 @@ class TestSettingsCookie:
         时就是它）。那种部署里设置页等于在写一个没人读的文件 —— 进程内靠直接赋值
         `_cookie_value` 看着生效，**重启后旧 Cookie 复辟**。
 
-        本用例把落点与读侧分开验证：文件写在 COOKIE_PATH；写完之后真的能被 `_load_cookie`
-        从磁盘读回来（而不是只看内存赋值这层伪装）。
+        三段共用同一套落点准备，分别回答"落点是不是 `config.COOKIE_PATH`（经 app 命名空间
+        再导出，与适配层读的是同一个值；不是第二份路径推导）"、"写出来是不是单行
+        `PHPSESSID=` 形态（且内存态同步）"、"写完真能从磁盘读回来（而不是只看内存赋值
+        这层伪装）"。合在一条里，因为它们验的是同一次写入的同一份文件。
         """
+        import config
+
+        assert _ORIGINAL_COOKIE_PATHS['app'] == config.COOKIE_PATH
+        assert _ORIGINAL_COOKIE_PATHS['pixiv_client'] == config.COOKIE_PATH
+
+        resp = _post_settings(client, {'cookie': 'abc123def456'})
+
+        assert resp.status_code == 200
+        assert _isolate_cookies_txt.read_text(encoding='utf-8') == 'PHPSESSID=abc123def456\n'
+        assert pixiv_client._cookie_value == 'abc123def456'
+
         resp = _post_settings(client, {'cookie': 'roundtrip-token'})
 
         assert resp.status_code == 200
@@ -284,13 +291,6 @@ class TestSettingsCookie:
         pixiv_client._cookie_mtime = 0.0
         pixiv_client._load_cookie()
         assert pixiv_client._cookie_value == 'roundtrip-token', '设置页写的 Cookie 必须能被读回来'
-
-    def test_cookie_path_is_the_config_value(self):
-        """落点就是 config.COOKIE_PATH（经 app 命名空间再导出），不是第二份路径推导。"""
-        import config
-
-        assert _ORIGINAL_COOKIE_PATHS['app'] == config.COOKIE_PATH
-        assert _ORIGINAL_COOKIE_PATHS['pixiv_client'] == config.COOKIE_PATH
 
     def test_cookie_write_is_an_atomic_swap(self, client, _isolate_cookies_txt, monkeypatch):
         """写 Cookie 必须是"同目录 tmp → os.replace"，**不能先把目标文件截断再写**。
@@ -330,13 +330,33 @@ class TestSettingsCookie:
         assert not os.path.exists(str(target) + '.tmp'), '成功路径不得残留 tmp'
 
     def test_failed_cookie_write_keeps_the_previous_cookie(
-            self, client, _isolate_cookies_txt, monkeypatch):
-        """交换失败时必须保住原来那个能用的 Cookie，并清掉 tmp。
+            self, client, _isolate_cookies_txt, _isolate_settings, monkeypatch):
+        """Cookie 写失败必须整体放弃：保住原来那个能用的 Cookie，且不留半完成状态。
 
-        旧实现"先截断再写"会把"保存失败"直接升级成"立刻断网"：中途任何失败都留下
-        一个空文件，而读侧还会把空值缓存住。
+        旧实现"先截断再写"会把"保存失败"直接升级成"立刻断网"：中途任何失败都留下一个
+        空文件，而读侧还会把空值（连同 mtime）缓存住。
+
+        两种失败注入验的是同一条保证：
+          ① 落点不可写（同名目录）→ 500，错误信息给出实际落点，且 settings.json
+             一个字节都不写（写序是先 Cookie 后设置，否则会出现"设置存了、Cookie 没存"，
+             用户看到 200 却仍在用旧 Cookie）；
+          ② `os.replace` 中途失败（磁盘满）→ 500，旧 Cookie 逐字节原样、tmp 清掉。
         """
         target = _isolate_cookies_txt
+
+        # ① 落点本身就是个目录 → 写入必然失败
+        os.makedirs(target)
+
+        resp = _post_settings(client, {'cookie': 'will-fail', 'per_page': 31})
+
+        assert resp.status_code == 500
+        assert 'cookies.txt 写入失败' in resp.get_json()['error']
+        assert str(target) in resp.get_json()['error'], '错误信息要给出实际落点'
+        assert not _isolate_settings.exists(), 'Cookie 都没写成功，settings.json 更不该落盘'
+        assert pixiv_client._cookie_value != 'will-fail'
+
+        # ② 交换失败：原来那个能用的 Cookie 必须原样可用，并清掉 tmp
+        os.rmdir(target)
         target.write_text('PHPSESSID=old-token\n', encoding='utf-8')
         real_replace = os.replace
 
@@ -472,6 +492,14 @@ class TestAutoFollowStatus:
     """
 
     def test_reports_running_thread_and_state(self, client, monkeypatch):
+        """`alive` 反映**真实线程引用**（不是常量），state 里的既有字段照常回传。
+
+        `last_error` 走的就是同一条回传通道（它是 worker 写的运行态字段，与派生值 `alive`
+        相反）：非空 = **最近一轮**失败（成功跑完一轮会清空）—— 这正是把"没有新作品"和
+        "每轮都失败"分开的那个字段（审计 S20 遗留）。注意线程活着与最近一轮失败可以同时
+        成立，界面不能只看 `alive`。worker 侧的写入/清空时机由 `tests/test_auto_follow.py`
+        盯住。
+        """
         import background
         import runtime
 
@@ -480,6 +508,7 @@ class TestAutoFollowStatus:
         monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', True)
         monkeypatch.setitem(runtime._auto_follow_state, 'last_check', '2026-09-11T05:00:00+00:00')
         monkeypatch.setitem(runtime._auto_follow_state, 'last_count', 3)
+        monkeypatch.setitem(runtime._auto_follow_state, 'last_error', '自动关注异常: 模拟网络挂了')
 
         resp = client.get('/api/auto-follow/status')
 
@@ -492,16 +521,20 @@ class TestAutoFollowStatus:
         assert data['last_count'] == 3, 'state 里的既有字段必须照常回传'
         assert {'last_check', 'last_count', 'interval', 'auto_download', 'alive'} <= set(data)
 
-    @pytest.mark.parametrize('fake_thread', [None, _DeadThread()], ids=['never_started', 'dead'])
-    def test_reports_stopped_thread(self, client, monkeypatch, fake_thread):
+        assert data['last_error'] == '自动关注异常: 模拟网络挂了'
+        assert data['alive'] is True, '线程活着与最近一轮失败可以同时成立 —— 界面不能只看 alive'
+        assert 'last_error' in runtime._auto_follow_state, '它属于运行态（worker 写），不是派生值'
+
+    def test_reports_stopped_thread(self, client, monkeypatch):
         """没启动（None）与启动后已退出（dead）都必须报 False —— 这正是"静默停止"的信号。"""
         import background
 
-        monkeypatch.setattr(background, '_auto_follow_thread', fake_thread)
+        for label, fake_thread in (('从未启动', None), ('启动后已退出', _DeadThread())):
+            monkeypatch.setattr(background, '_auto_follow_thread', fake_thread)
 
-        data = client.get('/api/auto-follow/status').get_json()
+            data = client.get('/api/auto-follow/status').get_json()
 
-        assert data['alive'] is False
+            assert data['alive'] is False, f'{label}（{fake_thread!r}）必须报线程不存活'
 
     def test_derived_alive_is_not_written_into_runtime_state(self, client):
         """`alive` 是派生值：写进 `_auto_follow_state` 会污染运行态（config 路由会回传它）。"""
@@ -515,12 +548,15 @@ class TestAutoFollowStatus:
         assert 'alive' not in runtime._auto_follow_state, '不得把派生值塞进运行态'
         assert runtime._auto_follow_state == before, '运行态必须逐键不变'
 
-    def test_settings_page_actually_consumes_the_field(self):
+    def test_settings_page_actually_consumes_the_fields(self):
         """前端接线静态核对：光有 JSON 字段、界面上没人看，就等于没修。
 
-        仓库没有前端测试运行器（原生 JS 无构建），所以这里只能核对"容器存在、
-        脚本真的请求这个路由、且函数被调用" —— 它挡的是真实回归：改个 id、漏掉
-        fetch、定义完忘了调用，都会让这个字段重新变成"只在 JSON 里"。
+        仓库没有前端测试运行器（原生 JS 无构建），所以这里只能核对"容器存在、脚本真的
+        请求这个路由、字段真被渲染、且函数被调用" —— 它挡的是真实回归：改个 id、漏掉
+        fetch、定义完忘了调用，都会让这些字段重新变成"只在 JSON 里"。
+
+        `alive` 与 `last_error` 两处接线共用同一套"读模板 + 读脚本"的准备，故合一条；
+        后半段还钉住"线程活着但每轮都失败也要标红"这一条界面语义。
         """
         root = os.path.dirname(os.path.abspath(app.__file__))  # app.py 就在仓库根
         with open(os.path.join(root, 'templates', 'settings.html'), encoding='utf-8') as f:
@@ -532,32 +568,6 @@ class TestAutoFollowStatus:
         assert "'/api/auto-follow/status'" in js, '脚本要请求本路由'
         assert '\nloadAutoFollowStatus();' in js, '页面加载时必须真的调用（顶层调用点）'
         assert js.count('loadAutoFollowStatus(') >= 3, '定义 + 页面加载 + 保存后刷新'
-
-    def test_reports_last_error_of_the_most_recent_round(self, client, monkeypatch):
-        """`last_error` 要经本路由暴露（审计 S20 遗留）。
-
-        它是 worker 写的运行态字段（与 `alive` 相反：`alive` 是派生值、只在这里拼），
-        所以直接随 `dict(_auto_follow_state)` 回传。语义：非空 = **最近一轮**失败
-        （成功跑完一轮会清空）—— 这正是把"没有新作品"和"每轮都失败"分开的那个字段。
-        worker 侧的写入/清空时机由 `tests/test_auto_follow.py` 盯住。
-        """
-        import background
-        import runtime
-
-        monkeypatch.setattr(background, '_auto_follow_thread', _AliveThread())
-        monkeypatch.setitem(runtime._auto_follow_state, 'last_error', '自动关注异常: 模拟网络挂了')
-
-        data = client.get('/api/auto-follow/status').get_json()
-
-        assert data['last_error'] == '自动关注异常: 模拟网络挂了'
-        assert data['alive'] is True, '线程活着与最近一轮失败可以同时成立 —— 界面不能只看 alive'
-        assert 'last_error' in runtime._auto_follow_state, '它属于运行态（worker 写），不是派生值'
-
-    def test_settings_page_shows_the_last_round_error(self):
-        """前端接线静态核对：`last_error` 必须真的被渲染出来（否则等于没补这个字段）。"""
-        root = os.path.dirname(os.path.abspath(app.__file__))
-        with open(os.path.join(root, 'static', 'page-settings.js'), encoding='utf-8') as f:
-            js = f.read()
 
         assert 's.last_error' in js, '脚本要消费这个字段'
         assert '最近一轮出错' in js, '要有一句人能读懂的文案'
@@ -595,28 +605,32 @@ class TestBlockedTagInvalidatesSearchCache:
     少了这一步，新屏蔽的标签要等标签 TTL 走完才生效。
     """
 
-    def test_adding_blocked_tag_clears_tag_cache(self, client, clean_db):
+    def test_adding_or_deleting_blocked_tag_clears_tag_cache(self, client, clean_db):
+        """新增与删除屏蔽标签都必须在**当场**清空标签缓存（两个方向的同一件事）。
+
+        标签搜索的缓存键里**没有**屏蔽标签指纹（只有作者搜索那条 600 秒缓存带 `bt=`），
+        所以屏蔽集合一变，能让结果立刻正确的唯一手段就是 `clear_search_cache()`。
+        少了这一步，新屏蔽（或刚解除屏蔽）的标签要等标签 TTL 走完才生效。
+        """
+        added = client.post('/api/blocked-tags',
+                            data=json.dumps({'tag': 'zz-blocked'}),
+                            content_type='application/json',
+                            headers={'X-CSRF-Token': _token(client)})
+        assert added.status_code == 200
+
         _seed_tag_cache()
         try:
+            # ① 再新增另一个屏蔽标签 → 标签缓存必须立即失效
             resp = client.post('/api/blocked-tags',
-                               data=json.dumps({'tag': 'zz-blocked'}),
+                               data=json.dumps({'tag': 'zz-blocked-2'}),
                                content_type='application/json',
                                headers={'X-CSRF-Token': _token(client)})
 
             assert resp.status_code == 200
             assert fetcher._SEARCH_CACHE == {}, '新增屏蔽标签后标签缓存必须立即失效'
-        finally:
-            fetcher.clear_search_cache()
 
-    def test_deleting_blocked_tag_clears_tag_cache(self, client, clean_db):
-        added = client.post('/api/blocked-tags',
-                           data=json.dumps({'tag': 'zz-blocked'}),
-                           content_type='application/json',
-                           headers={'X-CSRF-Token': _token(client)})
-        assert added.status_code == 200
-
-        _seed_tag_cache()
-        try:
+            # ② 删除先前那个 → 同样必须立即失效
+            _seed_tag_cache()
             resp = client.delete('/api/blocked-tags/zz-blocked',
                                  headers={'X-CSRF-Token': _token(client)})
 

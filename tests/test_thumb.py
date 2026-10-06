@@ -13,7 +13,6 @@ import time
 import pytest
 import requests
 
-import config
 import runtime
 import routes_gallery
 
@@ -113,44 +112,52 @@ def _rejected(host: str) -> int:
 
 # ── 正常路径 ──
 
-def test_thumb_serves_image_and_never_follows_automatically(thumb_env, client):
-    """无重定向：正常出图，且请求显式关闭自动跟随。"""
-    thumb_env['registry'].add(THUMB)
+def test_thumb_serves_and_follows_whitelisted_redirect_with_credentials(thumb_env, client):
+    """正常路径：直接出图、白名单内跟随一次（绝对与相对 Location 都算），全程带凭据。
 
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
+    三段共用同一套准备（预置入口 URL + registry），只有"是否重定向 / Location 形态"
+    与期望的请求链不同；每段用自己的 URL，避免互相命中磁盘缓存。
+    """
+    # ① 无重定向：正常出图，且请求显式关闭自动跟随
+    plain = f'{THUMB}?stage=plain'
+    thumb_env['registry'].add(plain)
 
-    assert resp.status_code == 200
-    assert resp.data == IMAGE_BYTES
+    resp = client.get(f'/thumb/{_b64(plain)}')
+
+    assert resp.status_code == 200, '① 无重定向：应正常出图'
+    assert resp.data == IMAGE_BYTES, '① 无重定向：出图内容不对'
     calls = thumb_env['registry'].calls
-    assert [c['url'] for c in calls] == [THUMB]
+    assert [c['url'] for c in calls] == [plain], f'① 请求链不对：{[c["url"] for c in calls]}'
     assert calls[0]['allow_redirects'] is False, '必须自己处理重定向，不能交给 requests'
 
+    # ② A 级：绝对 Location 仍在白名单内 → 带凭据跟随一次（官方图床内部跳转属正常）
+    thumb_env['registry'].calls.clear()
+    absolute = 'https://i.pximg.net/img-original/img/2026/01/01/x_p0.jpg'
+    src = f'{THUMB}?stage=absolute'
+    thumb_env['registry'].redirect(src, absolute)
+    thumb_env['registry'].add(absolute)
 
-def test_thumb_follows_redirect_within_static_whitelist_with_cookie(thumb_env, client):
-    """A 级：目标仍在白名单内 → 带凭据跟随一次（官方图床内部跳转属正常）。"""
-    target = 'https://i.pximg.net/img-original/img/2026/01/01/x_p0.jpg'
-    thumb_env['registry'].redirect(THUMB, target)
-    thumb_env['registry'].add(target)
+    resp = client.get(f'/thumb/{_b64(src)}')
 
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
-
-    assert resp.status_code == 200
+    assert resp.status_code == 200, '② 白名单内绝对 Location：应跟随成功'
     calls = thumb_env['registry'].calls
-    assert [c['url'] for c in calls] == [THUMB, target]
+    assert [c['url'] for c in calls] == [src, absolute], \
+        f'② 请求链不对：{[c["url"] for c in calls]}'
     assert all(c['with_cookie'] for c in calls), '白名单内重定向仍应携带凭据'
 
-
-def test_thumb_resolves_relative_location(thumb_env, client):
-    """相对 Location 必须按原 URL 解析（否则会当成非法目标拒掉）。"""
+    # ③ 相对 Location 必须按原 URL 解析（否则会当成非法目标拒掉）
+    thumb_env['registry'].calls.clear()
     relative = '/img-original/img/2026/01/01/rel_p0.jpg'
-    target = f'https://i.pximg.net{relative}'
-    thumb_env['registry'].redirect(THUMB, relative, status_code=301)
-    thumb_env['registry'].add(target)
+    rel_target = f'https://i.pximg.net{relative}'
+    src = f'{THUMB}?stage=relative'
+    thumb_env['registry'].redirect(src, relative, status_code=301)
+    thumb_env['registry'].add(rel_target)
 
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
+    resp = client.get(f'/thumb/{_b64(src)}')
 
-    assert resp.status_code == 200
-    assert [c['url'] for c in thumb_env['registry'].calls] == [THUMB, target]
+    assert resp.status_code == 200, f'③ 相对 Location（{relative}）应解析成 {rel_target}'
+    assert [c['url'] for c in thumb_env['registry'].calls] == [src, rel_target], \
+        f'③ 相对 Location 未被按原 URL 解析：{[c["url"] for c in thumb_env["registry"].calls]}'
 
 
 def test_thumb_follows_cross_host_redirect_without_cookie(thumb_env, client):
@@ -178,36 +185,116 @@ def test_thumb_follows_cross_host_redirect_without_cookie(thumb_env, client):
 
 # ── 拒绝路径 ──
 
-@pytest.mark.parametrize('name,target', [
-    ('metadata', 'https://169.254.169.254/latest/meta-data/'),
-    ('loopback', 'https://127.0.0.1/x.jpg'),
-    ('loopback-v6', 'https://[::1]/x.jpg'),
-    ('private', 'https://10.1.2.3/x.jpg'),
-    ('userinfo', 'https://user:pw@evil.example/x.jpg'),
-    ('bad-port', 'https://evil.example:8080/x.jpg'),
-    ('insecure', 'http://pub.example/x.jpg'),
-    ('localhost', 'https://localhost/x.jpg'),
-])
-def test_thumb_rejects_redirect_private_or_insecure_targets(thumb_env, client, name, target):
-    """硬性非法目标：502、不发第二次请求、计入 rejected、**不**写发现表。"""
-    url = f'https://i.pximg.net/c/250x250/img/{name}.jpg'
-    thumb_env['registry'].redirect(url, target)
+def test_thumb_rejected_redirect_targets_stop_the_chain(thumb_env, client):
+    """越界/非法重定向一律 502，且请求链必须止于"该止的地方"。
+
+    三大类同一形状的拒绝，每例的失败消息都带上是哪个目标：
+      · **硬性非法目标**（云元数据 / 回环 / 内网 / userinfo / 非 443 / 非 https /
+        localhost）：一律 502、**不发第二次请求**、计入 `rejected`、**不**写发现表；
+      · **3xx 但缺 `Location`**：视为异常重定向（`_is_redirect_response` 按状态码判定，
+        不看 `Location`），同样不再发请求；
+      · **嵌套重定向**：跟随一次后仍是 3xx → 502，不去请求第三个地址。
+
+    这是 SSRF 防线的一部分：`build_pixiv_session()` 的 Cookie 挂在**会话级** header 上，
+    requests 会把它发给任意主机 —— 跟到内网/云元数据端点等于把 PHPSESSID 交给第三方。
+    """
+    rejected_cases = [
+        ('云元数据 169.254.169.254', 'https://169.254.169.254/latest/meta-data/'),
+        ('回环 127.0.0.1', 'https://127.0.0.1/x.jpg'),
+        ('IPv6 回环 [::1]', 'https://[::1]/x.jpg'),
+        ('内网 10.1.2.3', 'https://10.1.2.3/x.jpg'),
+        ('带 userinfo 的 https', 'https://user:pw@evil.example/x.jpg'),
+        ('非 443 端口 evil.example:8080', 'https://evil.example:8080/x.jpg'),
+        ('非 https http://pub.example', 'http://pub.example/x.jpg'),
+        ('localhost 主机名', 'https://localhost/x.jpg'),
+    ]
+    for index, (label, target) in enumerate(rejected_cases):
+        url = f'https://i.pximg.net/c/250x250/img/reject-{index}.jpg'
+        thumb_env['registry'].redirect(url, target)
+
+        resp = client.get(f'/thumb/{_b64(url)}')
+
+        assert resp.status_code == 502, f'{label}：目标 {target} 必须 502'
+        assert [c['url'] for c in thumb_env['registry'].calls] == [url], \
+            f'{label}：非法目标 {target} 不得发起第二次请求'
+        snapshot = runtime.thumb_redirect_snapshot()
+        assert snapshot['discovered'] == [], f'{label}：被拒目标 {target} 绝不能进发现表'
+        assert sum(snapshot['rejected'].values()) == 1, \
+            f'{label}：应记 1 次拒绝，实际 {snapshot["rejected"]}'
+
+        # 每例都按独立场景断言：清掉计数与请求记录，下一例仍按"只有这一次"检查
+        with runtime._thumb_redirect_lock:
+            runtime._thumb_redirect_rejected.clear()
+        thumb_env['registry'].calls.clear()
+
+    # 3xx 但没有 Location：视为异常重定向，直接失败（也不得再发请求）
+    url = 'https://i.pximg.net/c/250x250/img/no-location.jpg'
+    thumb_env['registry'].add(url, status_code=302, headers={'Content-Type': 'text/html'})
 
     resp = client.get(f'/thumb/{_b64(url)}')
 
     assert resp.status_code == 502
-    assert [c['url'] for c in thumb_env['registry'].calls] == [url], '非法目标不得发起请求'
-    snapshot = runtime.thumb_redirect_snapshot()
-    assert snapshot['discovered'] == [], '被拒目标绝不能进发现表'
-    assert sum(snapshot['rejected'].values()) == 1
+    assert [c['url'] for c in thumb_env['registry'].calls] == [url]
+
+    # 只跟随一次：跟随后仍是 3xx → 502，不再请求第三个地址
+    thumb_env['registry'].calls.clear()
+    second = 'https://i.pximg.net/img-original/img/second.jpg'
+    third = 'https://i.pximg.net/img-original/img/third.jpg'
+    url = 'https://i.pximg.net/c/250x250/img/nested.jpg'
+    thumb_env['registry'].redirect(url, second)
+    thumb_env['registry'].redirect(second, third)
+    thumb_env['registry'].add(third)
+
+    resp = client.get(f'/thumb/{_b64(url)}')
+
+    assert resp.status_code == 502
+    assert [c['url'] for c in thumb_env['registry'].calls] == [url, second]
+
+    # 拒绝计数按目标主机累加（便于发现有人在扫内网）
+    with runtime._thumb_redirect_lock:
+        runtime._thumb_redirect_rejected.clear()
+    thumb_env['registry'].calls.clear()
+    for index, scan_target in enumerate(('https://10.0.0.1/a.jpg', 'https://10.0.0.1/b.jpg')):
+        url = f'https://i.pximg.net/c/250x250/img/scan-{index}.jpg'
+        thumb_env['registry'].redirect(url, scan_target)
+        assert client.get(f'/thumb/{_b64(url)}').status_code == 502, \
+            f'第 {index + 1} 次扫描内网（{scan_target}）也必须 502'
+
+    assert _rejected('10.0.0.1') == 2
 
 
-def test_thumb_rejects_cross_host_non_image_content_type(thumb_env, client):
-    """B 级目标必须是图片：返回 text/html 时拒绝落盘（防第三方内容以本站缓存形式落地）。"""
+def test_thumb_rejects_cross_host_follow_when_not_allowed(thumb_env, client, monkeypatch):
+    """B 级跨域跟随的两道闸：发现开关关掉、或目标不是图片。
+
+    两者都在 `_follow_thumb_redirect` 里判、都以"502 + 不进发现表 + 计入 rejected"收尾，
+    断言同构、准备也只差一个补丁，故合一条（每段各用自己的入口 URL，避免命中失败冷却）。
+    """
+    # ① `THUMB_REDIRECT_DISCOVERY=False` → 回到"只允许白名单内重定向"的纯拒绝行为
+    monkeypatch.setattr(routes_gallery, 'THUMB_REDIRECT_DISCOVERY', False)
     thumb_env['registry'].redirect(THUMB, CROSS_TARGET)
-    thumb_env['registry'].add(CROSS_TARGET, headers={'Content-Type': 'text/html; charset=utf-8'})
+    thumb_env['registry'].add(CROSS_TARGET)
 
     resp = client.get(f'/thumb/{_b64(THUMB)}')
+
+    assert resp.status_code == 502
+    assert [c['url'] for c in thumb_env['registry'].calls] == [THUMB], \
+        '发现关闭时连跨域请求都不该发出去'
+    snapshot = runtime.thumb_redirect_snapshot()
+    assert snapshot['discovered'] == []
+    assert _rejected(CROSS_HOST) == 1
+
+    # ② 开关打开，但目标返回 text/html：B 级目标必须是图片，
+    #    否则第三方内容会以"本站缓存"的形式落地
+    monkeypatch.setattr(routes_gallery, 'THUMB_REDIRECT_DISCOVERY', True)
+    with runtime._thumb_redirect_lock:
+        runtime._thumb_redirect_rejected.clear()
+    thumb_env['registry'].calls.clear()
+    src = f'{THUMB}?cross=html'
+    thumb_env['registry'].redirect(src, CROSS_TARGET)
+    thumb_env['registry'].add(CROSS_TARGET,
+                              headers={'Content-Type': 'text/html; charset=utf-8'})
+
+    resp = client.get(f'/thumb/{_b64(src)}')
 
     assert resp.status_code == 502
     snapshot = runtime.thumb_redirect_snapshot()
@@ -221,46 +308,6 @@ def test_thumb_redirect_initial_url_whitelist_unchanged(thumb_env, client):
 
     assert resp.status_code == 403
     assert thumb_env['registry'].calls == []
-
-
-def test_thumb_redirect_no_recursive_follow(thumb_env, client):
-    """只跟随一次：跟随后仍是 3xx → 502，不再请求第三个地址。"""
-    second = 'https://i.pximg.net/img-original/img/second.jpg'
-    third = 'https://i.pximg.net/img-original/img/third.jpg'
-    thumb_env['registry'].redirect(THUMB, second)
-    thumb_env['registry'].redirect(second, third)
-    thumb_env['registry'].add(third)
-
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
-
-    assert resp.status_code == 502
-    assert [c['url'] for c in thumb_env['registry'].calls] == [THUMB, second]
-
-
-def test_thumb_redirect_missing_location_is_rejected(thumb_env, client):
-    """3xx 但没有 Location：视为异常重定向，直接失败。"""
-    thumb_env['registry'].add(THUMB, status_code=302, headers={'Content-Type': 'text/html'})
-
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
-
-    assert resp.status_code == 502
-    assert [c['url'] for c in thumb_env['registry'].calls] == [THUMB]
-
-
-def test_thumb_redirect_discovery_disabled_never_follows_cross_host(thumb_env, client,
-                                                                   monkeypatch):
-    """`THUMB_REDIRECT_DISCOVERY=False` → 回到"只允许白名单内重定向"的纯拒绝行为。"""
-    monkeypatch.setattr(routes_gallery, 'THUMB_REDIRECT_DISCOVERY', False)
-    thumb_env['registry'].redirect(THUMB, CROSS_TARGET)
-    thumb_env['registry'].add(CROSS_TARGET)
-
-    resp = client.get(f'/thumb/{_b64(THUMB)}')
-
-    assert resp.status_code == 502
-    assert [c['url'] for c in thumb_env['registry'].calls] == [THUMB]
-    snapshot = runtime.thumb_redirect_snapshot()
-    assert snapshot['discovered'] == []
-    assert _rejected(CROSS_HOST) == 1
 
 
 # ── 观测与人工控制 ──
@@ -303,16 +350,6 @@ def test_redirect_state_missing_or_corrupt_file_is_tolerated(thumb_env):
     thumb_env['state'].write_text('{ not json', encoding='utf-8')
     assert runtime.load_thumb_redirect_hosts() == 0        # 损坏
     assert runtime.thumb_redirect_snapshot()['discovered'] == []
-
-
-def test_rejected_counter_counts_each_attempt(thumb_env, client):
-    """拒绝计数按目标主机累加（便于发现有人在扫内网）。"""
-    for index, target in enumerate(('https://10.0.0.1/a.jpg', 'https://10.0.0.1/b.jpg')):
-        url = f'https://i.pximg.net/c/250x250/img/{index}.jpg'
-        thumb_env['registry'].redirect(url, target)
-        assert client.get(f'/thumb/{_b64(url)}').status_code == 502
-
-    assert _rejected('10.0.0.1') == 2
 
 
 # ── 并发槽位纪律（审计 S11）──
@@ -496,10 +533,13 @@ def test_thumb_cache_hit_without_meta_falls_back_to_extension(thumb_env, client)
     assert client.get(f'/thumb/{_b64(png_url)}').mimetype == 'image/png'
 
 
-def test_thumb_failure_cooldown_skips_network_until_expiry(thumb_env, client):
-    """失败 URL 在冷却期内直接 502 且不再发请求；冷却过期后恢复尝试。
+def test_thumb_failure_cooldown_records_skips_then_recovers(thumb_env, client):
+    """失败冷却的完整生命周期：记冷却 → 期内直接 502 且不再发请求 → 过期恢复 → 成功后清除。
 
-    这是防"图库刷新时同一批坏图反复打满图床 → 整批 502 → 前端全消失"的关键。
+    这是防"图库刷新时同一批坏图反复打满图床 → 整批 502 → 前端全消失"的关键；而"取图
+    成功后必须清记录"是它的另一半 —— 否则一次抖动会让这张图 30 秒内都用不了。两段读写的
+    是同一个状态字典（`_thumb_failed`），共用同一套准备，只是走完这条时间线的两半。
+
     注意断言的是**请求数不再增长**而不是"总共 1 次"：`_thumb_request` 对非超时的连接
     失败会重建连接池重试一次（keep-alive 被对端关掉的快失败场景），所以首次失败本身
     就是 2 次出站调用。
@@ -524,14 +564,11 @@ def test_thumb_failure_cooldown_skips_network_until_expiry(thumb_env, client):
     assert third.status_code == 502
     assert len(thumb_env['registry'].calls) > calls_after_first, '冷却过期后必须重新尝试'
 
-
-def test_thumb_success_clears_failure_cooldown(thumb_env, client):
-    """取图成功后要清掉冷却记录：否则一次抖动会让这张图 30 秒内都用不了。"""
-    url = f'{THUMB}?recover=1'
-    assert client.get(f'/thumb/{_b64(url)}').status_code == 502
-    assert url in runtime._thumb_failed
-
+    # 这一轮失败又记回了冷却：再请求仍应被冷却挡住（而不是每次都打图床）
     thumb_env['registry'].add(url)
+    assert url in runtime._thumb_failed
+    assert runtime._thumb_failed[url] > time.time() - runtime._THUMB_FAIL_COOLDOWN, \
+        '过期后重试失败必须刷新冷却时间戳，否则下一次请求会立刻再打图床'
     assert client.get(f'/thumb/{_b64(url)}').status_code == 502, '仍在冷却期内'
 
     runtime._thumb_failed.pop(url, None)          # 模拟冷却到期后的成功
@@ -617,43 +654,44 @@ def _make_done_illust(pixiv_id: int, paths: list[str]):
     return paths
 
 
-def test_api_image_serves_db_path(client, clean_db, tmp_path, monkeypatch):
-    """DB 命中且文件在盘上：直接回文件（带 7 天 max_age，灯箱不再每张发 304）。"""
+def test_api_image_resolution_has_three_branches(client, clean_db, tmp_path, monkeypatch):
+    """/api/image 的取图优先级：库行（done + 文件在盘）→ `downloads/<pid>/` 兜底 → 404。
+
+    三条分支共用同一套准备（一个 done 作品行 + 一个 downloads 目录 + `DOWNLOAD_DIR`
+    重定向），断言形状也都是"状态码 + 拿到的字节/页号"，故合在一条里；404 那一支本身
+    就含三种形态（目录不存在、index 越界、DB 有记录但文件已删）。
+    """
+    import helpers
+
+    monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
+
+    # ① DB 命中且文件在盘上：直接回文件（带 7 天 max_age，灯箱不再每张发 304）
     img = tmp_path / 'page1.jpg'
     img.write_bytes(b'db-jpeg')
     _make_done_illust(70001, [str(img)])
 
     resp = client.get('/api/image/70001/0')
 
-    assert resp.status_code == 200
-    assert resp.data == b'db-jpeg'
+    assert resp.status_code == 200, '① 库行命中且文件在盘：应 200'
+    assert resp.data == b'db-jpeg', '① 应回盘上的那份文件'
     assert 'max-age=604800' in resp.headers['Cache-Control']
 
-
-def test_api_image_falls_back_to_download_dir(client, clean_db, tmp_path, monkeypatch):
-    """DB 无记录（或状态不对）时从 downloads/<pid>/ 兜底，按页号排序取第 index 张。"""
-    import helpers
-
+    # ② DB 无记录（或状态不对）时从 downloads/<pid>/ 兜底，按页号排序取第 index 张
     ddir = tmp_path / 'downloads' / '70002'
     ddir.mkdir(parents=True)
     (ddir / '70002_p1.jpg').write_bytes(b'page-one')
     (ddir / '70002_p2.jpg').write_bytes(b'page-two')
     (ddir / '70002_p10.jpg').write_bytes(b'page-ten')
-    monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
 
     first = client.get('/api/image/70002/0')
     third = client.get('/api/image/70002/2')
 
-    assert first.status_code == 200 and first.data == b'page-one'
+    assert first.status_code == 200 and first.data == b'page-one', '② index=0 应是第 1 页'
     # 页号排序：_p10 必须排在 _p2 之后（字典序会排错）
-    assert third.status_code == 200 and third.data == b'page-ten'
+    assert third.status_code == 200 and third.data == b'page-ten', \
+        '② index=2 应是 _p10（页号排序，不是字典序）'
 
-
-def test_api_image_404_paths(client, clean_db, tmp_path, monkeypatch):
-    """三分支的兜底：目录不存在、index 越界、DB 行在但文件被删 —— 一律 404。"""
-    import helpers
-
-    monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
+    # ③ 三分支的兜底：目录不存在、index 越界、DB 行在但文件被删 —— 一律 404
     assert client.get('/api/image/70003/0').status_code == 404, '目录不存在'
 
     ddir = tmp_path / 'downloads' / '70004'

@@ -41,13 +41,17 @@ class TestImageCacheEviction:
         self.dir = tmp_path / 'image_cache'
         self.dir.mkdir()
 
-    def test_under_limit_deletes_nothing(self):
-        for i in range(4):
+    def test_threshold_and_eviction_order(self):
+        """同一套准备下的容量行为：没超限一个不动、超限按最旧优先删、`.meta` 随图一起走。
+
+        末尾一并覆盖"目录不存在"这条边界（安静 no-op，不抛异常）。这几段拆成多条用例时
+        前置准备完全一样、断言同构、只有输入与期望值不同，故合在一条里依次断言。
+        """
+        for i in range(4):                      # 4 × 200B = 800B < 上限 1000
             _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
         assert helpers.enforce_image_cache_limit(str(self.dir), force=True) == 0
         assert _total(self.dir) == 800
 
-    def test_over_limit_evicts_oldest_first(self):
         # 10 个 × 200B = 2000B，上限 1000、目标 900 → 应删到剩 4 个（800B）
         for i in range(10):
             _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
@@ -58,7 +62,7 @@ class TestImageCacheEviction:
         assert names == [f'{_digest(i)}.jpg' for i in range(6, 10)], \
             '应保留最新的 4 个，淘汰最旧的'
 
-    def test_matching_meta_is_removed_alongside(self):
+        # 同名 .meta 必须随图片一起删：留着就是一个永远没人清理的孤儿
         for i in range(10):
             _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
             _mk(self.dir, f'{_digest(i)}.jpg.meta', 10, 100 + i)
@@ -67,21 +71,34 @@ class TestImageCacheEviction:
         assert f'{_digest(0)}.jpg' not in left
         assert f'{_digest(0)}.jpg.meta' not in left, '.meta 应随图片一起删掉'
 
-    @pytest.mark.parametrize('name', [
-        'notes.txt',                 # 完全不是缓存文件
-        'abc.jpg',                   # 名字不是 32 位 md5
-        f'{"z" * 32}.jpg',           # 长度够但不是十六进制
-        f'{_digest(99)}.jpg.bak',    # 后缀不对
-    ])
-    def test_never_touches_foreign_files(self, name):
-        """目录里的非缓存文件必须原样保留——这是淘汰逻辑的安全底线。"""
-        foreign = _mk(self.dir, name, 500, 1)      # mtime 最早，最该被"淘汰"
-        for i in range(10):
-            _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
-        helpers.enforce_image_cache_limit(str(self.dir), force=True)
-        assert foreign.exists(), f'{name} 不应被淘汰逻辑删除'
+        # 目录不存在 = 没有可淘汰的东西
+        assert helpers.enforce_image_cache_limit(
+            os.path.join(str(self.dir), 'nope'), force=True) == 0
 
-    def test_throttled_within_interval(self):
+    def test_never_touches_foreign_files(self):
+        """目录里的非缓存文件必须原样保留——这是淘汰逻辑的安全底线。
+
+        四种"看着像缓存、其实不是"的命名逐个过一遍（理由见行内注释），每例都放在 mtime
+        最旧的位置：真被淘汰逻辑盯上就一定先删它。每例的失败消息带上是哪个命名。
+        """
+        for name in (
+            'notes.txt',                 # 完全不是缓存文件
+            'abc.jpg',                   # 名字不是 32 位 md5
+            f'{"z" * 32}.jpg',           # 长度够但不是十六进制
+            f'{_digest(99)}.jpg.bak',    # 后缀不对
+        ):
+            foreign = _mk(self.dir, name, 500, 1)      # mtime 最早，最该被"淘汰"
+            for i in range(10):
+                _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
+            helpers.enforce_image_cache_limit(str(self.dir), force=True)
+            assert foreign.exists(), f'{name} 不应被淘汰逻辑删除'
+
+    def test_throttle_and_force(self):
+        """节流与 `force` 是一对：间隔未到直接跳过，`force=True` 不受节流限制。
+
+        两件事共用同一段准备（先超限 → 再写一批让它重新超限），第二段就是第一段的
+        对照，拆开只会把这段准备抄两遍。
+        """
         for i in range(10):
             _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
         first = helpers.enforce_image_cache_limit(str(self.dir), force=True)
@@ -91,17 +108,8 @@ class TestImageCacheEviction:
             _mk(self.dir, f'{_digest(i)}.jpg', 200, 200 + i)
         assert helpers.enforce_image_cache_limit(str(self.dir)) == 0
 
-    def test_force_bypasses_throttle(self):
-        for i in range(10):
-            _mk(self.dir, f'{_digest(i)}.jpg', 200, 100 + i)
-        helpers.enforce_image_cache_limit(str(self.dir), force=True)
-        for i in range(10, 20):
-            _mk(self.dir, f'{_digest(i)}.jpg', 200, 200 + i)
+        # 同一批超限文件，force=True 时必须真的处理（节流只挡"自动触发"）
         assert helpers.enforce_image_cache_limit(str(self.dir), force=True) > 0
-
-    def test_missing_dir_is_noop(self):
-        assert helpers.enforce_image_cache_limit(
-            os.path.join(str(self.dir), 'nope'), force=True) == 0
 
 
 class TestAtomicWriteJson:
@@ -111,7 +119,12 @@ class TestAtomicWriteJson:
     settings.json；读取侧遇损坏只能整体回退默认值，用户刚改的一整份配置全丢。
     """
 
-    def test_write_replaces_content_and_leaves_no_tmp(self, tmp_path):
+    def test_success_path_replaces_content_and_creates_missing_directory(self, tmp_path):
+        """成功路径的两种起点：替换已有文件、以及父目录还不存在（JSON 版会补建）。
+
+        两次写都不许留下半份 `.tmp` —— 那正是"原子写"的意义（下次写入踩到半份内容，
+        用户目录里还会多一个含义不明的文件）。两段准备只差目标路径，故合在一起。
+        """
         target = tmp_path / 'settings.json'
         target.write_text('{"old": 1}', encoding='utf-8')
 
@@ -120,19 +133,25 @@ class TestAtomicWriteJson:
         assert json.loads(target.read_text(encoding='utf-8')) == {'new': 2, '中文': '中文值'}
         assert list(tmp_path.iterdir()) == [target], '同目录不得残留 .tmp'
 
-    def test_write_creates_missing_directory(self, tmp_path):
-        target = tmp_path / 'nested' / 'deep' / 'settings.json'
+        nested = tmp_path / 'nested' / 'deep' / 'settings.json'
 
-        helpers._atomic_write_json(str(target), {'a': 1})
+        helpers._atomic_write_json(str(nested), {'a': 1})
 
-        assert json.loads(target.read_text(encoding='utf-8')) == {'a': 1}
-        assert not os.path.exists(f'{target}.tmp')
+        assert json.loads(nested.read_text(encoding='utf-8')) == {'a': 1}
+        assert not os.path.exists(f'{nested}.tmp')
 
-    def test_replace_failure_keeps_old_bytes_and_cleans_tmp(self, tmp_path, monkeypatch):
-        """替换失败（磁盘满/权限）时旧文件必须原样，且不留半份 tmp。"""
+    def test_failure_keeps_old_bytes_and_cleans_tmp(self, tmp_path, monkeypatch):
+        """两个失败阶段都不许破坏旧文件、也不许留半份 tmp。
+
+        ① 替换失败（磁盘满/权限）：`os.replace` 抛 OSError；
+        ② 序列化阶段就失败（不可序列化对象）：`json.dump` 抛 TypeError。
+        两者的根因不同，但对旧文件的保证是同一条，而且断言形状完全一样。
+        """
+        # ① 替换失败
         target = tmp_path / 'settings.json'
         original = '{"keep": "me"}'
         target.write_text(original, encoding='utf-8')
+        real_replace = helpers.os.replace
 
         def _boom(src, dst, *a, **kw):
             raise OSError('模拟 os.replace 失败')
@@ -145,11 +164,8 @@ class TestAtomicWriteJson:
         assert target.read_text(encoding='utf-8') == original, '旧内容必须完整保留'
         assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
 
-    def test_dump_failure_preserves_old_file(self, tmp_path, monkeypatch):
-        """序列化阶段就失败（不可序列化对象）：旧文件不动，也不留 tmp。"""
-        target = tmp_path / 'settings.json'
-        original = '{"keep": "me"}'
-        target.write_text(original, encoding='utf-8')
+        # ② 序列化阶段失败：旧文件同样一个字节都不能动（先恢复正常 os.replace）
+        monkeypatch.setattr(helpers.os, 'replace', real_replace)
 
         class _Unserializable:
             pass
@@ -158,6 +174,7 @@ class TestAtomicWriteJson:
             helpers._atomic_write_json(str(target), {'bad': _Unserializable()})
 
         assert target.read_text(encoding='utf-8') == original
+        assert list(tmp_path.iterdir()) == [target], '序列化失败也必须清掉 .tmp'
 
 
 class TestAtomicWriteText:
@@ -168,7 +185,12 @@ class TestAtomicWriteText:
     还多两条契约：不创建父目录（目录写错要明确失败）、Windows 共享冲突有界重试。
     """
 
-    def test_write_replaces_content_and_leaves_no_tmp(self, tmp_path):
+    def test_success_path_replaces_content_and_leaves_no_tmp(self, tmp_path):
+        """成功路径的两种起点：目标已存在（替换）与还不存在（新建），都不留 `.tmp`。
+
+        读侧（`pixiv_client._load_cookie()`）只认"要么旧值要么新值"，所以"不留半份"
+        与"内容正确"是同一件事的两面，一起验。
+        """
         target = tmp_path / 'cookies.txt'
         target.write_text('PHPSESSID=old\n', encoding='utf-8')
 
@@ -177,13 +199,15 @@ class TestAtomicWriteText:
         assert target.read_text(encoding='utf-8') == 'PHPSESSID=new\n'
         assert list(tmp_path.iterdir()) == [target], '同目录不得残留 .tmp'
 
-    def test_write_creates_the_file_when_missing(self, tmp_path):
-        target = tmp_path / 'cookies.txt'
+        # 目标还不存在（父目录已存在）：新建而不是失败
+        fresh_dir = tmp_path / 'fresh'
+        fresh_dir.mkdir()
+        fresh = fresh_dir / 'cookies.txt'
 
-        helpers._atomic_write_text(str(target), 'PHPSESSID=fresh\n')
+        helpers._atomic_write_text(str(fresh), 'PHPSESSID=fresh\n')
 
-        assert target.read_text(encoding='utf-8') == 'PHPSESSID=fresh\n'
-        assert list(tmp_path.iterdir()) == [target]
+        assert fresh.read_text(encoding='utf-8') == 'PHPSESSID=fresh\n'
+        assert list(fresh_dir.iterdir()) == [fresh]
 
     def test_does_not_create_missing_parent_directory(self, tmp_path):
         """父目录不存在要**明确失败**，不能静默补出来。
@@ -219,11 +243,13 @@ class TestAtomicWriteText:
         assert target.read_text(encoding='utf-8') == original
         assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
 
-    def test_permission_error_is_retried(self, tmp_path, monkeypatch):
+    def test_permission_error_retry_is_bounded(self, tmp_path, monkeypatch):
         """Windows：读侧正持着目标文件时 `os.replace` 抛 PermissionError，要有界重试。
 
         POSIX 的 rename 没有这个问题，所以这条是为开发机（以及可能的 Windows 部署）
-        准备的，不重试就会把"保存 Cookie"变成偶发 500。
+        准备的：不重试会把"保存 Cookie"变成偶发 500，无上限重试则会把一次请求挂死 ——
+        "次数有界"才是契约本身，所以"前两次失败后成功"与"一直失败到耗尽"必须一起验。
+        两段准备完全一样，只有出牌方式不同。
         """
         target = tmp_path / 'cookies.txt'
         target.write_text('PHPSESSID=old\n', encoding='utf-8')
@@ -244,12 +270,9 @@ class TestAtomicWriteText:
         assert target.read_text(encoding='utf-8') == 'PHPSESSID=new\n'
         assert list(tmp_path.iterdir()) == [target], '成功后不得残留 .tmp'
 
-    def test_permission_error_after_retries_is_raised(self, tmp_path, monkeypatch):
-        """重试耗尽要原样抛出（调用方据此回 500），并清掉 tmp。"""
-        target = tmp_path / 'cookies.txt'
-        original = 'PHPSESSID=old\n'
-        target.write_text(original, encoding='utf-8')
-        attempts = []
+        # 一直失败：重试耗尽要原样抛出（调用方据此回 500），并清掉 tmp
+        attempts.clear()
+        target.write_text('PHPSESSID=old\n', encoding='utf-8')
 
         def _always_denied(src, dst, *a, **kw):
             attempts.append(1)
@@ -261,9 +284,8 @@ class TestAtomicWriteText:
             helpers._atomic_write_text(str(target), 'PHPSESSID=new\n')
 
         assert len(attempts) == 5, '重试次数必须有界'
-        assert target.read_text(encoding='utf-8') == original
+        assert target.read_text(encoding='utf-8') == 'PHPSESSID=old\n'
         assert list(tmp_path.iterdir()) == [target], '失败路径也必须清掉 .tmp'
-        assert list(tmp_path.iterdir()) == [target]
 
 
 class TestOriginalToResized:
@@ -276,15 +298,22 @@ class TestOriginalToResized:
     "**很多**作品的中图加载不出来"，而不是边缘情况。
     """
 
-    def test_png_original_maps_to_jpg_master(self):
-        """核心回归：PNG 原图的中图地址必须是 `.jpg`，且地址形状完全正确。"""
+    def test_png_original_maps_to_jpg_master(self, monkeypatch):
+        """核心回归 + 同一条代码路径上的另外三条规则。
+
+        核心回归：PNG 原图的中图地址必须是 `.jpg`，而且地址形状要**逐字符**正确
+        （只查后缀会漏掉 `c/600x600`、`img-master` 这些段落被写错的情形）。
+
+        随后三条（扩展名矩阵恒 `.jpg`、query 被丢弃、尺寸取自 `MEDIUM_IMAGE_SIZE`）
+        与它走的是同一个函数、同一行拼接、同一套"造个 img-original 地址再调"的准备，
+        只有输入与期望值不同 —— 拆成多条用例只是把这段准备抄几遍。
+        """
         url = 'https://i.pximg.net/img-original/img/2026/08/29/17/21/55/149022521_p0.png'
         assert helpers._original_to_resized(url) == (
             f'https://i.pximg.net/c/{config.MEDIUM_IMAGE_SIZE}x{config.MEDIUM_IMAGE_SIZE}'
             '/img-master/img/2026/08/29/17/21/55/149022521_p0_master1200.jpg')
 
-    def test_mapping_rules(self, monkeypatch):
-        """同一条代码路径上的三件事：扩展名恒 `.jpg`、query 被丢弃、尺寸走 `MEDIUM_IMAGE_SIZE`。"""
+        # 任何原图扩展名都产出 `.jpg` 中图（不是"jpg 才转、其它照抄"）
         for ext in ('jpg', 'jpeg', 'png', 'gif', 'webp'):
             out = helpers._original_to_resized(
                 f'https://i.pximg.net/img-original/img/2026/01/01/00/00/00/123_p0.{ext}')

@@ -363,13 +363,19 @@ def test_reset_racing_worker_never_leaves_phantom_done(dl_env, clean_db, monkeyp
 
 # ── 提交失败（S2）：不得让作品卡在 downloading ──
 
+#: `background.safe_commit` 的原始实现，模块级抓一次。
+#: 同一用例里连着装两个"第 N 次调用就失败"的替身时（见
+#: `test_terminal_commit_failure_always_resets_to_failed`），替身内部若每次都读
+#: `background.safe_commit` 的当前值，第二个替身的"真身"会是第一个替身，调用计数串台。
+_REAL_SAFE_COMMIT = background.safe_commit
+
+
 def _fail_commit_on(monkeypatch, call_no: int, *, before_raise=None) -> dict:
     """让 background.safe_commit 在第 call_no 次调用时失败。
 
     替身保持真实语义：**先 rollback 再抛** —— safe_commit 的契约就是失败即回滚，
     不还原这一点会让被救路径看到"事务里已写好的 done"，测出假象。
     """
-    real = background.safe_commit
     calls = {'n': 0, 'raised': 0}
 
     def _flaky(db, *args, **kwargs):
@@ -381,14 +387,24 @@ def _fail_commit_on(monkeypatch, call_no: int, *, before_raise=None) -> dict:
                 before_raise()
             raise OperationalError('UPDATE illusts', {},
                                    Exception('database is locked'))
-        return real(db, *args, **kwargs)
+        return _REAL_SAFE_COMMIT(db, *args, **kwargs)
 
     monkeypatch.setattr(background, 'safe_commit', _flaky)
     return calls
 
 
-def test_download_terminal_commit_failure_resets_to_failed(dl_env, monkeypatch, caplog):
-    """完成态写入失败 → 复位为 failed，绝不留在 downloading（审计 S2 核心）。"""
+def test_terminal_commit_failure_always_resets_to_failed(dl_env, monkeypatch, caplog):
+    """终态写库失败 → 一律复位为 failed，绝不留在 downloading（审计 S2 核心）。
+
+    两个终态都必须覆盖，它们都会把作品永久卡死（trigger 被"下载中"挡回、reset 也抢不到）：
+    ① 下载成功后"固化 done"的提交失败 —— 这一支还要留下"状态写入失败"日志与
+       logger.error 供运维排查；
+    ② 下载失败后"记 failed"的提交也失败 —— 一次失败不该让它永久卡死。
+
+    两者共用同一套准备（一行作品 + 让"下载结束"那次 safe_commit 失败），只有"下载本身
+    成不成功"与随之而来的收尾断言不同，故合在一起。
+    """
+    # ① 完成态写入失败
     pid = 80201
     with get_session() as db:
         _make_illust(db, pid, _urls(pid, 1))
@@ -409,9 +425,7 @@ def test_download_terminal_commit_failure_resets_to_failed(dl_env, monkeypatch, 
     assert '下载状态提交失败' in caplog.text, '必须留下 logger.error 供运维排查'
     _assert_no_dangling_state(pid)
 
-
-def test_download_failure_commit_failure_resets_to_failed(dl_env, monkeypatch):
-    """失败态写入也提交失败 → 仍要复位，不能因为一次失败而永久卡死。"""
+    # ② 失败态写入也提交失败
     pid = 80202
     urls = _urls(pid, 2)
     with get_session() as db:
@@ -492,54 +506,60 @@ def _post_download(client, pid: int):
     return client.post(f'/download/{pid}', headers={'X-CSRF-Token': token})
 
 
-def test_trigger_download_recovers_ghost_downloading(dl_env, clean_db, monkeypatch, client):
-    """状态停在 downloading 但 worker 已不在 → 自动复位并真正重新下载。"""
-    pid = 80205
-    with get_session() as db:
-        _make_illust(db, pid, _urls(pid, 1), status='downloading')
-    monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
-    executor = _SyncExecutor()
-    monkeypatch.setattr(routes_download, 'download_executor', executor)
-    assert pid not in _download_progress and pid not in _queued_downloads
+def test_ghost_downloading_detection_matrix(dl_env, clean_db, monkeypatch, client):
+    """幽灵 downloading 的判定矩阵：worker 已不在 → 复位后真的重下；还在跑 → 一根手指都不碰。
 
-    resp = _post_download(client, pid)
+    "幽灵"的定义是"状态行说 downloading，但既没有进度条目也不在队列里"。两个方向判错
+    代价都很大：把幽灵当活的 → 作品永远卡在 downloading（trigger 被"下载中"挡回、reset
+    也抢不到）；把活的当幽灵复位 → 正在跑的下载被夺走状态行，幻影 done 又回来了。
 
-    assert resp.status_code == 200 and resp.get_json()['status'] == 'accepted'
-    assert executor.submitted == [pid], '幽灵状态应被复位后继续正常下载'
-    status, paths, actions = _read(pid)
-    assert status == 'done'
-    assert paths and all(os.path.isfile(p) for p in paths)
-    with get_session() as db:
-        msgs = [log.message for log in
-                db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
-    assert any('残留 downloading' in m for m in msgs)
-    _assert_no_dangling_state(pid)
+    三种情形共用同一套准备（一行 downloading 的作品 + 同步执行器 + 一次
+    `POST /download/<pid>`），断言也同构（响应状态、提交与否、落库状态、有无复位日志），
+    只有在跑信号不同，故合成一条。
+    """
+    cases = (
+        # label, 在跑信号, 期望响应, 期望落库状态, 期望真的重下
+        ('worker 已不在（幽灵）', None, 'accepted', 'done', True),
+        ('进度中', 'progress', 'downloading', 'downloading', False),
+        ('排队中', 'queued', 'downloading', 'downloading', False),
+    )
+    for n, (label, signal, expect_resp, expect_status, expect_redownload) in enumerate(cases):
+        pid = 80205 + n
+        with get_session() as db:
+            _make_illust(db, pid, _urls(pid, 1), status='downloading')
+        if signal == 'progress':
+            _download_progress[pid] = {'current': 1, 'total': 2}
+        elif signal == 'queued':
+            _enqueue(pid)
+        else:
+            assert pid not in _download_progress and pid not in _queued_downloads, \
+                f'{label}：前提是既没有进度条目也不在队列里'
+        monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
+        executor = _SyncExecutor()
+        monkeypatch.setattr(routes_download, 'download_executor', executor)
 
+        resp = _post_download(client, pid)
 
-@pytest.mark.parametrize('signal', ['progress', 'queued'])
-def test_ghost_detection_keeps_live_download(dl_env, clean_db, monkeypatch, client, signal):
-    """实际在跑的下载（进度中/排队中）不能被误判成幽灵而复位。"""
-    pid = 80206
-    with get_session() as db:
-        _make_illust(db, pid, _urls(pid, 1), status='downloading')
-    if signal == 'progress':
-        _download_progress[pid] = {'current': 1, 'total': 2}
-    else:
-        _enqueue(pid)
-    executor = _SyncExecutor()
-    monkeypatch.setattr(routes_download, 'download_executor', executor)
-
-    resp = _post_download(client, pid)
-
-    assert resp.status_code == 200 and resp.get_json()['status'] == 'downloading'
-    assert executor.submitted == []
-    status, _, actions = _read(pid)
-    assert status == 'downloading'
-    with get_session() as db:
-        msgs = [log.message for log in
-                db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
-    assert not any('残留 downloading' in m for m in msgs)
-    assert not os.path.isdir(os.path.join(str(dl_env), str(pid)))
+        assert resp.status_code == 200, f'{label}：触发不该失败'
+        assert resp.get_json()['status'] == expect_resp, f'{label}：响应状态不对'
+        if expect_redownload:
+            assert executor.submitted == [pid], f'{label}：幽灵状态应被复位后继续正常下载'
+        else:
+            assert executor.submitted == [], f'{label}：实际在跑的下载不得再提交一个任务'
+        status, paths, _ = _read(pid)
+        assert status == expect_status, f'{label}：落库状态不对'
+        with get_session() as db:
+            msgs = [log.message for log in
+                    db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid).all()]
+        if expect_redownload:
+            assert paths and all(os.path.isfile(p) for p in paths), f'{label}：复位后必须真的下完'
+            assert any('残留 downloading' in m for m in msgs), f'{label}：复位要留痕'
+            _assert_no_dangling_state(pid)
+        else:
+            assert paths is None, f'{label}：还在跑的下载不该被动状态行'
+            assert not any('残留 downloading' in m for m in msgs), f'{label}：不得误判成幽灵'
+            assert not os.path.isdir(os.path.join(str(dl_env), str(pid))), \
+                f'{label}：不该留下文件'
 
 
 # ── 队列窗口（S3）──
@@ -875,36 +895,46 @@ def test_batch_download_submit_failure_does_not_leave_phantom_queue(dl_env, clea
 
 # ── 地址校验与凭据分级（审计 S7a）──
 
-@pytest.mark.parametrize('pid,url', [
-    (81001, 'http://i.pximg.net/img-original/img/x/1_p0.jpg'),   # 非 https（明文）
-    (81002, 'http://169.254.169.254/latest/meta-data/'),         # 云元数据端点
-    (81003, 'https://127.0.0.1/x.jpg'),                          # loopback
-    (81004, 'https://10.1.2.3/x.jpg'),                           # 私网
-    (81005, 'https://[::1]/x.jpg'),                              # IPv6 loopback
-    (81006, 'https://user:pw@i.pximg.net/x.jpg'),                # userinfo
-    (81007, 'https://i.pximg.net:8080/x.jpg'),                   # 非 443 端口
-    (81008, 'https://localhost/x.jpg'),                          # 本机主机名
-    (81009, 'https://db.internal/x.jpg'),                        # 内网主机名
-])
-def test_download_rejects_unsafe_url_without_request(dl_env, monkeypatch, pid, url):
-    """硬性不合法地址：一个请求都不发，直接判失败并留痕。"""
-    with get_session() as db:
-        _make_illust(db, pid, [url])
+def test_download_rejects_unsafe_url_without_request(dl_env, monkeypatch):
+    """硬性不合法地址矩阵：每一种形状都必须独立被拒，一个请求都不发，直接判失败并留痕。
+
+    逐例枚举而不抽样，因为这些形状堵的是不同的越权面：明文传输、云元数据端点、
+    内网/回环横移、userinfo 偷凭据、非 443 端口。前置准备与断言完全同构
+    （建一行作品 → 跑一次下载 → 看状态/路径/请求/日志），只有输入地址不同，故合成一条。
+    """
+    cases = (
+        # pid, 非法地址, 说明
+        (81001, 'http://i.pximg.net/img-original/img/x/1_p0.jpg', '非 https（明文）'),
+        (81002, 'http://169.254.169.254/latest/meta-data/', '云元数据端点'),
+        (81003, 'https://127.0.0.1/x.jpg', 'loopback'),
+        (81004, 'https://10.1.2.3/x.jpg', '私网'),
+        (81005, 'https://[::1]/x.jpg', 'IPv6 loopback'),
+        (81006, 'https://user:pw@i.pximg.net/x.jpg', 'userinfo'),
+        (81007, 'https://i.pximg.net:8080/x.jpg', '非 443 端口'),
+        (81008, 'https://localhost/x.jpg', '本机主机名'),
+        (81009, 'https://db.internal/x.jpg', '内网主机名'),
+    )
     fake = _FakeSession()
     monkeypatch.setattr(background, 'build_pixiv_session', lambda: fake)
 
-    background._download_illust(pid)
+    for pid, url, label in cases:
+        with get_session() as db:
+            _make_illust(db, pid, [url])
 
-    status, paths, actions = _read(pid)
-    assert status == 'failed'
-    assert paths is None
-    assert fake.calls == [], '非法地址绝不能发起请求'
-    with get_session() as db:
-        log = db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid,
-                                          DownloadLog.action == 'failed').first()
-        assert log is not None and '非法图片地址' in (log.message or '')
-    assert not os.path.isdir(os.path.join(str(dl_env), str(pid))), '失败后不留半成品目录'
-    _assert_no_dangling_state(pid)
+        background._download_illust(pid)
+
+        status, paths, actions = _read(pid)
+        assert status == 'failed', f'{label} 必须判失败'
+        assert paths is None, f'{label} 不得留下本地路径'
+        assert fake.calls == [], f'非法地址绝不能发起请求：{label}'
+        with get_session() as db:
+            log = db.query(DownloadLog).filter(DownloadLog.pixiv_id == pid,
+                                              DownloadLog.action == 'failed').first()
+            assert log is not None and '非法图片地址' in (log.message or ''), \
+                f'{label} 失败必须留痕（否则前端只说"下载失败"）'
+        assert not os.path.isdir(os.path.join(str(dl_env), str(pid))), \
+            f'{label} 失败后不留半成品目录'
+        _assert_no_dangling_state(pid)
 
 
 def test_download_does_not_follow_redirect(dl_env, monkeypatch):
@@ -927,46 +957,47 @@ def test_download_does_not_follow_redirect(dl_env, monkeypatch):
     _assert_no_dangling_state(pid)
 
 
-def test_download_uses_cookie_session_for_allowlisted_host(dl_env, monkeypatch):
-    """白名单内主机（Pixiv 官方图床）继续走带凭据会话。"""
-    pid = 81030
-    urls = _urls(pid, 1)
-    with get_session() as db:
-        _make_illust(db, pid, urls)
-    cookie_fake = _FakeSession()
-    anon_fake = _FakeSession()
-    monkeypatch.setattr(background, 'build_pixiv_session', lambda: cookie_fake)
-    monkeypatch.setattr(background, 'build_credentialless_session', lambda: anon_fake)
+def test_download_picks_session_by_credential_classification(dl_env, monkeypatch):
+    """凭据分级（S7a+S7b 共用判定）：白名单内走带凭据会话，白名单外公网 https 走无凭据会话。
 
-    background._download_illust(pid)
+    两个方向错了都是事故：白名单内误用无凭据会话 → 图床 403，图下不动；白名单外带上
+    会话级 Cookie → 等于把 PHPSESSID 发给第三方主机（`build_pixiv_session` 的 Cookie 挂在
+    **会话级** header 上，requests 会把它发给任意主机，分级判定正是为堵这个洞）。
 
-    assert _read(pid)[0] == 'done'
-    assert cookie_fake.calls == urls
-    assert anon_fake.calls == [], '白名单内不该动用无凭据会话'
+    两例共用同一套准备（一行地址 + 两个替身会话 + 两个构造器补丁）与同一组断言（该走的
+    那个拿到调用、另一个一次都没被用到、两个都要关），只有输入地址与期望会话不同，
+    故合成一条。
+    """
+    cases = (
+        # pid, 地址, 是否应当走带凭据会话, 说明
+        (81030, _urls(81030, 1)[0], True, '白名单内主机（Pixiv 官方图床）'),
+        (81031, 'https://img-cdn.example.net/original/p0.jpg', False, '白名单外公网 https 主机'),
+    )
+    for pid, url, credentialed, label in cases:
+        with get_session() as db:
+            _make_illust(db, pid, [url])
+        cookie_fake = _FakeSession()
+        anon_fake = _FakeSession()
+        if not credentialed:
+            anon_fake.headers = {}      # 无凭据会话的替身：没有会话级 Cookie 头
+        monkeypatch.setattr(background, 'build_pixiv_session', lambda: cookie_fake)
+        monkeypatch.setattr(background, 'build_credentialless_session', lambda: anon_fake)
 
+        background._download_illust(pid)
 
-def test_download_uses_credentialless_session_outside_allowlist(dl_env, monkeypatch):
-    """白名单外的公网 https 主机：下载不中断，但绝不携带凭据（S7a+S7b 共用判定）。"""
-    pid = 81031
-    url = 'https://img-cdn.example.net/original/p0.jpg'
-    with get_session() as db:
-        _make_illust(db, pid, [url])
-    cookie_fake = _FakeSession()
-    anon_fake = _FakeSession()
-    anon_fake.headers = {}          # 无凭据会话的替身：没有会话级 Cookie 头
-    monkeypatch.setattr(background, 'build_pixiv_session', lambda: cookie_fake)
-    monkeypatch.setattr(background, 'build_credentialless_session', lambda: anon_fake)
-
-    background._download_illust(pid)
-
-    status, paths, _ = _read(pid)
-    assert status == 'done', '换图床域名不该让下载中断'
-    assert paths and os.path.isfile(paths[0])
-    assert anon_fake.calls == [url], '白名单外主机必须走无凭据会话'
-    assert cookie_fake.calls == [], '带凭据会话不得访问白名单外主机'
-    assert 'Cookie' not in anon_fake.headers
-    assert anon_fake.closed and cookie_fake.closed, '两个 session 都要在 finally 里关闭'
-    _assert_no_dangling_state(pid)
+        status, paths, _ = _read(pid)
+        assert status == 'done', f'{label}：换图床域名不该让下载中断'
+        assert paths and os.path.isfile(paths[0]), f'{label}：文件必须真的落盘'
+        if credentialed:
+            assert cookie_fake.calls == [url], f'{label}：白名单内必须走带凭据会话'
+            assert anon_fake.calls == [], f'{label}：白名单内不该动用无凭据会话'
+            assert cookie_fake.closed, '用过的会话要在 finally 里关闭'
+        else:
+            assert anon_fake.calls == [url], f'{label}：白名单外主机必须走无凭据会话'
+            assert cookie_fake.calls == [], f'{label}：带凭据会话不得访问白名单外主机'
+            assert 'Cookie' not in anon_fake.headers, f'{label}：无凭据会话不得带任何 Cookie 头'
+            assert anon_fake.closed and cookie_fake.closed, '两个 session 都要在 finally 里关闭'
+        _assert_no_dangling_state(pid)
 
 
 # ── 中途取消（审计 S18 补齐）──
@@ -1036,8 +1067,14 @@ def test_download_cancelled_before_start_does_nothing(dl_env, monkeypatch):
     assert fake.calls == _urls(pid, 1)
 
 
-def test_cancel_route_marks_downloading_and_returns_cancelling(dl_env, clean_db, client):
-    """`POST /download/cancel/<pid>`：下载中 → cancelling + 取消标记 + 退出队列。"""
+def test_cancel_route_cancels_downloading_and_rejects_idle_or_missing(dl_env, clean_db, client):
+    """`POST /download/cancel/<pid>` 的三种响应：下载中 → cancelling；未在下载中 → 400；
+    作品不存在 → 404（前端据此区分"不用管"和"刷新列表"）。
+
+    下载中那一支还要确认真的放下了 worker 会看的取消标记、并把它移出队列 —— 只回一个
+    200 而这两件事没做，界面显示"正在取消"但下载永远不停。三种响应是同一条路由的契约，
+    共用同一套准备（建行 + 发一次 POST），故合在一起。
+    """
     pid = 81103
     with get_session() as db:
         _make_illust(db, pid, _urls(pid, 1), status='downloading')
@@ -1050,9 +1087,6 @@ def test_cancel_route_marks_downloading_and_returns_cancelling(dl_env, clean_db,
     assert pid in download_cancellations, 'worker 靠这个标记在下一个检查点退出'
     assert not is_queued_download(pid), '取消必须把它移出队列'
 
-
-def test_cancel_route_rejects_idle_and_missing_illust(dl_env, clean_db, client):
-    """未在下载中 → 400；作品不存在 → 404（前端据此区分"不用管"和"刷新列表"）。"""
     idle_pid = 81104
     with get_session() as db:
         _make_illust(db, idle_pid, _urls(idle_pid, 1), status='done')

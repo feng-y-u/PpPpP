@@ -82,21 +82,32 @@ class TestCsrfProtection:
         ('POST', '/api/cache/items/999999/delete'),
     ]
 
-    @pytest.mark.parametrize('method,path', MUTATING_ENDPOINTS,
-                             ids=[f'{m} {p}' for m, p in MUTATING_ENDPOINTS])
-    def test_all_mutating_endpoints_require_csrf(self, client, method, path):
-        """每个修改型端点缺 CSRF 头一律 403 —— 防止将来新增路由漏挂装饰器。"""
-        resp = client.open(path, method=method, json={})
+    def test_all_mutating_endpoints_require_csrf(self, client):
+        """每个修改型端点缺 CSRF 头一律 403 —— 防止将来新增路由漏挂装饰器。
 
-        assert resp.status_code == 403, f'{method} {path} 未受 CSRF 保护'
+        矩阵写成一个循环而不是 `parametrize`：这是**一个不变式**（"缺头就 403"），
+        `MUTATING_ENDPOINTS` 里每条只是输入变体，失败信息带 `{method} {path}` 就能定位。
+        末尾额外用"带真实 JSON body"的请求复验一次：`_csrf_required` 是装饰器，
+        body 解析（以及任何视图逻辑）都不得越过它 —— 空 body 与有 body 都得 403。
+        """
+        for method, path in self.MUTATING_ENDPOINTS:
+            resp = client.open(path, method=method, json={})
+
+            assert resp.status_code == 403, f'{method} {path} 未受 CSRF 保护'
+            assert resp.get_json()['error'] == 'CSRF校验失败', f'{method} {path} 的错误文案不对'
+
+        resp = client.post('/api/blocked-tags',
+                           data=json.dumps({'tag': 'test'}),
+                           content_type='application/json')
+        assert resp.status_code == 403, '带真实 JSON body 的 POST 同样必须 403'
         assert resp.get_json()['error'] == 'CSRF校验失败'
 
     def test_mutating_endpoint_matrix_is_complete(self):
         """矩阵必须覆盖源码里所有修改型路由（将来新增路由时这里会先失败）。
 
         只做静态对账：从 `routes_*.py` 抓 `@bp.route(..., methods=[...])` 与矩阵比对。
-        "装饰器是否真的挂在函数上"由参数化用例负责 —— 两件事都得有人管，缺一个都会
-        让"漏挂 CSRF"重新变成静默风险。
+        "装饰器是否真的挂在函数上"由矩阵循环（`test_all_mutating_endpoints_require_csrf`）
+        负责 —— 两件事都得有人管，缺一个都会让"漏挂 CSRF"重新变成静默风险。
         """
         pattern = re.compile(r"""@bp\.route\(\s*['"]([^'"]+)['"]([^)]*)\)""", re.S)
         found = set()
@@ -111,13 +122,6 @@ class TestCsrfProtection:
         covered = {(method, _route_shape(path)) for method, path in self.MUTATING_ENDPOINTS}
 
         assert not found - covered, f'以下修改型端点未被 CSRF 矩阵覆盖：{sorted(found - covered)}'
-
-    def test_post_without_csrf_returns_403(self, client):
-        resp = client.post('/api/blocked-tags',
-                           data=json.dumps({'tag': 'test'}),
-                           content_type='application/json')
-        assert resp.status_code == 403
-        assert resp.get_json()['error'] == 'CSRF校验失败'
 
     def test_post_with_valid_csrf_succeeds(self, client, clean_db):
         import time
@@ -206,35 +210,26 @@ class TestSearch:
         """轮询异步搜索任务直到终态（done 200 / error 401·502 / 丢失 404）。"""
         return _poll_search_status(client, task_id, timeout)
 
-    @patch('app.browse_discovery')
-    def test_empty_query_calls_discovery(self, mock_discovery, client):
-        mock_discovery.return_value = ([], False)
-        resp = client.get('/search')
-        assert resp.status_code == 200
-        task_id = resp.get_json()['task_id']
-        final = self._poll(client, task_id)
-        assert final.get_json()['status'] == 'done'
-        mock_discovery.assert_called_once()
+    def test_search_dispatches_to_the_matching_backend(self, client):
+        """`type` 决定派发到哪个搜索后端，空查询回退 `browse_discovery`。
 
-    @patch('app.search_by_tag')
-    def test_search_by_tag_called(self, mock_search, client):
-        mock_search.return_value = ([], False)
-        resp = client.get('/search?type=tag&query=初音ミク')
-        assert resp.status_code == 200
-        task_id = resp.get_json()['task_id']
-        self._poll(client, task_id)
-        mock_search.assert_called_once()
-        args, kwargs = mock_search.call_args
-        assert '初音ミク' in args
-
-    @patch('app.search_by_user')
-    def test_search_by_user_called(self, mock_search, client):
-        mock_search.return_value = ([], False)
-        resp = client.get('/search?type=user&query=12345')
-        assert resp.status_code == 200
-        task_id = resp.get_json()['task_id']
-        self._poll(client, task_id)
-        mock_search.assert_called_once()
+        三条输入变体、**同一个不变式**（路由按 type 分派 + 查询词原样透传），
+        故写成一个循环而不是三条用例。
+        """
+        for target, path, said in (
+                ('browse_discovery', '/search', None),
+                ('search_by_tag', '/search?type=tag&query=初音ミク', '初音ミク'),
+                ('search_by_user', '/search?type=user&query=12345', None)):
+            with patch(f'app.{target}') as mock_fn:
+                mock_fn.return_value = ([], False)
+                resp = client.get(path)
+                assert resp.status_code == 200, f'{target} 的搜索入口应返回 200'
+                final = self._poll(client, resp.get_json()['task_id'])
+                assert final.get_json()['status'] == 'done', f'{target} 应正常收尾'
+                mock_fn.assert_called_once()
+                if said is not None:
+                    args, _ = mock_fn.call_args
+                    assert said in args, f'查询词必须原样传给 {target}'
 
     @patch('app.paginated_search')
     def test_search_user_passes_detail_budget(self, mock_paginated, client):
@@ -273,17 +268,16 @@ class TestSearch:
         self._poll(client, resp.get_json()['task_id'])
         assert mock_paginated.call_args[0][3] is None, '旧步长游标应被丢弃，按新搜索处理'
 
-    def test_search_user_non_digit_returns_400(self, client):
-        resp = client.get('/search?type=user&query=abc')
-        assert resp.status_code == 400
-
     @patch('app.paginated_search')
     def test_new_search_cancels_running_task(self, mock_paginated, client):
-        """搜索中途改条件重搜：提交新任务自动取消在途旧任务。
+        """搜索中途改条件重搜：提交新任务的请求内**同步**取消在途旧任务。
 
-        旧任务在下一个检查点（翻页前/后、详情请求前）以 cancelled 终态结束，
-        不再继续烧令牌桶；新任务不受影响，正常完成。
+        旧任务在下一个检查点（翻页前/后、详情请求前）以 cancelled 终态结束，不再继续
+        烧令牌桶；新任务不受影响，正常完成。断言全部来自**同一套**"旧任务挂起等取消"
+        的数据准备：cancel_event 当场被置位（不等旧任务自然结束）、旧任务以
+        cancelled + 零计数收尾（cancelled 不是错误，不走 502）、新任务正常 done。
         """
+        from runtime import _search_tasks
         started = threading.Event()
         calls = []
 
@@ -308,6 +302,8 @@ class TestSearch:
         resp2 = client.get('/search?type=user&query=12345&min_bookmarks=20')
         task2 = resp2.get_json()['task_id']
         assert task1 != task2
+        assert _search_tasks[task1]['cancel_event'].is_set(), \
+            '取消必须在提交新任务的请求内同步完成，不等旧任务自然结束'
 
         final1 = self._poll(client, task1)
         assert final1.status_code == 200, 'cancelled 不是错误，不应走 502'
@@ -320,33 +316,15 @@ class TestSearch:
         assert final2.get_json()['status'] == 'done'
         assert len(final2.get_json()['results']) == 1
 
-    @patch('app.paginated_search')
-    def test_cancel_event_set_synchronously_on_submit(self, mock_paginated, client):
-        """取消在提交新任务的请求内同步完成，不等旧任务自然结束。"""
-        from runtime import _search_tasks
-        started = threading.Event()
+    def test_invalid_search_params_return_400(self, client):
+        """非法查询参数在提交任务**之前**就被拒（不是先建任务再报错）。
 
-        def blocking_fn(*args, **kwargs):
-            started.set()
-            deadline = time.time() + 10
-            while time.time() < deadline and not fetcher._cancelled():
-                time.sleep(0.01)
-            raise fetcher.SearchCancelledError()
-
-        mock_paginated.side_effect = blocking_fn
-        resp1 = client.get('/search?type=user&query=111')
-        task1 = resp1.get_json()['task_id']
-        assert started.wait(5), '旧任务应已开始运行'
-
-        client.get('/search?type=user&query=222')   # 提交新搜索
-        assert _search_tasks[task1]['cancel_event'].is_set()
-
-        final = self._poll(client, task1)
-        assert final.get_json()['status'] == 'cancelled'
-
-    def test_search_long_query_returns_400(self, client):
-        resp = client.get('/search?type=tag&query=' + 'a' * 201)
-        assert resp.status_code == 400
+        两档输入同一个不变式（参数校验前置），故写成一个循环。
+        """
+        for label, qs in (('作者 id 非数字', 'type=user&query=abc'),
+                          ('查询串超长（>200 字符）', 'type=tag&query=' + 'a' * 201)):
+            resp = client.get(f'/search?{qs}')
+            assert resp.status_code == 400, f'{label} 必须 400'
 
     @patch('app.paginated_search')
     def test_search_with_all_params(self, mock_paginated, client):
@@ -374,40 +352,29 @@ class TestSearch:
         args, kwargs = mock_discovery.call_args
         assert args[1] == 'date_d'
 
-    @patch('app.paginated_search', side_effect=RuntimeError('boom'))
-    def test_task_error_returns_502(self, mock_paginated, client):
-        resp = client.get('/search?type=tag&query=test')
-        assert resp.status_code == 200
-        task_id = resp.get_json()['task_id']
-        final = self._poll(client, task_id)
-        assert final.status_code == 502
-        assert final.get_json()['error']
-        assert final.get_json()['progress'] == _ZERO_PROGRESS
+    def test_task_error_maps_exception_to_status_code(self, client):
+        """任务内异常按类别映射成 HTTP 状态码：未预期异常 502、凭据失效 401。
 
-    def test_task_auth_error_returns_401(self, client):
-        from fetcher import PixivAuthError
-        with patch('app.search_by_tag', side_effect=PixivAuthError('auth')):
-            resp = client.get('/search?type=tag&query=test')
-            task_id = resp.get_json()['task_id']
-            final = self._poll(client, task_id)
-            assert final.status_code == 401
-            assert final.get_json()['progress'] == _ZERO_PROGRESS
+        两档都必须是"终态 + 计数归零"（`error`/`401` 时带着非零 accepted，前端就会在
+        空网格上显示幽灵"已找到 N 件"）；502 额外必须带 `error` 说明。分类矩阵写成一个
+        循环：这是同一个不变式（异常 → 状态码 + 终态形状），只有输入与期望值不同。
+        """
+        for label, target, exc, expected in (
+                ('未预期异常', 'paginated_search', RuntimeError('boom'), 502),
+                ('凭据失效', 'search_by_tag', fetcher.PixivAuthError('auth'), 401)):
+            with patch(f'app.{target}', side_effect=exc):
+                resp = client.get('/search?type=tag&query=test')
+                assert resp.status_code == 200, f'{label}：提交搜索本身应当成功'
+                final = self._poll(client, resp.get_json()['task_id'])
+                assert final.status_code == expected, f'{label} 应映射成 {expected}'
+                assert final.get_json()['progress'] == _ZERO_PROGRESS, \
+                    f'{label}：计数必须归零，实际 {final.get_json()["progress"]}'
+                if expected == 502:
+                    assert final.get_json()['error'], f'{label}：502 必须带 error 说明'
 
     def test_task_not_found_returns_404(self, client):
         resp = client.get('/api/search/status/no-such-task')
         assert resp.status_code == 404
-
-    def test_task_cleanup_after_ttl(self, client, monkeypatch):
-        import app
-        with patch('app.search_by_tag', return_value=([], False)):
-            resp = client.get('/search?type=tag&query=test')
-            task_id = resp.get_json()['task_id']
-            self._poll(client, task_id)
-        # 缩短 TTL 并强制清理
-        monkeypatch.setattr('app.SEARCH_TASK_TTL', -1)
-        app._cleanup_search_tasks()
-        r = client.get(f'/api/search/status/{task_id}')
-        assert r.status_code == 404
 
 
 class TestSearchTaskSnapshot:
@@ -494,43 +461,44 @@ class TestSearchTaskSnapshot:
         # 预览有渲染上限，但 accepted 是"已确认件数"：照实累计、不随渲染上限打折
         assert data['progress']['accepted'] == ITEMS_PER_PAGE + 5
 
-    def test_rate_limited_finishes_partial_keeping_preview(self, client):
-        """限流截断：HTTP 200 + partial，保留已发布预览、complete=false、带 warning。"""
+    def test_rate_limited_finishes_partial_keeping_preview_and_cursor(self, client):
+        """限流截断 → HTTP 200 + partial，载荷形状固定：保留已发布预览、complete=false、
+        带 warning、不伪造 has_more；游标**退回输入值**（没有输入游标时就是 None）。
+
+        有/无输入游标只是同一个 partial 收尾路径的两档输入（前置准备、断言都同构），
+        故写成一个循环：翻页中途被限流时必须退回原游标，用户冷却后才能重试同一页。
+        """
         preview = {'pixiv_id': 201, 'title': 'p', 'id': None}
-
-        def fake_search_by_tag(*args, **kwargs):
-            kwargs['progress']({'type': 'result', 'result': preview})
-            raise fetcher.SearchRateLimitedError('详情请求被限流')
-
-        with patch('app.search_by_tag', side_effect=fake_search_by_tag):
-            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
-            final = _poll_search_status(client, task_id)
-
-        assert final.status_code == 200, 'partial 是"部分成功"（可重试），不应走 502'
-        data = final.get_json()
-        assert data['status'] == 'partial'
-        assert [r['pixiv_id'] for r in data['results']] == [201]
-        assert data['complete'] is False
-        assert data['warning']
-        assert data['has_more'] is False, 'partial 不伪造 has_more'
-        assert data['cursor'] is None
-
-    def test_partial_keeps_input_cursor(self, client):
-        """翻页中途被限流：游标退回输入值，用户冷却后可重试同一页。"""
         cursor = fetcher.encode_cursor({
             'type': 'tag', 'query': 'test', 'sort': 'date_d', 'tag_mode': 'or',
             'r18_mode': 'safe', 'min_bookmarks': 0,
             'pixiv_page': 3, 'skip_count': 0, 'created_at': int(time.time()),
         })
-        with patch('app.search_by_tag', side_effect=fetcher.SearchRateLimitedError('限流')):
-            resp = client.get(f'/search?type=tag&query=test&cursor={cursor}')
-            assert resp.status_code == 200
-            final = _poll_search_status(client, resp.get_json()['task_id'])
 
-        data = final.get_json()
-        assert data['status'] == 'partial'
-        assert data['cursor'] == cursor, '输入游标不得前移'
-        assert data['has_more'] is False
+        def fake_search_by_tag(*args, **kwargs):
+            kwargs['progress']({'type': 'result', 'result': preview})
+            raise fetcher.SearchRateLimitedError('详情请求被限流')
+
+        for label, input_cursor, expected_cursor in (
+                ('首页被限流（无输入游标）', None, None),
+                ('翻页中途被限流', cursor, cursor)):
+            qs = '/search?type=tag&query=test'
+            if input_cursor:
+                qs += f'&cursor={input_cursor}'
+            with patch('app.search_by_tag', side_effect=fake_search_by_tag):
+                resp = client.get(qs)
+                assert resp.status_code == 200, f'{label}：提交搜索本身应当成功'
+                final = _poll_search_status(client, resp.get_json()['task_id'])
+
+            assert final.status_code == 200, f'{label}：partial 是"部分成功"，不应走 502'
+            data = final.get_json()
+            assert data['status'] == 'partial', f'{label}：状态应为 partial'
+            assert [r['pixiv_id'] for r in data['results']] == [201], \
+                f'{label}：已发布预览必须保留'
+            assert data['complete'] is False, f'{label}：complete 必须为 False'
+            assert data['warning'], f'{label}：partial 必须带 warning 说明'
+            assert data['has_more'] is False, f'{label}：partial 不伪造 has_more'
+            assert data['cursor'] == expected_cursor, f'{label}：游标应退回输入值'
 
     def test_partial_does_not_echo_discarded_cursor(self, client):
         """被丢弃的游标（步长不匹配）不得回吐：那个位置本次任务从未翻到。
@@ -554,14 +522,31 @@ class TestSearchTaskSnapshot:
         assert data['status'] == 'partial'
         assert data['cursor'] is None, '被丢弃的游标不能回吐（该位置从未被本次任务使用）'
 
-    def test_partial_task_cleaned_up_after_ttl(self, client, monkeypatch):
-        """partial 是终态：过了 TTL 必须和 done/error 一样被清理，否则任务表只增不减。"""
-        with patch('app.search_by_tag', side_effect=fetcher.SearchRateLimitedError('限流')):
-            task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
-            assert _poll_search_status(client, task_id).get_json()['status'] == 'partial'
-        monkeypatch.setattr('app.SEARCH_TASK_TTL', -1)
-        app._cleanup_search_tasks()
-        assert client.get(f'/api/search/status/{task_id}').status_code == 404
+    def test_terminal_tasks_cleaned_up_after_ttl(self, client, monkeypatch):
+        """终态任务（done 与 partial）过了 TTL 都必须被清理，否则任务表只增不减。
+
+        `_cleanup_search_tasks` 只回收**终态** —— 两档输入是同一个不变式，只有"怎么走到
+        终态"不同（正常收尾 / 限流截断）。"partial 也是终态"曾经是漏掉的那一档，所以
+        它必须在这条循环里，而不是被 done 那条顺带覆盖。
+        """
+        cases = (
+            ('done', patch('app.search_by_tag', return_value=([], False))),
+            ('partial', patch('app.search_by_tag',
+                              side_effect=fetcher.SearchRateLimitedError('限流'))),
+        )
+        for label, patcher in cases:
+            with patcher:
+                task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
+                final = _poll_search_status(client, task_id)
+                assert final.get_json()['status'] == label, \
+                    f'{label} 档的终态不对：{final.get_json()}'
+
+            # 缩短 TTL 并强制清理（用 context：清完立刻还原，免得影响下一档的轮询）
+            with monkeypatch.context() as m:
+                m.setattr(app, 'SEARCH_TASK_TTL', -1)
+                app._cleanup_search_tasks()
+                assert client.get(f'/api/search/status/{task_id}').status_code == 404, \
+                    f'{label} 是终态：过了 TTL 必须被清理'
 
     def test_error_terminal_drops_previews(self, client):
         """error 终态不得带预览：已发布的预览可能对应随后回滚的行（勘误第 2 条）。"""
@@ -605,13 +590,8 @@ class TestSearchTaskSnapshot:
         assert data['progress'] == _ZERO_PROGRESS, \
             f'取消同样要清计数（幽灵"已找到 N 件"）；实际 progress={data["progress"]}'
 
-    @pytest.mark.parametrize('target,path', [
-        ('search_by_tag', '/search?type=tag&query=test'),
-        ('search_by_user', '/search?type=user&query=12345'),
-        ('browse_discovery', '/search'),
-    ])
-    def test_publisher_goes_to_search_fn_not_paginated_search(self, target, path, client):
-        """publisher 只注入 `search_by_*` / `browse_discovery`。
+    def test_publisher_goes_to_search_fn_not_paginated_search(self, client):
+        """publisher 只注入 `search_by_*` / `browse_discovery`（三条输入变体一次覆盖）。
 
         `paginated_search` 只看页边界、看不到条目，收下 `progress` 也只能原样丢掉
         （执行勘误第 1 条：那是"接线通过、测试全绿、端到端零事件"的静默陷阱）。
@@ -621,13 +601,21 @@ class TestSearchTaskSnapshot:
         def spy_paginated(*args, **kwargs):
             return real_paginated(*args, **kwargs)
 
-        with patch('app.paginated_search', side_effect=spy_paginated) as mock_paginated, \
-                patch(f'app.{target}', return_value=([], False)) as mock_fn:
-            resp = client.get(path)
-            assert _poll_search_status(client, resp.get_json()['task_id']).get_json()['status'] == 'done'
+        for target, path in (
+                ('search_by_tag', '/search?type=tag&query=test'),
+                ('search_by_user', '/search?type=user&query=12345'),
+                ('browse_discovery', '/search')):
+            with patch('app.paginated_search', side_effect=spy_paginated) as mock_paginated, \
+                    patch(f'app.{target}', return_value=([], False)) as mock_fn:
+                resp = client.get(path)
+                assert _poll_search_status(
+                    client, resp.get_json()['task_id']).get_json()['status'] == 'done', \
+                    f'{target} 那条路应正常收尾'
 
-        assert 'progress' not in mock_paginated.call_args.kwargs
-        assert callable(mock_fn.call_args.kwargs['progress'])
+                assert 'progress' not in mock_paginated.call_args.kwargs, \
+                    f'{target} 的 publisher 不得进 paginated_search'
+                assert callable(mock_fn.call_args.kwargs['progress']), \
+                    f'{target} 必须收到 publisher'
 
     def test_published_preview_is_a_snapshot_owned_by_task(self, client):
         """任务存的是**副本**，不是调用方持有的那个预览 dict。
@@ -984,11 +972,6 @@ class TestDetailPagePreviewFallback:
 
 
 class TestRoutes:
-    def test_csrf_token(self, client):
-        resp = client.get('/csrf-token')
-        assert resp.status_code == 200
-        assert 'token' in resp.get_json()
-
     def test_gallery_page(self, client):
         resp = client.get('/gallery')
         assert resp.status_code == 200
@@ -1039,13 +1022,17 @@ class TestSessionFactory:
         monkeypatch.setattr(pixiv_client, '_cookie_value', 'test')
         return pixiv_client.build_pixiv_session()
 
-    def test_proxy_applied(self, monkeypatch):
-        s = self._build(monkeypatch, proxy='http://127.0.0.1:7890')
-        assert s.proxies == {'https': 'http://127.0.0.1:7890', 'http': 'http://127.0.0.1:7890'}
+    def test_proxy_applied_only_when_configured(self, monkeypatch):
+        """PROXY 设了才挂上（http/https 两键都要），为空即直连（`proxies == {}`）。
 
-    def test_no_proxy_by_default(self, monkeypatch):
-        s = self._build(monkeypatch, proxy='')
-        assert s.proxies == {}
+        两档输入共用同一套前置（`_build`）、断言同构，故写成一个循环。
+        """
+        for proxy, expected in (
+                ('', {}),
+                ('http://127.0.0.1:7890',
+                 {'https': 'http://127.0.0.1:7890', 'http': 'http://127.0.0.1:7890'})):
+            s = self._build(monkeypatch, proxy=proxy)
+            assert s.proxies == expected, f'proxy={proxy!r} 时 proxies 应为 {expected}'
 
     def test_pixiv_headers_present(self, monkeypatch):
         s = self._build(monkeypatch)
@@ -1078,14 +1065,18 @@ class TestCollectionApiRemoved:
         ('POST', '/api/favorite/999999'),
     ]
 
-    @pytest.mark.parametrize('method,path', REMOVED_ENDPOINTS,
-                             ids=[f'{m} {p}' for m, p in REMOVED_ENDPOINTS])
-    def test_removed_collection_endpoints_return_404(self, client, method, path):
+    def test_removed_collection_endpoints_return_404(self, client):
+        """13 个已删端点（方法+路径矩阵）都必须 404。
+
+        矩阵写成一个循环而不是 `parametrize`：这是**一个不变式**（"收藏夹端点整块摘掉"），
+        每条只是输入变体，失败信息带 `{method} {path}` 就能定位到具体端点。
+        """
         # 带合法 CSRF token 与 body：403/400 都不算通过，只有"路由不存在"才是 404
         token = client.get('/csrf-token').get_json()['token']
-        resp = client.open(path, method=method, json={},
-                           headers={'X-CSRF-Token': token})
-        assert resp.status_code == 404, f'{method} {path} 仍被注册'
+        for method, path in self.REMOVED_ENDPOINTS:
+            resp = client.open(path, method=method, json={},
+                               headers={'X-CSRF-Token': token})
+            assert resp.status_code == 404, f'{method} {path} 仍被注册'
 
     def test_collections_blueprint_not_registered(self, app):
         """蓝图数 7 → 6：collections 蓝图必须整块摘掉，而不是留着空蓝图。"""
@@ -1096,8 +1087,14 @@ class TestCollectionApiRemoved:
 
 
 class TestGalleryTriggersBookmarkFill:
-    def test_gallery_kicks_fill_for_zero_bookmark_records(self, client, clean_db, monkeypatch):
-        """图库页返回收藏数=0 且未补全原图的记录时，应触发后台详情补全。"""
+    def test_gallery_kicks_fill_only_for_unfilled_zero_bookmark_records(
+            self, client, clean_db, monkeypatch):
+        """图库页只对"收藏数=0 **且**没有原图 URL"的记录触发后台详情补全。
+
+        两档输入同一个不变式（补全触发判定），只有"是否已补全 / 收藏数"不同：
+        - 收藏数=0 且未补全 → 必须进补全名单；
+        - 收藏数 1500 或已带原图 URL → 不进（前者不需要补，后者补过了别重复拉）。
+        """
         import fetcher
         called = []
         monkeypatch.setattr(fetcher, '_kick_background_fill', lambda ids: called.append(list(ids)))
@@ -1105,27 +1102,18 @@ class TestGalleryTriggersBookmarkFill:
                                    download_status='done'))
         clean_db.add(models.Illust(pixiv_id=91002, title='b', bookmark_count=1500,
                                    download_status='done'))
-        clean_db.commit()
-
-        r = client.get('/api/gallery?limit=10')
-        assert r.status_code == 200
-        assert called and 91001 in called[0]
-        assert 91002 not in called[0]
-
-    def test_gallery_skips_fill_for_filled_records(self, client, clean_db, monkeypatch):
-        """已补全（有原图 URL）的 0 收藏记录不应重复触发补全。"""
-        import fetcher
-        called = []
-        monkeypatch.setattr(fetcher, '_kick_background_fill', lambda ids: called.append(list(ids)))
-        illust = models.Illust(pixiv_id=91003, title='c', bookmark_count=0,
+        filled = models.Illust(pixiv_id=91003, title='c', bookmark_count=0,
                                download_status='done')
-        illust.original_urls_list = ['https://i.pximg.net/91003_p0.jpg']
-        clean_db.add(illust)
+        filled.original_urls_list = ['https://i.pximg.net/91003_p0.jpg']
+        clean_db.add(filled)
         clean_db.commit()
 
         r = client.get('/api/gallery?limit=10')
         assert r.status_code == 200
-        assert called == [] or 91003 not in [x for sub in called for x in sub]
+        assert called and 91001 in called[0], '未补全的 0 收藏记录必须触发补全'
+        assert 91002 not in called[0], '收藏数非 0 的记录不需要补全'
+        assert 91003 not in [pid for batch in called for pid in batch], \
+            '已补全（有原图 URL）的记录不得重复触发补全'
 
 
 class TestGalleryR18Filter:
@@ -1168,17 +1156,18 @@ class TestFollowingRouteR18:
         monkeypatch.setattr(routes_search, 'fetch_following', fake_following)
         return calls
 
-    def test_following_default_safe(self, client, monkeypatch):
-        calls = self._patch_following(monkeypatch)
-        resp = client.get('/api/following')
-        assert resp.status_code == 200
-        assert calls and calls[0]['r18_mode'] == 'safe'
+    def test_following_r18_mode_defaults_to_safe(self, client, monkeypatch):
+        """缺省 safe（默认不显示 R18），显式 `r18_mode=all` 才原样透传给 `fetch_following`。
 
-    def test_following_explicit_all(self, client, monkeypatch):
-        calls = self._patch_following(monkeypatch)
-        resp = client.get('/api/following?r18_mode=all')
-        assert resp.status_code == 200
-        assert calls and calls[0]['r18_mode'] == 'all'
+        两档输入同一个不变式（缺省值 + 透传），前置是同一个 `_patch_following`，
+        断言同构，故写成一个循环。
+        """
+        for qs, expected in (('', 'safe'), ('?r18_mode=all', 'all')):
+            calls = self._patch_following(monkeypatch)
+            resp = client.get('/api/following' + qs)
+            assert resp.status_code == 200, f'/api/following{qs} 应返回 200'
+            assert calls and calls[0]['r18_mode'] == expected, \
+                f'{qs or "缺省"} 时 fetch_following 收到的 r18_mode 应为 {expected}，实际 {calls}'
 
 
 class TestGalleryDeleteOrphans:
@@ -1391,138 +1380,107 @@ class TestDownloadFileZip:
         monkeypatch.setattr(routes_download.tempfile, 'NamedTemporaryFile', _factory)
         return created
 
-    def test_download_file_zip_memory_below_threshold(self, client, clean_db, tmp_path, monkeypatch):
-        """小包仍然走内存缓冲：行为不变，且不产生任何临时文件。"""
-        created = self._spy_tempfile(monkeypatch)
-        self._make_illust(clean_db, tmp_path, 88001, [100, 200, 300])
+    def test_threshold_switches_memory_buffer_to_tempfile(self, client, clean_db, tmp_path,
+                                                          monkeypatch):
+        """阈值之内走内存缓冲（不落临时文件），超过阈值改落临时文件 —— 包内容两者一致。
 
+        两档是**同一个不变式**（阈值决定缓冲方式），故合在一起：先后各跑一次，而不是
+        拆成两条只有"阈值/期望"不同的用例。小包仍然走内存才说明"大包才落盘"没被改坏。
+        """
+        created = self._spy_tempfile(monkeypatch)
+
+        # 档 1：阈值内（默认 200MB）→ 内存缓冲，一份临时文件都不建
+        self._make_illust(clean_db, tmp_path, 88001, [100, 200, 300])
         resp = client.get('/download_file/88001')
 
         assert resp.status_code == 200
         assert resp.mimetype == 'application/zip'
         assert 'zip-me.zip' in resp.headers['Content-Disposition']
+        assert created == [], '阈值内不该落临时文件'
         with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
             assert sorted(zf.namelist()) == ['zip-me_p0.jpg', 'zip-me_p1.jpg', 'zip-me_p2.jpg']
             assert zf.read('zip-me_p1.jpg') == b'x' * 200
-        assert created == [], '阈值内不该落临时文件'
 
-    def test_download_file_zip_tempfile_above_threshold(self, client, clean_db, tmp_path,
-                                                        monkeypatch):
-        """超过阈值改落临时文件：包内容一致，且只有一份临时文件。"""
-        created = self._spy_tempfile(monkeypatch)
+        # 档 2：阈值压到 10 字节 → 落临时文件，内容与内存档一致
         monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
         self._make_illust(clean_db, tmp_path, 88002, [100, 200, 300])
-
         resp = client.get('/download_file/88002')
 
         assert resp.status_code == 200
         assert resp.mimetype == 'application/zip'
+        assert len(created) == 1, f'超过阈值应当只建一份临时文件：{created}'
         with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
             assert sorted(zf.namelist()) == ['zip-me_p0.jpg', 'zip-me_p1.jpg', 'zip-me_p2.jpg']
             assert zf.read('zip-me_p2.jpg') == b'x' * 300
-        assert len(created) == 1, f'应当只建一份临时文件：{created}'
         resp.close()
 
-    def test_download_file_tempfile_removed_after_request(self, client, clean_db, tmp_path,
-                                                          monkeypatch):
-        """响应结束（body 包装器 close）后临时文件必须消失，不留几百 MB 垃圾。"""
-        created = self._spy_tempfile(monkeypatch)
-        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
-        self._make_illust(clean_db, tmp_path, 88003, [100, 200])
+    def test_tempfile_is_cleaned_on_every_exit_path(self, client, clean_db, tmp_path,
+                                                    monkeypatch):
+        """临时文件在**每一条**响应出口上都不许残留（大包几百 MB，漏一份就是垃圾）。
 
-        resp = client.get('/download_file/88003')
-        assert resp.status_code == 200
-        assert len(created) == 1
-        resp.close()
-
-        assert not os.path.exists(created[0]), '响应关闭后临时文件应被删除'
-
-    def test_download_file_tempfile_removed_after_full_read(self, client, clean_db, tmp_path,
-                                                            monkeypatch):
-        """正常读完整包（没走 close 路径）也必须删掉临时文件。
-
-        清理挂在 body 包装器上，两条路径都要覆盖：读完 EOF 与 close。
+        六档输入是**同一个不变式**（清理必须兜住所有出口），只有"出口"不同 —— 所以合
+        成一条循环，而不是六条只有请求形状不同的用例：
+        - GET + close：body 包装器的 close 路径（响应结束时清）；
+        - GET 读完整包：EOF 路径，**不靠 close** 也得清（清理挂在包装器上）；
+        - HEAD：根本没有 body（不会迭代），只能靠 close 兜住；
+        - 416（Range 不可满足，`send_file` 抛异常）：异常出口；
+        - 206（Range 正常，body 走 `_RangeWrapper`）：包装器不得破坏分片；
+        - 304（非内容响应：body 为空、清理挂不上）：必须**当场**删且释放句柄。真实路径
+          上很难自然触发（每次请求都重建临时文件，ETag 必然不同），故用替身把
+          `send_file` 的返回码改成 304 —— 它是"清理挂不上 body"这条兜底分支的唯一入口：
+          既不能漏文件，也不能因为句柄还开着而删不掉。
         """
+        # (标签, 方法, 请求头, 期望状态码, body 检查, 是否必须先 close 才会消失)
+        cases = (
+            ('GET + close（响应结束路径）', 'get', None, 200, None, True),
+            ('GET 读完整包（EOF 路径）', 'get', None, 200, 'full-read', False),
+            ('HEAD（不发 body）', 'head', None, 200, None, True),
+            ('Range 不可满足 → 416', 'get', {'Range': 'bytes=999999999-'}, 416, None, False),
+            ('Range 0-99 → 206', 'get', {'Range': 'bytes=0-99'}, 206, 100, True),
+        )
+        for n, (label, verb, headers, expected, body, close_first) in enumerate(cases):
+            pid = 88100 + n
+            created = self._spy_tempfile(monkeypatch)
+            monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
+            self._make_illust(clean_db, tmp_path, pid, [100, 200])
+
+            resp = getattr(client, verb)(f'/download_file/{pid}', headers=headers)
+
+            assert resp.status_code == expected, f'{label}：状态码应为 {expected}'
+            assert len(created) == 1, f'{label}：应只建一份临时文件，实际 {created}'
+            if body == 'full-read':
+                with zipfile.ZipFile(io.BytesIO(resp.get_data())) as zf:
+                    assert len(zf.namelist()) == 2, f'{label}：整包内容必须完整'
+            elif isinstance(body, int):
+                assert len(resp.get_data()) == body, f'{label}：{body} 字节的分片长度必须正确'
+
+            if close_first:
+                # close 是这条出口的清理触发点：必须先关再断言，否则等于在测另一条路径
+                resp.close()
+                assert not os.path.exists(created[0]), f'{label}：临时文件必须被删除'
+            else:
+                assert not os.path.exists(created[0]), \
+                    f'{label}：不靠 close 也必须清掉临时文件'
+                resp.close()
+
+        # 304 档：send_file 替身把响应改成无内容（清理挂不上 body）
         created = self._spy_tempfile(monkeypatch)
         monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
-        self._make_illust(clean_db, tmp_path, 88007, [100, 200])
-
-        resp = client.get('/download_file/88007')
-        assert len(created) == 1
-        with zipfile.ZipFile(io.BytesIO(resp.get_data())) as zf:
-            assert len(zf.namelist()) == 2
-
-        assert not os.path.exists(created[0]), '读完整包后临时文件应被删除'
-
-    def test_download_file_head_request_cleans_tempfile(self, client, clean_db, tmp_path,
-                                                        monkeypatch):
-        """HEAD 不发 body（根本不会迭代），清理必须靠 close 路径兜住。"""
-        created = self._spy_tempfile(monkeypatch)
-        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
-        self._make_illust(clean_db, tmp_path, 88008, [100, 200])
-
-        resp = client.head('/download_file/88008')
-        assert resp.status_code == 200
-        assert len(created) == 1
-        resp.close()
-
-        assert not os.path.exists(created[0]), 'HEAD 请求也不能漏临时文件'
-
-    def test_download_file_unsatisfiable_range_cleans_tempfile(self, client, clean_db,
-                                                               tmp_path, monkeypatch):
-        """Range 不可满足 → send_file 抛异常（416），仍不能漏临时文件。"""
-        created = self._spy_tempfile(monkeypatch)
-        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
-        self._make_illust(clean_db, tmp_path, 88009, [100, 200])
-
-        resp = client.get('/download_file/88009',
-                          headers={'Range': 'bytes=999999999-'})
-
-        assert resp.status_code == 416
-        assert len(created) == 1
-        assert not os.path.exists(created[0]), '416 也得清掉临时文件'
-
-    def test_download_file_partial_range_still_works_and_cleans(self, client, clean_db,
-                                                                tmp_path, monkeypatch):
-        """Range 正常时返回 206，body 走 _RangeWrapper —— 包装器不得破坏它。"""
-        created = self._spy_tempfile(monkeypatch)
-        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
-        self._make_illust(clean_db, tmp_path, 88010, [100, 200])
-
-        resp = client.get('/download_file/88010', headers={'Range': 'bytes=0-99'})
-
-        assert resp.status_code == 206
-        assert len(resp.get_data()) == 100
-        assert len(created) == 1
-        resp.close()
-        assert not os.path.exists(created[0])
-
-    def test_download_file_no_content_status_cleans_tempfile(self, client, clean_db, tmp_path,
-                                                             monkeypatch):
-        """非内容响应（304 类）：body 为空、清理挂不上，必须当场删且释放句柄。
-
-        304 在真实路径上很难自然触发（每次请求都重建临时文件，ETag 必然不同），所以
-        这里用替身把 send_file 的返回码改成 304，专门盯住这条兜底分支：既不能漏文件，
-        也不能因为句柄还开着而删不掉。
-        """
-        created = self._spy_tempfile(monkeypatch)
-        monkeypatch.setattr(routes_download, 'ZIP_MEMORY_THRESHOLD_BYTES', 10)
-        self._make_illust(clean_db, tmp_path, 88011, [100, 200])
-
+        self._make_illust(clean_db, tmp_path, 88199, [100, 200])
         real_send_file = routes_download.send_file
 
         def _not_modified(path, **kwargs):
-            resp = real_send_file(path, **kwargs)
-            resp.status_code = 304
-            return resp
+            r = real_send_file(path, **kwargs)
+            r.status_code = 304
+            return r
 
         monkeypatch.setattr(routes_download, 'send_file', _not_modified)
 
-        resp = client.get('/download_file/88011')
+        resp = client.get('/download_file/88199')
 
-        assert resp.status_code == 304
-        assert len(created) == 1
-        assert not os.path.exists(created[0]), '无内容响应也必须清掉临时文件'
+        assert resp.status_code == 304, '304 档：替身必须让响应变成无内容'
+        assert len(created) == 1, f'304 档：应只建一份临时文件，实际 {created}'
+        assert not os.path.exists(created[0]), '304 档：无内容响应也必须当场清掉临时文件'
 
     def test_download_file_skips_disappeared_file(self, client, clean_db, tmp_path, monkeypatch):
         """打包途中某个文件消失（TOCTOU）：跳过它，其余照常打包，不 500。"""
