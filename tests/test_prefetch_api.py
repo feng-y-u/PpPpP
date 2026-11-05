@@ -51,6 +51,10 @@ def test_all_mutating_endpoints_reject_missing_csrf(client):
     assert _mutate_without_csrf(
         client, 'POST', '/api/prefetch/tags', {'tag': 'x'}).status_code == 403
     assert _mutate_without_csrf(
+        client, 'POST', '/api/prefetch/tags/x/aliases', {'alias': 'y'}).status_code == 403
+    assert _mutate_without_csrf(
+        client, 'DELETE', '/api/prefetch/tags/x/aliases', {'alias': 'y'}).status_code == 403
+    assert _mutate_without_csrf(
         client, 'DELETE', '/api/prefetch/tags/x').status_code == 403
     assert _mutate_without_csrf(
         client, 'POST', '/api/prefetch/refresh', {'tag': 'x'}).status_code == 403
@@ -226,7 +230,9 @@ class TestPrefetchTagsAPI:
         assert [d['tag'] for d in data] == ['c', 'a', 'b']
         assert data[0]['total'] == 0
         assert data[0]['status'] == 'error'
-        assert data[0]['cached_at'] == '2025-01-03T00:00:00'
+        # 必须是**带偏移量**的 UTC 字符串：浏览器 new Date() 才不会被当成裸本地时间
+        assert data[0]['cached_at'] == '2025-01-03T00:00:00+00:00'
+        assert data[0]['aliases'] == [], '没有同义词时必须是空数组（前端据此显示 +N）'
         assert data[2]['cached_at'] is None
 
     def test_delete_removes_tag(self, client, clean_db):
@@ -292,6 +298,131 @@ class TestPrefetchTagsAPI:
         resp = client.delete('/api/prefetch/tags/t', headers={'X-CSRF-Token': token})
         assert resp.status_code == 200
         assert clean_db.query(Illust).filter(Illust.pixiv_id == 7).first() is not None
+
+
+class TestPrefetchAliasesAPI:
+    def test_add_alias_appends_and_returns_group(self, client, clean_db):
+        token = _get_token(client)
+        clean_db.add(SearchCache(tag='吉星排队', status='done'))
+        safe_commit(clean_db)
+
+        resp = client.post('/api/prefetch/tags/吉星排队/aliases',
+                           data=json.dumps({'alias': ' 星引擎party '}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['merged'] is False
+        assert data['aliases'] == ['星引擎party'], 'alias 需要 strip'
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == '吉星排队').first()
+        clean_db.refresh(row)
+        assert row.alias_tags_list == ['星引擎party']
+
+    def test_alias_that_exists_as_tag_is_merged_and_deduped(self, client, clean_db):
+        """存量两个标签就地合并：id 并集去重、吸收同义词、删掉多余行。
+
+        这是用户真实场景（两个标签都已在预取）：重叠 pid 只能留一份，
+        被并掉那行的 `cached_at`/同义词也不能丢。
+        """
+        token = _get_token(client)
+        clean_db.add_all([
+            SearchCache(tag='吉星排队', illust_ids='[1, 2]', total=2, status='done',
+                        cached_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+            SearchCache(tag='星引擎party', illust_ids='[2, 3]', total=2, status='done',
+                        alias_tags=json.dumps(['旧别名']),
+                        cached_at=datetime(2026, 1, 2, tzinfo=timezone.utc)),
+        ])
+        safe_commit(clean_db)
+
+        resp = client.post('/api/prefetch/tags/吉星排队/aliases',
+                           data=json.dumps({'alias': '星引擎party'}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['merged'] is True
+        assert data['total'] == 3
+
+        group = clean_db.query(SearchCache).filter(SearchCache.tag == '吉星排队').first()
+        clean_db.refresh(group)
+        assert json.loads(group.illust_ids) == [1, 2, 3]
+        assert group.alias_tags_list == ['星引擎party', '旧别名']
+        assert (group.cached_at.year, group.cached_at.month, group.cached_at.day) == (2026, 1, 2)
+        assert clean_db.query(SearchCache).filter(
+            SearchCache.tag == '星引擎party').first() is None, '被合并的独立行必须删除'
+
+    def test_invalid_alias_requests_are_rejected(self, client, clean_db):
+        """同一个不变式：非法同义词请求一律拒绝且不改动任何行（逐例带消息）。"""
+        token = _get_token(client)
+        clean_db.add_all([
+            SearchCache(tag='g', alias_tags=json.dumps(['dup'])),
+            SearchCache(tag='other', alias_tags=json.dumps(['owned'])),
+            SearchCache(tag='busy', status='fetching'),
+        ])
+        safe_commit(clean_db)
+
+        cases = [
+            ('组不存在', 'missing', {'alias': 'x'}, 404, '标签不存在'),
+            ('空同义词', 'g', {'alias': '   '}, 400, '同义词不能为空'),
+            ('与组名相同', 'g', {'alias': 'g'}, 400, '同义词不能与标签名相同'),
+            ('组内重复', 'g', {'alias': 'dup'}, 409, '该同义词已存在'),
+            ('已是别组同义词', 'g', {'alias': 'owned'}, 409, '该标签已是「other」的同义词'),
+            ('目标是抓取中的标签', 'g', {'alias': 'busy'}, 409, '该标签正在预取中，请稍后再合并'),
+        ]
+        for label, group, payload, status, message in cases:
+            resp = client.post(f'/api/prefetch/tags/{group}/aliases',
+                               data=json.dumps(payload),
+                               content_type='application/json',
+                               headers={'X-CSRF-Token': token})
+            assert resp.status_code == status, f'{label}: {resp.get_json()}'
+            assert resp.get_json()['error'] == message, label
+
+        group = clean_db.query(SearchCache).filter(SearchCache.tag == 'g').first()
+        clean_db.refresh(group)
+        assert group.alias_tags_list == ['dup'], '失败路径不得留下半份修改'
+        assert clean_db.query(SearchCache).filter(SearchCache.tag == 'busy').first() is not None
+
+    def test_delete_alias_keeps_cached_works(self, client, clean_db):
+        """摘同义词只停搜：组里的作品（含并集）必须原样保留。"""
+        token = _get_token(client)
+        clean_db.add_all([
+            SearchCache(tag='g', alias_tags=json.dumps(['a', 'b']), illust_ids='[1]'),
+            Illust(pixiv_id=1, title='kept', prefetch_source=1),
+        ])
+        safe_commit(clean_db)
+
+        resp = client.delete('/api/prefetch/tags/g/aliases',
+                             data=json.dumps({'alias': 'a'}),
+                             content_type='application/json',
+                             headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert resp.get_json()['aliases'] == ['b']
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'g').first()
+        clean_db.refresh(row)
+        assert json.loads(row.illust_ids) == [1], '已缓存作品不能因为摘同义词被删'
+        assert clean_db.query(Illust).filter(Illust.pixiv_id == 1).first() is not None
+
+        # 再删同一个 / 不存在的同义词 → 404
+        resp = client.delete('/api/prefetch/tags/g/aliases',
+                             data=json.dumps({'alias': 'a'}),
+                             content_type='application/json',
+                             headers={'X-CSRF-Token': token})
+        assert resp.status_code == 404
+        assert resp.get_json()['error'] == '同义词不存在'
+
+    def test_new_tag_cannot_shadow_existing_alias(self, client, clean_db):
+        """已被别组当同义词的词不能再建独立标签行（否则重复条目从另一条路复辟）。"""
+        token = _get_token(client)
+        clean_db.add(SearchCache(tag='吉星排队', alias_tags=json.dumps(['星引擎party'])))
+        safe_commit(clean_db)
+
+        resp = client.post('/api/prefetch/tags',
+                           data=json.dumps({'tag': '星引擎party'}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 409
+        assert resp.get_json()['error'] == '该标签已是「吉星排队」的同义词'
 
 
 class TestPrefetchStatusAPI:

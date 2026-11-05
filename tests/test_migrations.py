@@ -297,8 +297,8 @@ def test_collection_drop_migration_removes_tables_and_keeps_illusts(tmp_path):
         assert conn.exec_driver_sql(
             "SELECT pixiv_id, title FROM illusts ORDER BY pixiv_id"
         ).all() == [(123, "kept"), (456, "also-kept")]
-    # ③ 版本推进到 5
-    assert _user_version(engine) == 5
+    # ③ 版本推进到最新（v6）
+    assert _user_version(engine) == LATEST_SCHEMA_VERSION
 
     # ④ 重复执行不抛错：runner 再跑一次是 no-op；直接重放 v5 函数也必须是 no-op
     run_migrations(engine, MIGRATIONS)
@@ -319,6 +319,45 @@ def test_collection_drop_migration_removes_tables_and_keeps_illusts(tmp_path):
         ).fetchall() == [(123, 1000.0)]
     finally:
         backup.close()
+
+
+# ── v6：预取标签同义词列 ──
+
+def test_alias_tags_migration_adds_column_with_empty_default(tmp_path):
+    """v6：老库的 search_cache 补出 alias_tags 且默认 '[]'，重放幂等。
+
+    默认值必须是空数组而不是 NULL：老标签的语义是"没有同义词"（sources = [tag]），
+    升级后不能凭空多搜一个不存在的词。已有别名也不能被重放冲掉。
+    """
+    database = tmp_path / "pixiv.db"
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE search_cache ("
+            "tag VARCHAR PRIMARY KEY, illust_ids TEXT DEFAULT '[]',"
+            " cached_at DATETIME, status VARCHAR DEFAULT 'idle',"
+            " error VARCHAR DEFAULT '', total INTEGER DEFAULT 0)"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO search_cache (tag, illust_ids) VALUES ('旧标签', '[1, 2]')"
+        )
+        conn.exec_driver_sql("PRAGMA user_version = 5")
+
+    run_migrations(engine, MIGRATIONS)
+
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT tag, illust_ids, alias_tags FROM search_cache"
+        ).one() == ('旧标签', '[1, 2]', '[]')
+    assert _user_version(engine) == LATEST_SCHEMA_VERSION
+
+    add_alias_tags = dict(MIGRATIONS)[6]
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "UPDATE search_cache SET alias_tags = '[\"星引擎party\"]'")
+        add_alias_tags(conn)   # 幂等：已存在列时不重建、不清空
+        assert conn.exec_driver_sql(
+            "SELECT alias_tags FROM search_cache").scalar() == '["星引擎party"]'
 
 
 # ── WAL 备份完整性（审计 S5）──

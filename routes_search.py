@@ -19,7 +19,7 @@ from config import ITEMS_PER_PAGE, MAX_BOOKMARKS_DEFAULT
 from fetcher import PixivAuthError, decode_cursor, fetch_following
 from helpers import _safe_int, query_cached_tag
 from middleware import _csrf_required
-from models import Illust, SearchCache, get_session, safe_commit
+from models import Illust, SearchCache, get_session, iso_utc, safe_commit
 from runtime import _search_tasks, _search_tasks_lock
 
 logger = logging.getLogger(__name__)
@@ -439,7 +439,7 @@ def cache_items() -> Response:
         sc = db.query(SearchCache).filter(SearchCache.tag == tag).first()
         if not sc:
             return jsonify({'error': '标签不存在'}), 404
-        cached_at = sc.cached_at.isoformat() if sc.cached_at else None
+        cached_at = iso_utc(sc.cached_at)
         sc_status = sc.status
         sc_total = sc.total
 

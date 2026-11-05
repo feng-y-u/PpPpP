@@ -49,6 +49,31 @@ def safe_commit(db_session: Session, max_retries: int = 3) -> None:
         raise
 
 
+def iso_utc(value: datetime | None) -> str | None:
+    """把**按 UTC 存储**的时间戳序列化成带偏移量的 ISO 8601（前端才能换算成本地时间）。
+
+    为什么需要它：SQLite 的 `DATETIME` 列不保存偏移量，`datetime.now(timezone.utc)`
+    写进去、读回来是不带 `tzinfo` 的 UTC 墙面时间；裸 `isoformat()` 于是输出
+    `2026-08-29T14:54:40.295936` 这种**没有偏移标记**的字符串。按 ECMAScript 的
+    Date Time String Format，带时间但无偏移会被解释成**本地时间** —— 浏览器
+    `new Date()` 于是把 UTC 数字原样当本地时间渲染：上海用户看到的是 UTC 时刻，
+    改系统/浏览器时区也不会挪动它（正因如此才会误以为"时区设置没生效"）。
+    这里补上 `+00:00`，`new Date()` 才会做真正的时区换算。
+
+    只给**确实按 UTC 存储**的列用（`created_at` / `downloaded_at` /
+    `SearchCache.cached_at` / `DownloadLog.created_at`）。`illusts.upload_date`
+    例外：它是 Pixiv 的 JST 墙面时间（`updateDate` 带 `+09:00`，落库时偏移被
+    SQLite 丢掉），补 `+00:00` 会整体偏 9 小时，所以那个字段仍走裸 `isoformat()`。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat()
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -131,15 +156,16 @@ class Illust(Base):
             'tags': self.tags_list,
             'page_count': self.page_count,
             'bookmark_count': self.bookmark_count,
+            # upload_date 是 Pixiv 的 JST 墙面时间，不能补 +00:00（见 iso_utc 文档）
             'upload_date': self.upload_date.isoformat() if self.upload_date else None,
             'thumb_url': self.thumb_url,
             'original_urls': self.original_urls_list,
             # 注意：不输出 local_paths/local_dir（磁盘绝对路径）。前端判断
             # 已下载用 download_status，取图用 local_urls /api/image/...
             'download_status': self.download_status,
-            'downloaded_at': self.downloaded_at.isoformat() if self.downloaded_at else None,
+            'downloaded_at': iso_utc(self.downloaded_at),
             'file_size': self.file_size,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_at': iso_utc(self.created_at),
         }
 
 
@@ -166,7 +192,7 @@ class DownloadLog(Base):
             'pixiv_id': self.pixiv_id,
             'action': self.action,
             'message': self.message,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_at': iso_utc(self.created_at),
         }
 
 
@@ -175,10 +201,26 @@ class SearchCache(Base):
 
     tag: Mapped[str] = mapped_column(String, primary_key=True)
     illust_ids: Mapped[str] = mapped_column(Text, default='[]')
+    # 组名之外的额外搜索词（同义词，JSON 数组）。实际搜索词 = [tag] + alias_tags：
+    # 「吉星排队」与「星引擎party」这种同义标签合并成一行，结果并集去重，
+    # 避免缓存页出现两个高度重叠的条目。老数据 '[]' → 行为与单标签完全一致。
+    alias_tags: Mapped[str] = mapped_column(Text, default='[]')
     cached_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String, default='idle')
     error: Mapped[str] = mapped_column(String, default='')
     total: Mapped[int] = mapped_column(Integer, default=0)
+
+    @property
+    def alias_tags_list(self) -> list[str]:
+        try:
+            value = json.loads(self.alias_tags)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return [t for t in value if isinstance(t, str)] if isinstance(value, list) else []
+
+    @alias_tags_list.setter
+    def alias_tags_list(self, value: list[str]) -> None:
+        self.alias_tags = json.dumps(list(value), ensure_ascii=False)
 
 
 def _rebuild_illusts_table(drop_cols: set[str]) -> None:
@@ -192,15 +234,19 @@ def _rebuild_illusts_table(drop_cols: set[str]) -> None:
 def init_db() -> None:
     Base.metadata.create_all(engine)
     from migrations import MIGRATIONS, run_migrations
-    from migrations.versions import add_illust_refresh_failed_at, repair_illust_schema
+    from migrations.versions import (
+        add_illust_refresh_failed_at, add_search_cache_alias_tags, repair_illust_schema,
+    )
 
     run_migrations(engine, MIGRATIONS)
     # Keep the historical startup behavior that repairs externally drifted columns.
-    # add_illust_refresh_failed_at 是 v4 列，而 repair_illust_schema 只认 v2 的列集
-    #（不得修改已发布版本），故这里额外幂等补一次，覆盖"库被外部改动丢列"的场景。
+    # add_illust_refresh_failed_at 是 v4 列、add_search_cache_alias_tags 是 v6 列，
+    # 而 repair_illust_schema 只认 v2 的列集（不得修改已发布版本），故这里额外幂等
+    # 各补一次，覆盖"库被外部改动丢列"的场景。
     with engine.begin() as conn:
         repair_illust_schema(conn)
         add_illust_refresh_failed_at(conn)
+        add_search_cache_alias_tags(conn)
 
 
 def get_session() -> Session:

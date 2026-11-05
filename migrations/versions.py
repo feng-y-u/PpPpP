@@ -150,11 +150,31 @@ def drop_collection_tables(conn: Connection) -> None:
     conn.exec_driver_sql("DROP TABLE IF EXISTS collections")
 
 
+def add_search_cache_alias_tags(conn: Connection) -> None:
+    """v6：给预取标签加同义词列表（组 = 一行的核心列）。
+
+    `alias_tags` 存组名之外的额外搜索词（JSON 数组）；实际搜索词 =
+    `[tag] + alias_tags`。老库补列后默认 `'[]'`，行为与单标签完全一致，
+    不需要任何数据迁移。幂等：已存在则跳过（`init_db()` 也会兜底调一次）。
+    """
+    if conn.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_cache'"
+    ).first() is None:
+        # 表还没建（迁移测试/异常库）：没有列可补，直接 no-op 而不是 ALTER 报错
+        return
+    if "alias_tags" not in _column_names(conn, "search_cache"):
+        conn.exec_driver_sql(
+            "ALTER TABLE search_cache "
+            "ADD COLUMN alias_tags TEXT NOT NULL DEFAULT '[]'"
+        )
+
+
 MIGRATIONS = (
     (1, migrate_collection_positions),
     (2, migrate_illust_schema),
     (3, repair_illust_schema),
     (4, add_illust_refresh_failed_at),
     (5, drop_collection_tables),
+    (6, add_search_cache_alias_tags),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

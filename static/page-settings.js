@@ -88,12 +88,24 @@ function renderPrefetchTags() {
     return;
   }
   list.innerHTML = prefetchTags.map(t => {
-    return `<span class="badge" style="background:var(--accent);font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;" data-tag="${escAttr(t.tag)}" title="状态: ${escAttr(t.status)} · 条数: ${t.total || 0}">
-      ${escHtml(t.tag)}
+    const aliases = t.aliases || [];
+    const aliasCount = aliases.length ? ` <span style="opacity:.8;">+${aliases.length}</span>` : '';
+    const title = `状态: ${t.status} · 条数: ${t.total || 0}`
+      + (aliases.length ? ` · 同义词：${aliases.join('、')}` : '')
+      + (t.error ? ` · 错误：${t.error}` : '');
+    return `<span class="badge" style="background:var(--accent);font-size:0.78rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;" data-tag="${escAttr(t.tag)}" title="${escAttr(title)}">
+      ${escHtml(t.tag)}${aliasCount}
+      <span data-alias="${escAttr(t.tag)}" title="添加同义词（同义标签合并成一个缓存条目）" style="opacity:.75;">+</span>
       <span data-reset="${escAttr(t.tag)}" title="重置刷新状态（清空刷新完成/失败退避标记，下一轮预取重新拉取收藏数）" style="opacity:.75;">&#8635;</span>
       <span style="opacity:.6;">&times;</span>
     </span>`;
   }).join('');
+  list.querySelectorAll('[data-alias]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      addPrefetchAlias(el.dataset.alias);
+    });
+  });
   list.querySelectorAll('[data-reset]').forEach(el => {
     el.addEventListener('click', e => {
       e.stopPropagation();
@@ -218,6 +230,7 @@ async function addPrefetchTag() {
 }
 
 async function removePrefetchTag(tag) {
+  if (!confirm(`确定删除预取标签「${tag}」？\n若它是分组，其同义词会一并移除，相关缓存作品也会被清理。`)) return;
   try {
     const resp = await fetch(`/api/prefetch/tags/${encodeURIComponent(tag)}`, {
       method: 'DELETE',
@@ -230,6 +243,28 @@ async function removePrefetchTag(tag) {
     } else {
       const err = await resp.json().catch(() => ({}));
       showToast(err.error || '删除失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+}
+
+// 添加同义词：把另一个 Pixiv 标签并进当前分组（结果并集去重）。
+// 若该词已是独立预取标签，后端会就地合并两行并删掉多余行。
+async function addPrefetchAlias(tag) {
+  const alias = (prompt(`输入「${tag}」的同义词（另一个 Pixiv 标签，会合并到同一个缓存条目）:`) || '').trim();
+  if (!alias) return;
+  try {
+    const resp = await fetch(`/api/prefetch/tags/${encodeURIComponent(tag)}/aliases`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+      body: JSON.stringify({alias}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      showToast(data.merged ? `已合并「${alias}」的缓存` : '已添加同义词', false);
+      loadPrefetchTags();
+      loadPrefetchStatus();
+    } else {
+      showToast(data.error || '添加失败', true);
     }
   } catch { showToast('网络错误', true); }
 }

@@ -96,6 +96,95 @@ class TestPrefetchOneTag:
         assert json.loads(row.illust_ids) == [2, 3, 4, 1]
         assert row.total == 4
 
+    def test_alias_sources_merge_and_dedupe(self, clean_db, monkeypatch):
+        """组名 + 同义词各搜一遍，重叠作品只出现一次（并集去重）。
+
+        这是"同义标签大量重复作品"的核心不变式：直接拼接会让同一 pid 出现两次，
+        缓存页出现重复卡片、`total` 与用户看到的数量翻倍。
+        """
+        clean_db.add(SearchCache(
+            tag='吉星排队', alias_tags=json.dumps(['星引擎party'])))
+        safe_commit(clean_db)
+
+        calls = []
+
+        def _fake_search(tag, **kwargs):
+            calls.append(tag)
+            if tag == '吉星排队':
+                return [{'pixiv_id': 1}, {'pixiv_id': 2}], False
+            return [{'pixiv_id': 2}, {'pixiv_id': 3}], False
+
+        monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+        app._prefetch_one_tag('吉星排队')
+
+        assert calls == ['吉星排队', '星引擎party'], '组名与每个同义词都必须被搜索'
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == '吉星排队').first()
+        assert json.loads(row.illust_ids) == [1, 2, 3], '重叠的 pid 2 只能保留一次'
+        assert row.total == 3
+        assert row.status == 'done'
+        assert row.error == ''
+        assert row.cached_at is not None
+
+    def test_partial_alias_failure_keeps_done_with_error_note(self, clean_db, monkeypatch):
+        """一个同义词失败：成功那部分照常写回、组保持 done，失败原因写进 error。"""
+        clean_db.add(SearchCache(tag='g', alias_tags=json.dumps(['bad'])))
+        safe_commit(clean_db)
+
+        def _fake_search(tag, **kwargs):
+            if tag == 'bad':
+                raise RuntimeError('boom')
+            return [{'pixiv_id': 7}], False
+
+        monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+        app._prefetch_one_tag('g')
+
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'g').first()
+        assert json.loads(row.illust_ids) == [7]
+        assert row.status == 'done', '部分成功仍算 done：已抓到的数据有效'
+        assert '部分同义词失败' in row.error and 'bad' in row.error
+
+    def test_auth_failure_aborts_remaining_sources(self, clean_db, monkeypatch):
+        """认证失效时剩余同义词不再请求（同一原因重复失败只是空耗限流）。"""
+        clean_db.add(SearchCache(
+            tag='g', alias_tags=json.dumps(['a1', 'a2'])))
+        safe_commit(clean_db)
+
+        calls = []
+
+        def _fake_search(tag, **kwargs):
+            calls.append(tag)
+            raise fetcher.PixivAuthError('HTTP 401')
+
+        monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+        app._prefetch_one_tag('g')
+
+        assert calls == ['g'], '第一个 source 认证失效后就该中止'
+        row = clean_db.query(SearchCache).filter(SearchCache.tag == 'g').first()
+        assert row.status == 'error'
+        assert '认证失效' in row.error
+
+    def test_tag_merged_into_group_is_not_recreated(self, clean_db, monkeypatch):
+        """竞态：预取循环拿到的旧标签刚被合并成别组同义词，不能重建独立行。
+
+        否则"合并两个标签"会在下一轮被循环重新建出第二条，重复条目原样复辟。
+        """
+        clean_db.add(SearchCache(
+            tag='吉星排队', alias_tags=json.dumps(['星引擎party']), status='done'))
+        safe_commit(clean_db)
+
+        called = []
+
+        def _fake_search(tag, **kwargs):
+            called.append(tag)
+            return [], False
+
+        monkeypatch.setattr(app, 'search_by_tag', _fake_search)
+        app._prefetch_one_tag('星引擎party')
+
+        assert called == [], '已成为同义词的旧标签不该再独立预取'
+        assert clean_db.query(SearchCache).filter(
+            SearchCache.tag == '星引擎party').first() is None
+
     def test_prefetch_one_tag_skips_when_fetching(self, clean_db, monkeypatch):
         clean_db.add(SearchCache(tag='y', status='fetching'))
         safe_commit(clean_db)

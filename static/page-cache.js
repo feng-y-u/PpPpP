@@ -119,8 +119,12 @@ function updateCacheMeta() {
   const t = cacheTags.find(x => x.tag === tag);
   const el = $('#cacheMeta');
   if (!t) { el.textContent = ''; return; }
-  el.textContent = `状态: ${t.status} · 缓存时间: ${t.cached_at ? new Date(t.cached_at).toLocaleString('zh-CN') : '从未'} · 条数: ${t.total || 0}`;
-  if (t.status === 'error') el.textContent += ` · 错误: ${t.error || '未知'}`;
+  let text = `状态: ${t.status} · 缓存时间: ${t.cached_at ? new Date(t.cached_at).toLocaleString('zh-CN') : '从未'} · 条数: ${t.total || 0}`;
+  const aliases = t.aliases || [];
+  if (aliases.length) text += ` · 同义词: ${aliases.join('、')}`;
+  el.textContent = text;
+  // 部分同义词失败时 status 仍是 done（已抓到的数据有效），但原因必须可见
+  if (t.error) el.textContent += ` · 错误: ${t.error}`;
 }
 
 async function browseCache() {

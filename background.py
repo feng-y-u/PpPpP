@@ -181,15 +181,49 @@ def _auto_follow_worker() -> None:
 _search_cache_guard = threading.Lock()
 
 
+def _find_alias_group(db, alias: str) -> str | None:
+    """返回把 `alias` 当作同义词的分组名，没有则 None。
+
+    分组是"组 = 一行"：同义词只存在组行的 `alias_tags` 里，所以判定一个词是否
+    已被别处使用时必须扫全部行（标签数量是用户手工维护的几十量级，不是热路径）。
+    """
+    for row in db.query(SearchCache).all():
+        if alias in row.alias_tags_list:
+            return row.tag
+    return None
+
+
+def _format_source_errors(failures: list[tuple[str, str]], partial: bool) -> str:
+    """把逐 source 的失败拼成一行可读文本（截断，避免把整段异常塞进 DB）。"""
+    if not failures:
+        return ''
+    detail = '；'.join(f'{source}：{message}' for source, message in failures)
+    if partial:
+        detail = f'部分同义词失败：{detail}'
+    return detail[:500]
+
+
 def _prefetch_one_tag(tag: str) -> None:
-    """预取单个标签：搜索并缓存作品 ID，将 Illust 标记为预取来源。"""
+    """预取一个分组：依次搜索组名与同义词，结果**并集去重**写回同一行。
+
+    为什么要多 source：同义标签（如「吉星排队」与「星引擎party」）命中的作品
+    集合不同、但高度重叠，必须分别搜索才能拿全，再按 pixiv_id 去重合并 ——
+    直接在缓存页拼两行会出现重复卡片，条数也会翻倍。
+    """
     import app  # 延迟导入读取 app.search_by_tag：tests monkeypatch('app.search_by_tag')，
     #             from fetcher import 的独立绑定看不到该补丁（与 middleware._is_authed 同款先例）
     all_ids: list[int] = []
+    failures: list[tuple[str, str]] = []
+    succeeded = 0
+    sources: list[str] = [tag]
     try:
         with get_session() as db:
             row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
             if row is None:
+                # 竞态兜底：本轮开始后该标签才被合并成别组的同义词并删了行。
+                # 此时**不能**重建 —— 否则重复条目会原样复辟，且下一轮又搜一遍。
+                if _find_alias_group(db, tag):
+                    return
                 row = SearchCache(tag=tag, status='fetching')
                 db.add(row)
                 safe_commit(db)
@@ -203,39 +237,67 @@ def _prefetch_one_tag(tag: str) -> None:
                 if updated == 0:
                     # 已被其他线程抢占，正在预取中
                     return
+            sources = [row.tag] + [a for a in row.alias_tags_list if a and a != row.tag]
 
-        for page in range(1, _prefetch_state['pages'] + 1):
-            results, has_more = app.search_by_tag(
-                tag, min_bookmarks=1, page=page,
-                sort_order='date_d', r18_mode='all', tag_mode='or',
-            )
-            page_ids = [r.get('pixiv_id') for r in results if r.get('pixiv_id')]
-            all_ids.extend(page_ids)
-            if page_ids:
-                # search_by_tag 已写入 Illust 行，这里只翻转 prefetch_source 标记；
-                # 已下载的作品不标记，避免计入容量却永远无法清理
-                with get_session() as db:
-                    existing = db.query(Illust).filter(Illust.pixiv_id.in_(page_ids)).all()
-                    for illust in existing:
-                        if not illust.download_status:
-                            illust.prefetch_source = 1
-                    safe_commit(db)
-            if not has_more:
+        for source in sources:
+            try:
+                for page in range(1, _prefetch_state['pages'] + 1):
+                    results, has_more = app.search_by_tag(
+                        source, min_bookmarks=1, page=page,
+                        sort_order='date_d', r18_mode='all', tag_mode='or',
+                    )
+                    page_ids = [r.get('pixiv_id') for r in results if r.get('pixiv_id')]
+                    all_ids.extend(page_ids)
+                    if page_ids:
+                        # search_by_tag 已写入 Illust 行，这里只翻转 prefetch_source 标记；
+                        # 已下载的作品不标记，避免计入容量却永远无法清理
+                        with get_session() as db:
+                            existing = db.query(Illust).filter(Illust.pixiv_id.in_(page_ids)).all()
+                            for illust in existing:
+                                if not illust.download_status:
+                                    illust.prefetch_source = 1
+                            safe_commit(db)
+                    if not has_more:
+                        break
+            except fetcher.PixivAuthError as e:
+                # 认证失效时其余同义词必然同样失败：记一次就中止，别空耗限流与退避
+                failures.append((source, f'认证失效: {e}'))
                 break
+            except Exception as e:
+                failures.append((source, str(e)[:200]))
+                continue
+            succeeded += 1
+
+        if succeeded == 0:
+            # 全部 source 失败：保留旧缓存数据，只把状态与原因标出来。
+            # 这里的回写再失败也不能冒泡（否则整轮预取中止且 fetching 残留）——
+            # 与下方外层 catch 同款处理，但单独兜住，避免外层再重试一次写库。
+            try:
+                with get_session() as db:
+                    row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+                    if row:
+                        row.status = 'error'
+                        row.error = _format_source_errors(failures, partial=False) or '未知错误'
+                        safe_commit(db)
+            except Exception as write_err:
+                logger.error(f'[prefetch] 标签 {tag} 失败状态回写失败（可能残留 fetching）: {write_err}')
+            return
 
         with _search_cache_guard:
             with get_session() as db:
                 row = db.query(SearchCache).filter(SearchCache.tag == tag).first()
                 if row:
-                    # 累积合并：新结果在前，旧作品去重保留在后（条数只增不减，由容量清理兜底）
+                    # 累积合并：新结果在前，旧作品去重保留在后（条数只增不减，由容量清理兜底）。
+                    # dict.fromkeys 同时完成"跨同义词并集去重"与"保持出现顺序"。
                     old_ids = json.loads(row.illust_ids) if row.illust_ids else []
-                    seen = set(all_ids)
-                    merged = list(all_ids) + [pid for pid in old_ids if pid not in seen]
+                    merged = list(dict.fromkeys(all_ids + old_ids))
                     row.illust_ids = json.dumps(merged, ensure_ascii=False)
                     row.cached_at = datetime.now(timezone.utc)
                     row.status = 'done'
                     row.total = len(merged)
-                    row.error = ''
+                    # 部分同义词失败不把整组标红（成功的那部分数据是有效的），
+                    # 但原因要留下，缓存页会显示非空 error
+                    row.error = _format_source_errors(failures, partial=True)
                     safe_commit(db)
     except Exception as e:
         logger.error(f'[prefetch] 标签 {tag} 预取失败: {e}')

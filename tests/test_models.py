@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from models import Illust, DownloadLog, SearchCache, safe_commit
 
 
@@ -109,6 +111,59 @@ class TestIllustToDict:
         assert 'local_paths' not in d
         assert 'local_dir' not in d
         assert d['download_status'] == 'done'
+
+
+class TestIsoUtc:
+    def test_utc_columns_get_offset_but_upload_date_does_not(self, clean_db):
+        """「缓存页显示 UTC 时间」的根因回归：UTC 列必须序列化成带偏移量的字符串。
+
+        存储层是 naive UTC（SQLite 不保存 tzinfo），裸 `isoformat()` 出来没有偏移标记，
+        浏览器 `new Date()` 会按**本地时间**解释 → 上海用户看到的正是 UTC 时刻，
+        且改时区不会挪动它。补 `+00:00` 后 `new Date()` 才会换算。
+        `upload_date` 是 Pixiv 的 JST 墙面时间，不能被同一规则波及（补 Z 会整体偏 9 小时）。
+        """
+        from models import iso_utc
+
+        assert iso_utc(None) is None
+        assert iso_utc(datetime(2025, 1, 3)) == '2025-01-03T00:00:00+00:00'
+        assert iso_utc(
+            datetime(2025, 1, 3, 9, 0, tzinfo=timezone(timedelta(hours=9)))
+        ) == '2025-01-03T00:00:00+00:00', '带偏移量的输入要换算成 UTC 再输出'
+
+        row = Illust(
+            pixiv_id=424242,
+            upload_date=datetime(2025, 1, 3, 12, 0),
+            created_at=datetime(2025, 1, 3, 0, 0),
+        )
+        clean_db.add(row)
+        safe_commit(clean_db)
+        d = row.to_dict()
+        assert d['created_at'] == '2025-01-03T00:00:00+00:00'
+        assert d['upload_date'] == '2025-01-03T12:00:00', \
+            'upload_date 是 JST 墙面时间，不能带 UTC 偏移'
+
+
+class TestSearchCacheAliasTags:
+    def test_alias_tags_list_default_roundtrip_and_corrupt_json(self, clean_db):
+        """同义词列的三种状态：默认空、写回可读、坏 JSON 退化成空。
+
+        坏 JSON 必须退化成 `[]` 而不是抛：标签列表接口与预取循环都会读这一列，
+        一条脏数据不能让整个缓存页 500（与 `Illust.tags_list` 同一容错口径）。
+        """
+        row = SearchCache(tag='吉星排队')
+        clean_db.add(row)
+        safe_commit(clean_db)
+        assert row.alias_tags_list == []
+
+        row.alias_tags_list = ['星引擎party', '另一个同义词']
+        safe_commit(clean_db)
+        clean_db.refresh(row)
+        assert row.alias_tags_list == ['星引擎party', '另一个同义词']
+
+        row.alias_tags = 'not-json'
+        assert row.alias_tags_list == []
+        row.alias_tags = '{"unexpected": "object"}'
+        assert row.alias_tags_list == []
 
 
 class TestIllustDownloadStatus:

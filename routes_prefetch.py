@@ -10,11 +10,12 @@ import threading
 
 from flask import Blueprint, Response, jsonify, request
 
-from background import _collect_other_tag_pids, get_background_health
+from background import (_collect_other_tag_pids, _find_alias_group,
+                        _search_cache_guard, get_background_health)
 from fetcher import get_detail_error_samples
 from helpers import _atomic_write_json
 from middleware import _csrf_required, _get_json_body
-from models import Illust, SearchCache, get_session, safe_commit
+from models import Illust, SearchCache, get_session, iso_utc, safe_commit
 from runtime import _prefetch_state
 
 bp = Blueprint('prefetch', __name__)
@@ -78,10 +79,13 @@ def prefetch_tags_get() -> Response:
         rows = db.query(SearchCache).order_by(SearchCache.cached_at.desc()).all()
         return jsonify([{
             'tag': r.tag,
-            'cached_at': r.cached_at.isoformat() if r.cached_at else None,
+            'cached_at': iso_utc(r.cached_at),
             'status': r.status,
             'total': r.total,
             'error': r.error,
+            # 组名之外的额外搜索词（同义词）：缓存页据此在 meta 里展示，
+            # 设置页据此显示 +N 与 title
+            'aliases': r.alias_tags_list,
         } for r in rows])
 
 
@@ -94,9 +98,94 @@ def prefetch_tags_post() -> Response:
     with get_session() as db:
         if db.query(SearchCache).filter(SearchCache.tag == tag).first():
             return jsonify({'error': '标签已存在'}), 409
+        # 已被别组当作同义词的标签不能再建独立行：否则同一批作品被两个条目
+        # 各存一份，正是同义词合并要消除的重复
+        owner = _find_alias_group(db, tag)
+        if owner:
+            return jsonify({'error': f'该标签已是「{owner}」的同义词'}), 409
         db.add(SearchCache(tag=tag))
         safe_commit(db)
         return jsonify({'tag': tag}), 201
+
+
+def _load_cached_ids(row: SearchCache) -> list[int]:
+    """安全解析行上的 illust_ids（损坏 JSON 当空列表，与查询侧口径一致）。"""
+    try:
+        ids = json.loads(row.illust_ids) if row.illust_ids else []
+    except (json.JSONDecodeError, TypeError):
+        ids = []
+    return [pid for pid in ids if isinstance(pid, int)]
+
+
+@bp.route('/api/prefetch/tags/<path:tag>/aliases', methods=['POST'])
+@_csrf_required
+def prefetch_alias_post(tag: str) -> Response:
+    """给分组添加同义词；若该词已是独立标签行，就地合并（并集去重）后删行。
+
+    合并存量行是"吉星排队 / 星引擎party"这类既有标签的关键路径：用户不必先删
+    旧标签、再重新预取，已有缓存直接并进组里。
+    """
+    alias = str(_get_json_body().get('alias', '') or '').strip()
+    with _search_cache_guard:
+        with get_session() as db:
+            group = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+            if group is None:
+                return jsonify({'error': '标签不存在'}), 404
+            if not alias:
+                return jsonify({'error': '同义词不能为空'}), 400
+            if alias == tag:
+                return jsonify({'error': '同义词不能与标签名相同'}), 400
+            if alias in group.alias_tags_list:
+                return jsonify({'error': '该同义词已存在'}), 409
+
+            existing = db.query(SearchCache).filter(SearchCache.tag == alias).first()
+            if existing is not None:
+                if existing.status == 'fetching':
+                    # 在途预取的结果会在结束时空写/丢失，让用户稍后再合并
+                    return jsonify({'error': '该标签正在预取中，请稍后再合并'}), 409
+                merged = list(dict.fromkeys(
+                    _load_cached_ids(group) + _load_cached_ids(existing)))
+                group.illust_ids = json.dumps(merged, ensure_ascii=False)
+                group.total = len(merged)
+                absorbed = [a for a in existing.alias_tags_list if a and a != alias]
+                group.alias_tags_list = list(dict.fromkeys(
+                    group.alias_tags_list + [alias] + absorbed))
+                if existing.cached_at and (
+                        group.cached_at is None or existing.cached_at > group.cached_at):
+                    group.cached_at = existing.cached_at
+                db.delete(existing)
+                safe_commit(db)
+                return jsonify({'tag': tag, 'aliases': group.alias_tags_list,
+                                'merged': True, 'total': group.total})
+
+            owner = _find_alias_group(db, alias)
+            if owner:
+                return jsonify({'error': f'该标签已是「{owner}」的同义词'}), 409
+            group.alias_tags_list = group.alias_tags_list + [alias]
+            safe_commit(db)
+            return jsonify({'tag': tag, 'aliases': group.alias_tags_list, 'merged': False})
+
+
+@bp.route('/api/prefetch/tags/<path:tag>/aliases', methods=['DELETE'])
+@_csrf_required
+def prefetch_alias_delete(tag: str) -> Response:
+    """摘掉一个同义词：只停止以后搜索，**已缓存作品留在组里**。
+
+    没有逐词来源记录（illust_ids 是并集），精确拆分做不到；这些作品仍是该主题的
+    有效结果，后续由容量清理按常规淘汰。
+    """
+    alias = str(_get_json_body().get('alias', '') or '').strip()
+    with _search_cache_guard:
+        with get_session() as db:
+            group = db.query(SearchCache).filter(SearchCache.tag == tag).first()
+            if group is None:
+                return jsonify({'error': '标签不存在'}), 404
+            aliases = group.alias_tags_list
+            if alias not in aliases:
+                return jsonify({'error': '同义词不存在'}), 404
+            group.alias_tags_list = [a for a in aliases if a != alias]
+            safe_commit(db)
+            return jsonify({'tag': tag, 'aliases': group.alias_tags_list})
 
 
 @bp.route('/api/prefetch/tags/<path:tag>', methods=['DELETE'])

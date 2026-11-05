@@ -77,6 +77,8 @@ class TestCsrfProtection:
         ('POST', '/api/prefetch/config'),
         ('POST', '/api/prefetch/tags'),
         ('DELETE', '/api/prefetch/tags/999999'),
+        ('POST', '/api/prefetch/tags/999999/aliases'),
+        ('DELETE', '/api/prefetch/tags/999999/aliases'),
         ('POST', '/api/prefetch/refresh'),
         ('POST', '/api/prefetch/refresh-reset'),
         ('POST', '/api/cache/items/999999/delete'),
