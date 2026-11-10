@@ -1,8 +1,27 @@
-// ── 首页：最近 48 小时热门 ──
-// 只读本地库（GET /api/home），整个页面不发任何 Pixiv 请求。
+// ── 首页：最近 48 小时热门 + 缓存随机推荐 ──
+// 第一屏只读本地库（GET /api/home）；滚到底后从预取缓存里随机抽高收藏作品
+// （POST /api/home/more，带已展示 pid 去重）。整个页面不发任何 Pixiv 请求。
 // 卡片是纯图：作者与名称在左下角信息牌里，默认隐藏（CSS 负责悬停/触屏常显）。
 
-let homeItems = [];
+let homeItems = [];          // 已展示的全部作品（第一屏 + 随机批次）
+let shownIds = [];           // 已展示的 pixiv_id：随机接口靠它跨屏去重
+let randomMinBookmarks = 500; // 服务端下发的"高收藏"门槛，只用于文案
+let feedObserver = null;
+let feedLoading = false;
+let feedDone = false;
+let dividerInserted = false;
+let feedSentinel = null;
+
+// 页大小跟随服务端下发（与图库同一约定）；读不到才退回 24
+const HOME_PAGE_SIZE = (() => {
+  const raw = document.querySelector('meta[name="items-per-page"]')?.getAttribute('content') || '';
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 24;
+})();
+
+function homeCsrfToken() {
+  return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+}
 
 function renderHomeCard(r) {
   // 瀑布流要中图：服务端已把原图地址转成 master1200 并代理成 /thumb/<b64>
@@ -30,18 +49,115 @@ function renderHomeCard(r) {
   return item;
 }
 
-// 时间窗说明条：正常态说口径，降级态说"已放宽"，并给一个回到严格 48 小时的入口
+// 时间窗说明条：正常态说口径，降级态说"已放宽"，并给一个回到严格 48 小时的入口。
+// 两种状态都要带一句"第 N 张起是随机推荐"——否则整页都会被误读成 48 小时热门。
 function renderWindowNote(data) {
   const note = $('#windowNote');
   note.style.display = 'flex';
   note.classList.toggle('fallback', !!data.fell_back);
+  const randomHint = `第 ${HOME_PAGE_SIZE} 张起为缓存随机推荐（收藏数 > ${randomMinBookmarks}）`;
   if (data.fell_back) {
     note.innerHTML = '<span class="dot"></span>最近 48 小时内的作品不够一屏，已放宽到最近 7 天'
+      + `<span class="window-note-extra">· ${randomHint}</span>`
       + '<button class="window-note-action" id="strictWindowBtn">仍只看 48 小时</button>';
     $('#strictWindowBtn').addEventListener('click', () => loadHome('48'));
     return;
   }
-  note.innerHTML = `<span class="dot"></span>时间窗：最近 ${data.window_hours} 小时（发布时间，日本时间）`;
+  note.innerHTML = `<span class="dot"></span>时间窗：最近 ${data.window_hours} 小时（发布时间，日本时间）`
+    + `<span class="window-note-extra">· ${randomHint}</span>`;
+}
+
+function updateHomeCount() {
+  $('#homeCount').textContent = homeItems.length;
+  $('#homeUpdated').textContent = '更新于 ' + new Date().toTimeString().slice(0, 5);
+}
+
+// 随机推荐分隔条：column-span: all 横跨三列（旧浏览器退化为普通块，不影响功能）
+function insertDivider() {
+  if (dividerInserted) return;
+  dividerInserted = true;
+  const divider = document.createElement('div');
+  divider.className = 'feed-divider';
+  divider.textContent = `以下为缓存随机推荐（收藏数 > ${randomMinBookmarks}）`;
+  $('#homeGrid').appendChild(divider);
+}
+
+function finishFeed(message) {
+  feedDone = true;
+  if (feedObserver) { feedObserver.disconnect(); feedObserver = null; }
+  const end = $('#homeFeedEnd');
+  if (end) {
+    end.textContent = message;
+    end.style.display = 'block';
+  }
+}
+
+// 哨兵挂在瀑布流容器外：多列布局里塞一个 1px 空 div 会参与列排布、被挪到别处
+function startFeed() {
+  if (feedObserver) { feedObserver.disconnect(); feedObserver = null; }
+  feedDone = false;
+  feedLoading = false;
+  dividerInserted = false;
+  if (!feedSentinel) {
+    feedSentinel = document.createElement('div');
+    feedSentinel.id = 'homeFeedSentinel';
+    feedSentinel.style.height = '1px';
+    $('#homeGrid').after(feedSentinel);
+  }
+  feedObserver = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) maybeLoadMore();
+  }, { rootMargin: '600px' });
+  feedObserver.observe(feedSentinel);
+}
+
+function maybeLoadMore() {
+  if (feedDone || feedLoading || !feedSentinel) return;
+  const rect = feedSentinel.getBoundingClientRect();
+  if (rect.top > window.innerHeight + 600) return;
+  loadMore();
+}
+
+async function loadMore() {
+  if (feedDone || feedLoading) return;
+  feedLoading = true;
+  try {
+    const resp = await fetch('/api/home/more', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': homeCsrfToken() },
+      body: JSON.stringify({ exclude: shownIds, limit: HOME_PAGE_SIZE }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const items = Array.isArray(data.results) ? data.results : [];
+    if (!items.length) {
+      finishFeed('缓存里暂时没有更多高收藏作品');
+      return;
+    }
+
+    insertDivider();
+    homeItems = homeItems.concat(items);
+    items.forEach((r) => shownIds.push(Number(r.pixiv_id)));
+    updateHomeCount();
+
+    const grid = $('#homeGrid');
+    // renderInChunks 只负责分帧调用、不负责插入：卡片必须由这里挂进网格
+    await renderInChunks(items, (r, i) => {
+      const node = renderHomeCard(r);
+      grid.appendChild(node);
+      return node;
+    }, { chunk: 12, delay: 25 });
+    lazyLoad();
+
+    if (!data.has_more) finishFeed('已经到底了 · 以上为缓存里的全部高收藏作品');
+  } catch {
+    // 不自动重试：离线时每帧重试只会刷屏打请求，留给用户刷新
+    showToast('加载更多失败', true);
+    finishFeed('加载更多失败，刷新页面重试');
+  } finally {
+    feedLoading = false;
+  }
+  // 一屏没填满时哨兵还在视口里，不会再有 intersection 事件 —— 主动续一轮
+  if (!feedDone) requestAnimationFrame(maybeLoadMore);
 }
 
 async function loadHome(windowMode) {
@@ -49,11 +165,17 @@ async function loadHome(windowMode) {
   const loading = $('#homeLoading');
   const empty = $('#homeEmpty');
   const note = $('#windowNote');
+  const end = $('#homeFeedEnd');
+
+  if (feedObserver) { feedObserver.disconnect(); feedObserver = null; }
+  feedDone = true;   // 重新加载期间禁止触发"加载更多"，避免往清空中的网格追加
 
   loading.style.display = 'block';
   grid.innerHTML = '';
   empty.style.display = 'none';
   note.style.display = 'none';
+  end.style.display = 'none';
+  end.textContent = '';
 
   let data;
   try {
@@ -67,9 +189,10 @@ async function loadHome(windowMode) {
   }
   loading.style.display = 'none';
 
+  randomMinBookmarks = data.random_min_bookmarks || randomMinBookmarks;
   homeItems = Array.isArray(data.results) ? data.results : [];
-  $('#homeCount').textContent = homeItems.length;
-  $('#homeUpdated').textContent = '更新于 ' + new Date().toTimeString().slice(0, 5);
+  shownIds = homeItems.map((r) => Number(r.pixiv_id));
+  updateHomeCount();
 
   if (!homeItems.length) {
     // 空状态要如实说"需要预取/关注"，不能只说"暂无结果"
@@ -80,12 +203,13 @@ async function loadHome(windowMode) {
   renderWindowNote(data);
   // renderInChunks 只负责分帧调用、不负责插入：卡片必须由这里挂进网格
   // （曾经漏掉这一步 —— 计数与说明条都正常，网格永远是空的）
-  await renderInChunks(homeItems, (r, i) => {
-    const node = renderHomeCard(r, i);
+  await renderInChunks(homeItems, (r) => {
+    const node = renderHomeCard(r);
     grid.appendChild(node);
     return node;
   }, { chunk: 12, delay: 25 });
   lazyLoad();
+  startFeed();
 }
 
 // 初始加载：默认 auto（48 小时不足时自动放宽到 7 天）

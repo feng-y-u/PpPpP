@@ -15,6 +15,7 @@ from flask import (
 
 from config import (
     DOWNLOAD_DIR,
+    ITEMS_PER_PAGE,
     MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE, SSL_VERIFY,
     COOKIE_PATH,  # Cookie 文件单一来源：fetcher 读它，设置页也必须写它（见下）
@@ -162,8 +163,13 @@ def favicon() -> Response:
 
 @app.route('/')
 def home() -> str:
-    """首页：最近 48 小时热门（纯图瀑布流，只读本地库）。"""
-    return render_template('home.html')
+    """首页：最近 48 小时热门（纯图瀑布流，只读本地库）。
+
+    `csrf_token` 给 `/api/home/more`（滚动加载更多）用；`items_per_page` 经 meta
+    下发给 `page-home.js`（与图库同一约定，改设置后页大小跟随）。
+    """
+    return render_template('home.html', csrf_token=_get_csrf_token(),
+                           items_per_page=ITEMS_PER_PAGE)
 
 
 @app.route('/explore')

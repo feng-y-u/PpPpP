@@ -21,11 +21,12 @@ def _jst_now() -> datetime:
 
 
 def _illust(db, pixiv_id, *, hours_ago=1.0, bookmarks=100, tags=(), title='作品', user='画师',
-            originals=None):
+            originals=None, prefetch=False):
     """造一行作品；hours_ago=None 表示没有发布时间。
 
     `originals=None` 用默认原图地址（首页只收带原图的行，见 `query_home_feed`），
     传 `[]` 可造"没有原图地址"的行。
+    `prefetch=True` 标成预取缓存来源（`prefetch_source=1`），第二屏随机池只认这类行。
     """
     illust = Illust(
         pixiv_id=pixiv_id,
@@ -34,6 +35,7 @@ def _illust(db, pixiv_id, *, hours_ago=1.0, bookmarks=100, tags=(), title='作�
         user_name=user,
         bookmark_count=bookmarks,
         thumb_url=f'https://i.pximg.net/x/{pixiv_id}.jpg',
+        prefetch_source=1 if prefetch else 0,
         upload_date=None if hours_ago is None else _jst_now() - timedelta(hours=hours_ago),
     )
     illust.tags_list = list(tags)
@@ -202,6 +204,128 @@ class TestHomeApi:
         routes_home.clear_home_cache()
         third = client.get('/api/home').get_json()
         assert third['results'][0]['pixiv_id'] == 4302, '清缓存后新增作品必须立刻可见'
+
+
+class TestHomeRandom:
+    """第二屏起：从预取缓存里随机抽收藏数 > 500 的作品。
+
+    与第一屏的分界是"口径"而不是"接口"：第一屏是时间窗 + 收藏数排序，第二屏是
+    不限时间窗的随机推荐。两条口径各自钉住，防止随机部分悄悄退化成"又一个排行"。
+    """
+
+    def _token(self, client):
+        return client.get('/csrf-token').get_json()['token']
+
+    def _more(self, client, exclude=None, limit=24):
+        return client.post('/api/home/more',
+                           json={'exclude': exclude or [], 'limit': limit},
+                           headers={'X-CSRF-Token': self._token(client)})
+
+    def test_pool_is_prefetch_with_strict_bookmark_threshold(self, client, clean_db):
+        """池子只认：预取来源 + 收藏数**严格大于** 500 + 带原图地址。
+
+        500 本身不进池（用户口径是 ">500"）；`prefetch_source=0`（手搜临时入库）
+        也不进池 —— "缓存里"只指预取缓存。中图地址由原图拼出，没有原图的行走不了
+        中图，随机推荐同样排除。
+        """
+        _illust(clean_db, 5001, bookmarks=501, prefetch=True)
+        _illust(clean_db, 5002, bookmarks=500, prefetch=True)
+        _illust(clean_db, 5003, bookmarks=9000, prefetch=True, originals=[])
+        _illust(clean_db, 5004, bookmarks=9999, prefetch=False)
+
+        data = self._more(client).get_json()
+
+        assert [r['pixiv_id'] for r in data['results']] == [5001], \
+            f'500 本身与手搜行都该被排除，实际 {[r["pixiv_id"] for r in data["results"]]}'
+        assert data['min_bookmarks'] == helpers.HOME_RANDOM_MIN_BOOKMARKS
+        assert data['has_more'] is False
+        assert data['results'][0]['medium_url'].startswith('/thumb/'), \
+            '随机推荐同样要给中图地址（与第一屏同一链路）'
+
+    def test_exclude_prevents_duplicates_across_pages(self, client, clean_db):
+        """随机序不能用 offset 分页：跨屏去重靠 exclude，池子抽空时返回空。
+
+        `has_more` 是"排除已展示后还剩多少"的信号：剩 10 条要 10 条时为 False，
+        前端据此收尾，不必多打一次空请求。
+        """
+        for i in range(30):
+            _illust(clean_db, 5100 + i, bookmarks=600 + i, prefetch=True)
+
+        first = self._more(client, limit=10).get_json()
+        shown = [r['pixiv_id'] for r in first['results']]
+        assert len(shown) == 10 and first['has_more'] is True
+
+        second = self._more(client, exclude=shown, limit=10).get_json()
+        second_ids = [r['pixiv_id'] for r in second['results']]
+        assert len(second_ids) == 10
+        assert not (set(second_ids) & set(shown)), '已展示的作品不允许重复出现'
+
+        third = self._more(client, exclude=shown + second_ids, limit=10).get_json()
+        third_ids = [r['pixiv_id'] for r in third['results']]
+        assert len(third_ids) == 10
+        assert third['has_more'] is False, '池子恰好抽满时 has_more 必须为 False'
+
+        all_shown = shown + second_ids + third_ids
+        exhausted = self._more(client, exclude=all_shown, limit=10).get_json()
+        assert exhausted['results'] == [], '池子抽空后返回空列表而不是重复作品'
+        assert exhausted['has_more'] is False
+
+    def test_random_hides_r18_and_blocked_and_ignores_time_window(self, client, clean_db):
+        """恒定过滤照旧生效，但随机部分**不限时间窗**：缓存里再老的高收藏作品也要能翻出来。
+
+        再加时间窗等于只在"最近 48 小时且 >500"的极少数里抽，第二屏会立刻抽空。
+        """
+        clean_db.add(BlockedTag(tag='巨人'))
+        clean_db.commit()
+        _illust(clean_db, 5201, bookmarks=900, prefetch=True, tags=['R-18'])
+        _illust(clean_db, 5202, bookmarks=900, prefetch=True, tags=['巨人'])
+        _illust(clean_db, 5203, bookmarks=900, prefetch=True, hours_ago=24 * 365)
+
+        data = self._more(client).get_json()
+
+        assert [r['pixiv_id'] for r in data['results']] == [5203], \
+            'R18 与被屏蔽标签必须隐藏，老作品必须能出现'
+
+    def test_more_is_not_written_to_the_60s_cache(self, client, clean_db):
+        """随机接口不能写首页的 60 秒缓存：写进去"随机"就会在一分钟内定住。"""
+        _illust(clean_db, 5301, bookmarks=900, prefetch=True)
+
+        self._more(client)
+
+        assert routes_home._home_cache == {}, '随机推荐绝不能进 /api/home 的进程内缓存'
+
+    def test_bad_body_or_dirty_exclude_does_not_500(self, client, clean_db):
+        """body 不是对象 / exclude 里混了非整数：忽略脏值，不许把首页打成 500。"""
+        _illust(clean_db, 5401, bookmarks=900, prefetch=True)
+        token = self._token(client)
+
+        bad = client.post('/api/home/more', data='not json',
+                          content_type='application/json',
+                          headers={'X-CSRF-Token': token})
+        assert bad.status_code == 200, '非法 JSON 应退化成空 body'
+        assert [r['pixiv_id'] for r in bad.get_json()['results']] == [5401]
+
+        dirty = client.post('/api/home/more',
+                            json={'exclude': ['abc', None, 5401, {}], 'limit': 'x'},
+                            headers={'X-CSRF-Token': token})
+        assert dirty.status_code == 200
+        assert dirty.get_json()['results'] == [], \
+            '合法的那条 exclude（5401）仍要生效，脏值忽略'
+
+    def test_home_page_wires_scroll_loading(self, client):
+        """页面要把滚动加载接上：CSRF/页大小 meta + 哨兵 + POST /api/home/more。
+
+        注：`_home_page_card_wiring` 钉的是"卡片挂进网格"；这里钉的是"往下滚有东西"。
+        """
+        html = client.get('/').get_data(as_text=True)
+        assert 'name="csrf-token"' in html, '滚动加载用 POST，页面必须下发 CSRF token'
+        assert 'name="items-per-page"' in html, '页大小必须读服务端下发的值'
+
+        js = pathlib.Path('static/page-home.js').read_text(encoding='utf-8')
+        assert '/api/home/more' in js, '滚动加载必须调用随机接口'
+        assert 'IntersectionObserver' in js, '滚动到底要自动加载'
+        assert 'feed-divider' in js, '随机段之前要有分隔条'
+        assert "'X-CSRF-Token'" in js, 'POST 必须带 CSRF 头'
 
 
 class TestHomePages:

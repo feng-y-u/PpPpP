@@ -83,6 +83,7 @@ class TestCsrfProtection:
         ('POST', '/api/prefetch/refresh'),
         ('POST', '/api/prefetch/refresh-reset'),
         ('POST', '/api/cache/items/999999/delete'),
+        ('POST', '/api/home/more'),
     ]
 
     def test_all_mutating_endpoints_require_csrf(self, client):

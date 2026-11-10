@@ -393,6 +393,32 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
 
 HOME_WINDOW_HOURS = 48          # 首页默认时间窗（小时）
 HOME_FALLBACK_HOURS = 168       # 不足一批时放宽到的小时数（7 天）
+# 首页第二屏起「高收藏」阈值：随机推荐只抽收藏数严格大于它的缓存作品。
+# 不做降级 —— 门槛是用户明确要求的，静默降到 100 等于换了个口径。
+HOME_RANDOM_MIN_BOOKMARKS = 500
+
+
+def _home_tag_conditions(blocked: list[str]) -> tuple[list[str], dict]:
+    """首页两类查询共用的标签过滤：R18 固定隐藏 + 全局屏蔽标签。
+
+    抽成一处是为了让"第一屏热门"和"第二屏随机"不会各自漂移 —— 两份 SQL 各写一次
+    标签条件，改了一处忘了另一处是最常见的口径事故。
+
+    返回 `(tag_wheres, params)`：条件与参数分开交给调用方，损坏 tags JSON 触发
+    `OperationalError` 时可以只丢掉这一组重查（保留其余过滤）。
+    """
+    r18 = sorted(pixiv_client.R18_TAGS)
+    r18_phs = ','.join(f':r18_{i}' for i in range(len(r18)))
+    tag_wheres = [
+        f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({r18_phs}))',
+    ]
+    params = {f'r18_{i}': t for i, t in enumerate(r18)}
+    if blocked:
+        blk_phs = ','.join(f':blk_{i}' for i in range(len(blocked)))
+        tag_wheres.append(
+            f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({blk_phs}))')
+        params.update({f'blk_{i}': t for i, t in enumerate(blocked)})
+    return tag_wheres, params
 
 
 def home_since(hours: int) -> datetime:
@@ -433,17 +459,7 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
 
         # 标签条件单独收集：单条损坏 JSON 会让 json_each 抛错，降级时只丢这一类，
         # 保留时间窗与收藏数过滤（与 query_cached_tag 同一套降级口径）。
-        r18 = sorted(pixiv_client.R18_TAGS)
-        r18_phs = ','.join(f':r18_{i}' for i in range(len(r18)))
-        tag_wheres = [
-            f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({r18_phs}))',
-        ]
-        tag_params = {f'r18_{i}': t for i, t in enumerate(r18)}
-        if blocked:
-            blk_phs = ','.join(f':blk_{i}' for i in range(len(blocked)))
-            tag_wheres.append(
-                f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({blk_phs}))')
-            tag_params.update({f'blk_{i}': t for i, t in enumerate(blocked)})
+        tag_wheres, tag_params = _home_tag_conditions(blocked)
 
         order = 'illusts.bookmark_count DESC, illusts.upload_date DESC, illusts.id ASC'
         base_wheres = [
@@ -487,6 +503,76 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
         id_order = {pk: i for i, pk in enumerate(ids)}
         illusts.sort(key=lambda x: id_order.get(x.id, 0))
         return [i.to_dict() for i in illusts], used_hours
+
+
+def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOKMARKS,
+                      exclude: list[int] | None = None) -> tuple[list[dict], int]:
+    """首页第二屏起：从预取缓存里随机抽「收藏数 > 阈值」的作品。
+
+    与 `query_home_feed` 的差别只有三处，其余过滤（R18 / 屏蔽标签 / 有原图）完全一致：
+      - 只要 `prefetch_source = 1` 的缓存作品，且**不限时间窗** —— 随机推荐的作用是
+        把缓存里的好作品翻出来，再套 48 小时窗口池子会立刻抽空；
+      - `bookmark_count > min_bookmarks`（严格大于，500 本身不进池）；
+      - `ORDER BY RANDOM()`：每次请求重新洗牌。随机序不能用 offset 分页（每次顺序都
+        不同，offset 会跳号），跨屏去重靠 `exclude` —— 前端把已展示的 pid 带回来，
+        第一屏的热门大概率也在池子里，不排除必然重复。
+
+    Returns: `(results, pool_total)`。`pool_total` 是排除 `exclude` 后的候选总数，
+    路由用它算 `has_more`，避免"恰好抽满一屏"时前端还要多打一次空请求。
+    """
+    from models import BlockedTag, Illust, get_session
+
+    excl: set[int] = set()
+    for pid in exclude or []:
+        try:
+            excl.add(int(pid))
+        except (TypeError, ValueError):
+            continue   # 调用方传了脏值不该让整个首页 500，跳过即可
+
+    with get_session() as db:
+        blocked = sorted({t.tag for t in db.query(BlockedTag).all()})
+        tag_wheres, tag_params = _home_tag_conditions(blocked)
+
+        wheres = [
+            'illusts.prefetch_source = 1',
+            'illusts.bookmark_count > :min_bookmarks',
+            # 中图地址从原图地址拼出来，没有原图只能退回 250px 缩略图（与首页同一承诺）
+            "COALESCE(illusts.original_urls, '') NOT IN ('', '[]')",
+        ]
+        params: dict = {'min_bookmarks': min_bookmarks, **tag_params}
+        if excl:
+            wheres.append('illusts.pixiv_id NOT IN (SELECT value FROM json_each(:exclude_ids))')
+            params['exclude_ids'] = json.dumps(sorted(excl))
+
+        where_clause = ' AND '.join(wheres + tag_wheres)
+        # 降级时只丢标签条件：来源/收藏数/原图/排除这四条都不能丢
+        fallback_clause = ' AND '.join(wheres)
+        fallback_params = {k: v for k, v in params.items() if k in ('min_bookmarks', 'exclude_ids')}
+
+        def _count(wc: str, p: dict) -> int:
+            return db.execute(text(f'SELECT COUNT(*) FROM illusts WHERE {wc}'), p).scalar() or 0
+
+        def _ids(wc: str, p: dict) -> list[int]:
+            return db.execute(
+                text(f'SELECT illusts.id FROM illusts WHERE {wc} ORDER BY RANDOM() LIMIT :lim'),
+                {**p, 'lim': limit},
+            ).scalars().all()
+
+        try:
+            total = _count(where_clause, params)
+            pk_ids = _ids(where_clause, params)
+        except OperationalError:
+            logger.warning('首页随机推荐因 tags 数据异常降级（跳过标签过滤）')
+            total = _count(fallback_clause, fallback_params)
+            pk_ids = _ids(fallback_clause, fallback_params)
+
+        if not pk_ids:
+            return [], total
+
+        illusts = db.query(Illust).filter(Illust.id.in_(pk_ids)).all()
+        id_order = {pk: i for i, pk in enumerate(pk_ids)}
+        illusts.sort(key=lambda x: id_order.get(x.id, 0))
+        return [i.to_dict() for i in illusts], total
 
 
 # ── URL/展示工具 ──

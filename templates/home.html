@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<meta name="items-per-page" content="{{ items_per_page }}">
 <title>PpPpP · 最近 48 小时热门</title>
 <link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
 <link href="/static/style.css" rel="stylesheet">
@@ -50,7 +52,7 @@
 
 /* ── 时间窗说明条：正常 / 已放宽到 7 天 ── */
 .window-note {
-  display: inline-flex; align-items: center; gap: 9px;
+  display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap;
   font-size: 11.5px; letter-spacing: .02em; color: var(--ink-soft);
   background: rgba(255,255,255,.7);
   border: 1px solid var(--steel);
@@ -64,6 +66,7 @@
 }
 .window-note.fallback { border-left-color: var(--amber); color: #8A6528; }
 .window-note.fallback .dot { background: var(--amber); box-shadow: 0 0 0 3px rgba(192,138,46,.14); }
+.window-note-extra { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); }
 .window-note-action {
   margin-left: auto; padding: 0; cursor: pointer;
   font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em;
@@ -234,6 +237,25 @@
   .photo-card, .photo-card img { transition: none !important; }
   .photo-card:hover, .photo-card:hover img { transform: none !important; }
 }
+
+/* ── 随机推荐分隔条 / 加载结束提示 ── */
+/* column-span: all 让分隔条横跨三列，把"48 小时热门"与"缓存随机推荐"两段分开；
+   不支持的旧浏览器会退化成某一列里的普通块，功能不受影响。 */
+.feed-divider {
+  column-span: all;
+  -webkit-column-span: all;
+  margin: 4px 0 20px;
+  padding: 11px 0 0;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em;
+  color: var(--ink-mute); text-align: center;
+  border-top: 1px solid var(--steel);
+}
+.feed-end {
+  margin: 18px 0 24px; padding: 14px 0 0;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em;
+  color: var(--ink-mute); text-align: center;
+  border-top: 1px solid var(--steel-soft);
+}
 </style>
 </head>
 <body>
@@ -262,7 +284,7 @@
   <div class="home-head">
     <div>
       <h1 class="home-head-title">最近 48 小时热门</h1>
-      <p class="home-head-sub">按收藏数排序 · 悬停图片查看作者与名称</p>
+      <p class="home-head-sub">第一屏按收藏数排序 · 向下滚动为缓存随机推荐</p>
     </div>
     <div class="home-head-meta">
       <div><strong id="homeCount">0</strong> 件作品</div>
@@ -278,6 +300,7 @@
   </div>
 
   <div id="homeGrid" class="masonry"></div>
+  <div id="homeFeedEnd" class="feed-end" style="display:none;"></div>
 
   <div id="homeEmpty" class="empty-wrap" style="display:none;">
     <h5>还没有可展示的近期作品</h5>
@@ -291,7 +314,7 @@
   </div>
 
   <div class="home-foot">
-    <span>收藏数来自最近一次详情补全；未补全收藏数的作品不参与排序。</span>
+    <span>收藏数来自最近一次详情补全；第一屏按收藏数排序，之后为缓存随机推荐。</span>
     <span>数据来自本地缓存</span>
   </div>
 </div>
