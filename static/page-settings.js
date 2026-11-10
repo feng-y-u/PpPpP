@@ -298,18 +298,7 @@ function renderBlockedTags() {
     el.addEventListener('click', () => removeBlockedTag(el.dataset.tag));
   });
 }
-async function addBlockedTag(tag) {
-  try {
-    const r = await fetch('/api/blocked-tags', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({ tag }),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (r.ok) { loadBlockedTags(); showToast('已屏蔽：' + tag); }
-    else showToast(d.error || '添加失败', true);
-  } catch { showToast('网络错误', true); }
-}
+// addBlockedTag 在 app.js（搜索页的标签 × 也用它），这里只负责刷新本页列表
 async function removeBlockedTag(tag) {
   try {
     const r = await fetch(`/api/blocked-tags/${encodeURIComponent(tag)}`, {
@@ -321,7 +310,10 @@ async function removeBlockedTag(tag) {
 }
 $('#addBlockedBtn').addEventListener('click', () => {
   const t = $('#newBlockedTag').value.trim();
-  if (t) { addBlockedTag(t); $('#newBlockedTag').value = ''; }
+  if (!t) return;
+  $('#newBlockedTag').value = '';
+  // 共享实现只负责发请求 + toast，列表刷新是本页的事
+  addBlockedTag(t).then(ok => { if (ok) loadBlockedTags(); });
 });
 $('#newBlockedTag').addEventListener('keydown', e => { if (e.key === 'Enter') $('#addBlockedBtn').click(); });
 

@@ -176,7 +176,6 @@ E:\pixiv\
 ├── static/
 │   ├── app.js                     # 共享工具（$ / escHtml / proxyThumb / fmtSize / pvCache / showToast ...）
 │   ├── page-*.js                  # page-index/gallery/detail/downloads/cache/settings/login/settings_unlock（按页入口）
-│   ├── lightbox.js                # 灯箱（扁平图片级导航 + /api/detail 探测）
 │   ├── style.css                  # 粉色系设计令牌、响应式、prefers-reduced-motion 降级
 │   └── vendor/bootstrap-5.3.3/    # 本地 vendor（bootstrap.min.css / bootstrap.bundle.min.js）
 ├── docs/
@@ -428,7 +427,7 @@ graph LR
     end
     subgraph 图片字节流
         IMG[i.pximg.net] -->|/thumb 代理| IC[(image_cache 磁盘缓存)] --> U1[浏览器缩略图/中图]
-        IMG2[i.pximg.net 原图] -->|下载引擎| DOWN[(downloads/&lt;pid&gt;/)] -->|/api/image| U2[浏览器灯箱原图]
+        IMG2[i.pximg.net 原图] -->|下载引擎| DOWN[(downloads/&lt;pid&gt;/)] -->|/api/image| U2[浏览器详情页原图]
     end
     subgraph 状态流
         RUNTIME[(runtime 进程内存：队列/进度/任务/限流/缓存)] <-->|读写| MOD[模块]
@@ -471,7 +470,7 @@ graph LR
 
 - `middleware.bp`（Blueprint 无路由，仅挂 app 级钩子）+ 装饰器工厂 `_rate_limit(max_attempts, window)`。
 - `fetcher` 线程本地连接池：`_thread_local`（`threading.local`）承载 session 与 Cookie 文件 mtime 戳；`get_pooled_session()` 按线程复用、`reset_pooled_session()` 丢弃重建（`fetcher.py`）。
-- 前端类（ES2020，无 class 私有字段）：`pvCache`（localStorage TTL 缓存对象，`static/app.js`）；灯箱、导航等为工厂函数 + DOM 操作（详见 §13 前端约定）。
+- 前端类（ES2020，无 class 私有字段）：`pvCache`（localStorage TTL 缓存对象，`static/app.js`）；详情页图源候选链、跨作品翻页等为函数 + DOM 操作（详见 §13 前端约定）。
 
 ---
 
@@ -1063,7 +1062,7 @@ graph TD
 
 ### 21.2 已确认的剩余成本（AGENTS.md 量化）
 
-- `/api/gallery` 的 `to_dict()` 携带 `original_urls`/`created_at`/`downloaded_at`，图库网格与灯箱都不消费（约占单条体积 17%）。
+- `/api/gallery` 的 `to_dict()` 携带 `original_urls`/`created_at`/`downloaded_at`，图库网格与详情页都不消费（约占单条体积 17%）。
 - `_scan_local_downloads` 冷扫描 500 作品（1500 文件）约 43.8ms，75% 是 `os.path.isfile()`（换 `os.scandir` 快 1.6 倍；有 30s 缓存，暂不值得改）。
 - Flask 自身不 gzip：`/api/gallery?limit=50` 约 25KB；压缩应交给反代（nginx/Caddy gzip/brotli）。
 
@@ -1234,7 +1233,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 | 迁移失败 | `instance/backups/<ts>.bak` 恢复 + 旧代码；确认 `user_version` 回退一致（maintenance.md） |
 | Windows 上实例 DB 删除失败 | WinError 32：进程持有文件句柄；`models.engine.dispose()` 后删除（conftest.py 同款） |
 | 测试 4 个 test_test_setup 失败 | 沙箱环境 powershell 子进程受限（§19.3）；真实 Windows 应全绿 |
-| 灯箱 502 | `/thumb` 失败 URL 30s 冷却（`_thumb_failed`）；图床拒绝或超时；核对白名单前缀 `https://i.pximg.net/` |
+| 详情页大图 502 | `/thumb` 失败 URL 30s 冷却（`_thumb_failed`）；图床拒绝或超时；核对白名单前缀 `https://i.pximg.net/` |
 | 图库首屏慢 | gunicorn 缺省 sync worker 串行（需 `--threads 8`）；或 image_cache 冷启动回源 |
 
 ---
@@ -1352,7 +1351,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 
 1. **多实例/多用户**：当前架构的所有内存状态与 SQLite 模型都是单实例设计（runtime.py 注释明示）；演进需先外置状态（P3 高难度项）。
 2. **上游兼容层**：Pixiv Ajax API 非官方且经常变动；`fetcher.py` 已把所有解析集中一处，未来可抽解析器接口 + 契约测试（当前 test_fetcher 已覆盖主要报文形态）。
-3. **离线能力扩展**：目前「缓存」只是元数据 + 缩略图；可演进为完整离线浏览（原图预下载策略、离线灯箱）。
+3. **离线能力扩展**：目前「缓存」只是元数据 + 缩略图；可演进为完整离线浏览（原图预下载策略、离线浏览页）。
 4. **可观测性**：`refresh_stats`/`detail_errors` 已是内置健康信号（/api/prefetch/status），可扩展为统一 status 页。
 
 ---

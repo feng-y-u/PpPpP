@@ -131,7 +131,7 @@ BACKUP_KEEP = 7           # 保留份数
 MEDIUM_IMAGE_SIZE = 600   # 详情页图片中图尺寸（长边 px），小站点建议 600 以下
 
 # 缩略图代理并发上限：图片走 i.pximg.net 图床（比 Ajax API 宽松）。
-# 调大 → 图库首屏 / 灯箱加载更快；调小 → 减轻对 Pixiv 的压力。需重启生效。
+# 调大 → 图库首屏 / 详情页原图加载更快；调小 → 减轻对 Pixiv 的压力。需重启生效。
 THUMB_CONCURRENCY = 12
 
 # 缩略图磁盘缓存（instance/image_cache）容量上限与淘汰策略。

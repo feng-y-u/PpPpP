@@ -273,22 +273,16 @@ function renderCard(r) {
         <div class="tags-wrap">${tags}</div>
         <div class="d-flex gap-1 mt-1">
           <button class="btn btn-outline-danger btn-sm flex-fill delete-btn" data-pid="${r.pixiv_id}">删除</button>
-          <a href="/download_file/${r.pixiv_id}" class="btn btn-soft btn-sm dl-file-btn" onclick="event.stopPropagation()">下载</a>
+          <a href="/download_file/${r.pixiv_id}" class="btn btn-soft btn-sm dl-file-btn">下载原图</a>
         </div>
       </div>
     </div>`;
 
+  // 点卡片（图片区或信息区）→ 详情页，带图库导航上下文（可「上一作/下一作」）
   col.querySelector('.gallery-card').addEventListener('click', function(e) {
     if (e.target.closest('.delete-btn') || e.target.closest('.card-checkbox') || e.target.closest('.dl-file-btn') || e.target.closest('a')) return;
     const idx = currentResults.findIndex(x => x.pixiv_id === r.pixiv_id);
-    if (e.target.closest('.card-body')) {
-      location.href = buildDetailUrl(r, idx >= 0 ? idx : 0);
-      return;
-    }
-    lightbox.open(currentResults.map(x => ({
-      pixiv_id: x.pixiv_id,
-      thumbUrl: proxyThumb(x.thumb_url),
-    })), idx >= 0 ? idx : 0);
+    location.href = buildDetailUrl(r, idx >= 0 ? idx : 0);
   });
 
   col.querySelector('.delete-btn').addEventListener('click', function() {

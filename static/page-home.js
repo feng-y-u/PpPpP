@@ -4,7 +4,7 @@
 
 let homeItems = [];
 
-function renderHomeCard(r, index) {
+function renderHomeCard(r) {
   // 瀑布流要中图：服务端已把原图地址转成 master1200 并代理成 /thumb/<b64>
   // （没原图地址的行退回 250px 缩略图，首页不为画质去拉详情）
   const imgSrc = r.medium_url || proxyThumb(r.thumb_url);
@@ -21,17 +21,8 @@ function renderHomeCard(r, index) {
     </div>`;
 
   const card = item.querySelector('.photo-card');
-  const open = () => {
-    // 导航上下文 = 首页整批结果，灯箱里左右切换在整页内进行
-    if (typeof lightbox === 'undefined') {
-      window.location.href = `/detail/${r.pixiv_id}`;
-      return;
-    }
-    lightbox.open(homeItems.map(x => ({
-      pixiv_id: x.pixiv_id,
-      thumbUrl: x.medium_url || proxyThumb(x.thumb_url),
-    })), index);
-  };
+  // 点卡片 → 详情页（原图/中图候选链在详情页里）
+  const open = () => { window.location.href = `/detail/${r.pixiv_id}`; };
   card.addEventListener('click', open);
   card.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }

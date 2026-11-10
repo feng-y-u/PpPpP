@@ -638,7 +638,7 @@
       <div class="artist-avatar">{{ illust.user_name[:1] or '?' }}</div>
       <div class="artist-info">
         <div class="artist-name">
-          <a href="/?type=user&query={{ illust.user_id }}">{{ illust.user_name or '未知画师' }}</a>
+          <a href="/explore?type=user&query={{ illust.user_id }}">{{ illust.user_name or '未知画师' }}</a>
         </div>
         <div class="artist-sub">UID {{ illust.user_id }}</div>
       </div>

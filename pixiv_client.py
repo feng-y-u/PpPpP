@@ -422,7 +422,7 @@ def build_credentialless_session() -> requests.Session:
 # 调用方曾对每张图、每个作品都 build_pixiv_session() 再 close()，于是每次请求
 # 都要重做 TCP + TLS 握手（实测 30 次请求 = 30 条连接，复用后 = 1 条；本地无
 # TLS 就已快 3 倍，真实环境还要叠加每次 1~2 个 RTT 的 TLS 握手）。批量加载
-# 图片或并发拉详情时，握手开销可能超过响应体本身，是图库/灯箱/搜索变慢的主因。
+# 图片或并发拉详情时，握手开销可能超过响应体本身，是图库/详情页/搜索变慢的主因。
 #
 # 按线程缓存而非全局共享：requests.Session 不保证线程安全，但同线程内跨请求
 # 复用连接池完全安全，且已覆盖 gunicorn sync worker 的主线程与线程池 executor

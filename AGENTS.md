@@ -60,7 +60,7 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `routes_prefetch.py` | 预取管理 API（config / tags / status / refresh） |
 | `routes_settings.py` | 登录、设置读写、屏蔽标签、自动关注控制 |
 | `templates/*.html` | 9 个 Jinja2 模板（首页、搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
-| `static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `lightbox.js` + `style.css` + `vendor/bootstrap-5.3.3/` |
+| `static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `style.css` + `vendor/bootstrap-5.3.3/`。**无灯箱组件**（2026-11-10 移除 `lightbox.js`，卡片点击一律跳详情页） |
 | `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`check_tls.py`（只读 TLS 拦截诊断，退出码 0/1/2）、`pixiv_capture.py`（抓取并**脱敏** Pixiv 响应样本，刷新契约测试 fixtures）、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
 | `migrations/` | `runner.py`（按 `PRAGMA user_version` 版本化执行，**升级前自动备份**）+ `versions.py` |
 | `pixiv-api-http-main/` | 内置第三方 Node.js Pixiv API 参考实现，**仅作接口格式对照，不参与运行** |
@@ -258,7 +258,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 
 - **按一批 id 过滤作品用 `json_each`，不要拼分块 `IN`**。`_pid_filter` 把整个 id 数组作为**一个**绑定参数下推；分块 `IN` 在 8000 个 id 时会生成 16k 个绑定参数。实测 `query_cached_tag` 64.2ms → 24.8ms（纯 SQL 部分 64ms → 7ms，快 8.8 倍）。
 - **别在循环里发查询**。`list_collections` 曾对每个收藏夹单独 `COUNT`，20 个收藏夹 5.0ms；改成一次 `GROUP BY` 后整条 HTTP 路由 0.9ms。
-- **`/api/image` 必须带 `max_age`**。Flask 的 `SEND_FILE_MAX_AGE_DEFAULT` 默认为 `None`，此时 `send_file` 发的是 `Cache-Control: no-cache` —— 已下载原图每次打开灯箱都要发一趟 304 重新校验。已设 `LOCAL_IMAGE_MAX_AGE`（7 天，与 `/thumb` 一致；重新下载会产生新 mtime，ETag 随之变化）。
+- **`/api/image` 必须带 `max_age`**。Flask 的 `SEND_FILE_MAX_AGE_DEFAULT` 默认为 `None`，此时 `send_file` 发的是 `Cache-Control: no-cache` —— 已下载原图每次在详情页打开都要发一趟 304 重新校验。已设 `LOCAL_IMAGE_MAX_AGE`（7 天，与 `/thumb` 一致；重新下载会产生新 mtime，ETag 随之变化）。
 - **压缩交给反代**。Flask 自身不 gzip，`/api/gallery?limit=50` 响应体约 25 KB。生产前面有 nginx/Caddy 时在那里开 gzip/brotli，不要在应用层加。
 - **按作者搜索是唯一走"全量同步详情"的搜索路径，改动前务必先读**。它是 `search_by_user` 传 `illust_factory=_illust_from_detail` 且不传 `defer_details`，因为过滤条件（`hide_r18` / `min_bookmarks`）**必须拿到详情的 tags 才能判定**，而 `profile/all` 只给 id —— 所以过滤必然发生在拉详情之后。对比之下 `search_by_tag` 的 `defer = defer_details or (min_bookmarks == 0)`，列表接口自带 tags/thumb，默认一条详情都不拉。
   三道闸把成本压在可控范围内，**不要绕过任何一道**：
@@ -271,13 +271,13 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 规模变大后才需要看的：
 
 - `_scan_local_downloads` 冷扫描 500 个作品目录（1500 文件）约 **43.8ms**，其中 75% 是逐文件 `os.path.isfile()`；换 `os.scandir`（复用 dirent 的 `is_file()`）可快 1.6 倍。有 30 秒 TTL 缓存兜底，当前 `downloads/` 规模很小，暂不值得改。
-- `/api/gallery` 的 `to_dict()` 会带上 `original_urls` / `created_at` / `downloaded_at`，而图库网格和灯箱都不消费它们（约占单条体积的 17%）。要裁剪得给 `to_dict()` 加参数，且 `test_models.py::TestIllustToDict` 断言了完整字段集，改动需同步。
+- `/api/gallery` 的 `to_dict()` 会带上 `original_urls` / `created_at` / `downloaded_at`，而图库网格和详情页都不消费它们（约占单条体积的 17%）。要裁剪得给 `to_dict()` 加参数，且 `test_models.py::TestIllustToDict` 断言了完整字段集，改动需同步。
 
 ### 连接复用：热点路径必须用 `get_pooled_session()`
 
 `build_pixiv_session()` 每次都会新建 `HTTPAdapter` → 新的 urllib3 `PoolManager`，`close()` 后连接池销毁。在循环里对每个 URL / 每个作品调用它，等于**每次请求都重做一次 TCP + TLS 握手**。
 
-实测（本地 HTTP 服务器，无 TLS）：30 次请求 —— 每请求新建 Session = **30 条 TCP 连接**；复用一个 Session = **1 条**。真实环境每条连接还要额外付 1~2 个 RTT 的 TLS 握手，图片越小这笔开销占比越高（图库首屏、灯箱、搜索批量拉详情都踩在这里）。
+实测（本地 HTTP 服务器，无 TLS）：30 次请求 —— 每请求新建 Session = **30 条 TCP 连接**；复用一个 Session = **1 条**。真实环境每条连接还要额外付 1~2 个 RTT 的 TLS 握手，图片越小这笔开销占比越高（图库首屏、详情页原图、搜索批量拉详情都踩在这里）。
 
 - 用 `pixiv_client.get_pooled_session()`（`fetcher` 亦再导出）：按线程缓存 Session，同线程跨请求复用连接；Cookie 文件 mtime 变化时自动重建。
 - 不跨线程共享（`threading.local`），因为 `requests.Session` 不保证线程安全。
@@ -310,7 +310,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - 无构建步骤：`app.js` 提供共享工具（`$`、`escHtml`、`proxyThumb`、`fmtSize`、`pvCache` 等），每个模板在底部显式引入自己的 `page-<name>.js`。
 - CSRF token 从页面 `<meta name="csrf-token">` 读取，POST 统一带 `X-CSRF-Token` 头。
 - 搜索结果在前端缓存 30 分钟（`SEARCH_CACHE_TTL`），游标状态恢复兜底 24 小时（与后端游标 TTL 对齐）。
-- **搜索页也接了共享 lightbox**：已提交的结果卡点击弹预览（导航上下文是**本页整页结果**，由 `renderCard(r, {list, index})` 传入），灯箱里的「打开详情」负责跳转；**预览卡是例外** —— 未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱只能拿到 250px 缩略图，所以预览卡仍跳详情页（那边有内存快照兜底给出中图）。
+- **卡片点击一律跳详情页**：全站已无灯箱（2026-11-10 移除 `static/lightbox.js`，用户反馈不好用）。首页/搜索/图库三处卡片点击都进 `/detail/<pid>`；图库卡片带 `ctx=gallery&sort&page&pos` 上下文（详情页据此给「上一作/下一作」），搜索页的**预览卡**（未落库）走同一个入口，由详情页回退到运行中任务的内存快照给出中图。
 - **空结果会做一次凭据体检**：`finishSearch` 在结果为空时调 `/api/pixiv/health`，只在"确实有问题"时把 `advice` 显示到 `#emptyHint`（Cookie 缺失/失效/限流/网络）。这是**增强提示**：接口失败或没有该字段都不影响原有空状态，且体检期间用户已发起新搜索时不得把建议插到新结果上（`#emptyState` 不可见就丢弃）。
 
 ---

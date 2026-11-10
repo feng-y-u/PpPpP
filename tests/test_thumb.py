@@ -665,7 +665,7 @@ def test_api_image_resolution_has_three_branches(client, clean_db, tmp_path, mon
 
     monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
 
-    # ① DB 命中且文件在盘上：直接回文件（带 7 天 max_age，灯箱不再每张发 304）
+    # ① DB 命中且文件在盘上：直接回文件（带 7 天 max_age，详情页不再每张发 304）
     img = tmp_path / 'page1.jpg'
     img.write_bytes(b'db-jpeg')
     _make_done_illust(70001, [str(img)])

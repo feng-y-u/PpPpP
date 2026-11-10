@@ -113,26 +113,28 @@ function pollDl(pixivId) {
 }
 
 function updateDlDone(pixivId) {
-  // 卡片式 UI（index.html 搜索结果页）
+  // 卡片式 UI（index.html 搜索结果页 / cache.html 缓存页）
+  // 已下载态统一是一个真链接：文案「下载原图」、同标签页取文件。不再挂点击处理器
+  // （旧实现是 button + downloadFile() 走 window.open，与图库/详情页的 <a> 不一致）。
   const card = document.querySelector(`.photo-card[data-pixiv-id="${pixivId}"]`);
   if (card) {
     const actions = card.querySelector('.photo-card-actions');
     if (actions) {
-      actions.innerHTML = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${pixivId}">下载</button>`;
-      actions.querySelector('.dl-file-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        downloadFile(pixivId);
-      });
+      actions.innerHTML = `<a href="/download_file/${pixivId}" class="btn btn-dl-done btn-sm dl-file-btn">下载原图</a>`;
     }
     return;
   }
-  // 按钮式 UI（detail.html 详情页）
+  // 按钮式 UI（detail.html 详情页）：换成下载链而不是改按钮属性。
+  // 只改 onclick 的话，页面加载时绑在按钮上的 click 监听器仍在 —— 点一下会同时
+  // 跳文件页和再 POST 一次 /download/<pid>（下载已完成，纯属多余请求）。
   const btn = document.getElementById('downloadBtn');
   if (btn) {
-    btn.textContent = '⬇ 下载原图';
-    btn.className = 'btn btn-dl-done';
-    btn.disabled = false;
-    btn.onclick = () => downloadFile(pixivId);
+    const a = document.createElement('a');
+    a.id = 'downloadBtn';
+    a.className = 'btn btn-dl-done';
+    a.href = `/download_file/${pixivId}`;
+    a.textContent = '⬇ 下载原图';
+    btn.replaceWith(a);
   }
 }
 
@@ -159,8 +161,31 @@ function resetDlBtn(pixivId) {
   }
 }
 
-function downloadFile(pixivId) {
-  window.open(`/download_file/${pixivId}`, '_blank');
+// ── 屏蔽标签（全站共享）──
+// 搜索页卡片标签上的 × 与设置页「添加」按钮共用这一份实现。此前它只定义在
+// page-settings.js 里，而搜索页并不加载那个脚本 —— 点 × 会抛 ReferenceError，
+// 界面毫无反应、标签也没被屏蔽（用户以为已经屏蔽了）。
+// CSRF 直接读 meta，不依赖各页脚本里的 csrfToken 变量（首页没有该变量）。
+async function addBlockedTag(tag) {
+  const t = (tag || '').trim();
+  if (!t) return false;
+  try {
+    const r = await fetch('/api/blocked-tags', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
+      },
+      body: JSON.stringify({ tag: t }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showToast(d.error || '添加失败', true); return false; }
+    showToast('已屏蔽：' + t);
+    return true;
+  } catch {
+    showToast('网络错误', true);
+    return false;
+  }
 }
 
 // ── 丝滑化公共能力 ──

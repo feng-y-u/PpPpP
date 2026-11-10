@@ -206,11 +206,12 @@ class TestHomeApi:
 
 class TestHomePages:
     def test_home_page_card_wiring(self, client):
-        """首页脚本必须把卡片挂进网格，并接上灯箱与信息牌。
+        """首页脚本必须把卡片挂进网格，并接上"跳详情页"与信息牌。
 
         回归背景：`renderInChunks` 只分帧调用渲染函数、**不负责插入**（搜索页也是
         调用方自己 `appendChild`）。第一版 `page-home.js` 漏了这一步，症状是
         计数与时间窗说明条都正常、网格永远空白 —— 所以这条用源码断言钉住。
+        卡片点击曾经开共享灯箱，灯箱整体移除后改为跳详情页（2026-11-10）。
         """
         page = client.get('/')
         assert page.status_code == 200
@@ -218,7 +219,9 @@ class TestHomePages:
 
         js = pathlib.Path('static/page-home.js').read_text(encoding='utf-8')
         assert 'grid.appendChild(node)' in js, '卡片必须显式挂进 #homeGrid'
-        assert 'lightbox.open(' in js, '点卡片要开灯箱（导航上下文 = 首页整批）'
+        assert 'lightbox' not in js, '灯箱已移除'
+        assert 'window.location.href = `/detail/${r.pixiv_id}`' in js, \
+            '点卡片要跳详情页'
         assert 'card-meta-title' in js and 'card-meta-artist' in js, \
             '信息牌只放名称与作者'
 
@@ -233,4 +236,4 @@ class TestHomePages:
         explore = client.get('/explore')
         assert explore.status_code == 200
         assert b'page-index.js' in explore.data, '/explore 必须还是原来的搜索页'
-        assert b'lightbox.js' in explore.data
+        assert b'lightbox' not in explore.data, '灯箱已移除，不再引入 lightbox.js'

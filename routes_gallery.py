@@ -253,7 +253,7 @@ def thumb_proxy(url_b64: str) -> Response:
 
 # 已下载原图是不变的（重新下载会产生新的 mtime，ETag 随之变化），可放心长缓存。
 # Flask 的 SEND_FILE_MAX_AGE_DEFAULT 默认为 None，此时 send_file 发的是
-# Cache-Control: no-cache —— 浏览器每次打开灯箱都要发一趟 304 重新校验。
+# Cache-Control: no-cache —— 详情页每次打开原图都要发一趟 304 重新校验。
 # 与 /thumb 代理保持一致的 7 天。
 LOCAL_IMAGE_MAX_AGE = 86400 * 7
 

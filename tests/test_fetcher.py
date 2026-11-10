@@ -1290,7 +1290,7 @@ class TestPooledSession:
 
     回归背景：`/thumb` 与 `_fetch_details_parallel` 曾对每张图 / 每个作品都新建
     Session 再 close()，等于每次请求都重做 TCP + TLS 握手（实测 30 次请求 =
-    30 条连接，复用后 = 1 条），是图库首屏、灯箱与搜索变慢的主因。
+    30 条连接，复用后 = 1 条），是图库首屏、详情页原图与搜索变慢的主因。
     """
 
     @pytest.fixture(autouse=True)

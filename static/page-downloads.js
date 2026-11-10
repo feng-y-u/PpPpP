@@ -138,7 +138,7 @@ function renderCompleted(items) {
         <div class="dl-meta">#${i.pixiv_id} · ${escHtml(i.user_name)}</div>
       </div>
       <div class="dl-status d-flex gap-1">
-        <a href="/download_file/${i.pixiv_id}" class="btn btn-success btn-sm">下载</a>
+        <a href="/download_file/${i.pixiv_id}" class="btn btn-success btn-sm">下载原图</a>
       </div>
     </div>`).join('');
     

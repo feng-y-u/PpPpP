@@ -138,8 +138,7 @@ function renderPage(pageNum) {
   const grid = $('#masonryGrid');
   grid.innerHTML = '';
   renderInChunks(page, (r, i) => {
-    // 把"本页列表 + 下标"交给卡片：点开灯箱时要用整页做导航上下文（与图库一致）
-    const node = renderCard(r, { list: page, index: i });
+    const node = renderCard(r);
     grid.appendChild(node);
     return node;
   }, { chunk: 12, delay: 25 }).then(() => {
@@ -391,7 +390,7 @@ function finishSearch(data) {
   const grid = $('#masonryGrid');
   const results = loadedPages[0];
   renderInChunks(results, (r, i) => {
-    const node = renderCard(r, { list: results, index: i });
+    const node = renderCard(r);
     grid.appendChild(node);
     return node;
   }, { chunk: 12, delay: 25 }).then(() => {
@@ -618,17 +617,14 @@ $('#r18Mode').addEventListener('change', () => {
 // 的 _make_search_publisher）。这一步之差有用户可见的后果：该 pid 的行可能随后随事务回滚，
 // 此时 /detail/<pid> 会 abort(404)、下载接口返回 404 作品不存在（routes_download）。
 // 选择的组合：
-//   ① **已提交卡 → 灯箱**：与图库/缓存页一致，点卡片弹预览，灯箱里的「打开详情」负责跳转；
-//      导航上下文取"本页已提交的整页结果"（opts.list / opts.index，由 renderPage /
-//      finishSearch 传入）；
-//   ② **预览卡 → 详情页**：未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱的页源探测
-//      只能拿到 250px 缩略图 —— 而详情页会回退到进行中搜索任务的内存快照
-//      （runtime.find_running_preview）给出中图，所以预览卡仍然走详情页；
-//   ③ 渲染层不打**下载**行为：预览卡不渲染下载按钮（未落库的 pid 下载必然 404），
+//   ① **所有卡片都跳详情页**：预览卡未落库，`/api/detail/<pid>` 对它返回 404（页源探测只能
+//      拿到 250px 缩略图），而详情页会回退到进行中搜索任务的内存快照
+//      （runtime.find_running_preview）给出中图 —— 已提交卡与预览卡走同一个入口；
+//   ② 渲染层不打**下载**行为：预览卡不渲染下载按钮（未落库的 pid 下载必然 404），
 //      卡片上写明"可预览 · 暂不可下载"；
-//   ④ 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
+//   ③ 捕获阶段兜底：即使别的路径（app.js 的 updateDlDone / resetDlBtn 会按 pid 重写
 //      .photo-card-actions）往预览卡塞回下载按钮，点击也到不了它自己的监听器；
-//   ⑤ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
+//   ④ 批量下载按预览标记剔除（见 #downloadAllBtn），不提交未定稿的 PID。
 // 不传 opts 时（预览路径）行为与从前逐字一致。
 function renderCard(r, opts) {
   const preview = !!(opts && opts.preview);
@@ -637,7 +633,7 @@ function renderCard(r, opts) {
   let btnHtml;
   if (preview) btnHtml = '<span class="preview-hint" style="font-size:0.68rem;color:var(--text-muted);">可预览 · 暂不可下载</span>';
   else if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
-  else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
+  else if (isDone) btnHtml = `<a href="/download_file/${r.pixiv_id}" class="btn btn-dl-done btn-sm dl-file-btn">下载原图</a>`;
   else btnHtml = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>`;
 
   const badges = [];
@@ -684,25 +680,10 @@ function renderCard(r, opts) {
     });
   });
 
-  // Card click → 已提交卡开灯箱 / 预览卡跳详情页（理由见上方 renderCard 的注释）
+  // Card click → 详情页（已提交卡与预览卡同一入口，理由见上方 renderCard 的注释）
   item.querySelector('.photo-card').addEventListener('click', (e) => {
     if (e.target.closest('.photo-tag') || e.target.closest('.artist-link') || e.target.closest('.photo-card-actions')) return;
-    if (preview) {
-      // 未落库：/api/detail/<pid> 是 404，灯箱只会拿到缩略图；详情页有内存快照兜底
-      window.location.href = `/detail/${r.pixiv_id}`;
-      return;
-    }
-    const list = (opts && opts.list) || [];
-    const idx = (opts && typeof opts.index === 'number') ? opts.index : 0;
-    // 防御：灯箱脚本没加载时退回到"跳详情页"这个老行为，而不是整卡失去响应
-    if (typeof lightbox === 'undefined') {
-      window.location.href = `/detail/${r.pixiv_id}`;
-      return;
-    }
-    lightbox.open(list.map(x => ({
-      pixiv_id: x.pixiv_id,
-      thumbUrl: proxyThumb(x.thumb_url),
-    })), Math.max(0, Math.min(idx, list.length - 1)));
+    window.location.href = `/detail/${r.pixiv_id}`;
   });
 
   // Artist click
@@ -715,14 +696,10 @@ function renderCard(r, opts) {
     doSearch();
   });
 
-  // Download button
+  // Download button（未下载 = 触发下载；已下载是 <a>，不需要监听器）
   item.querySelector('.dl-btn')?.addEventListener('click', function(e) {
     e.stopPropagation();
     triggerDownload(r.pixiv_id, this);
-  });
-  item.querySelector('.dl-file-btn')?.addEventListener('click', function(e) {
-    e.stopPropagation();
-    downloadFile(r.pixiv_id);
   });
 
   return item;

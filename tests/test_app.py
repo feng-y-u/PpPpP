@@ -989,23 +989,23 @@ class TestRoutes:
         resp = client.get('/downloads')
         assert resp.status_code == 200
 
-    def test_index_page_wires_lightbox_for_committed_cards(self, client):
-        """搜索页必须加载共享灯箱，并让**已提交**的结果卡走灯箱。
+    def test_index_page_cards_link_to_detail_without_lightbox(self, client):
+        """搜索页卡片一律跳详情页 —— 共享灯箱已移除（2026-11-10）。
 
-        与图库/缓存页保持一致（点卡片弹预览、灯箱里的「打开详情」负责跳转）。预览卡是
-        例外：未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱探测不到页源、只能显示
-        250px 缩略图，所以它仍然走详情页（那边有内存快照兜底给出中图）。
+        历史：已提交卡曾弹共享灯箱（「打开详情」再跳转），预览卡因未落库
+        （`/api/detail/<pid>` 返回 404、灯箱探测不到页源）单独走详情页。灯箱不好用、
+        整体移除后两档合流为"点卡片即跳详情页"；预览卡仍由详情页的内存快照兜底给出中图。
         """
         resp = client.get('/explore')
         assert resp.status_code == 200
-        assert b'lightbox.js' in resp.data, '搜索页必须引入共享灯箱组件'
+        assert b'lightbox' not in resp.data, '灯箱已移除，模板不得再引入 lightbox.js'
 
         js = pathlib.Path('static/page-index.js').read_text(encoding='utf-8')
-        assert 'lightbox.open(' in js, '已提交卡点击应当打开灯箱'
-        # 导航上下文必须整页传进去（否则灯箱里左右切换只能在当前卡片上打转）
-        assert 'list: page, index: i' in js and 'list: results, index: i' in js
-        # 预览卡仍是"跳详情页"：这条分支的存在本身就是那条 404 约束的落地
-        assert 'if (preview) {' in js
+        assert 'lightbox' not in js, '搜索页脚本不得再引用灯箱'
+        # 卡片点击 = 跳详情页（预览卡与已提交卡同一入口）
+        assert 'window.location.href = `/detail/${r.pixiv_id}`' in js
+        # 预览卡不渲染下载按钮：这条约束与灯箱无关，仍然成立
+        assert '可预览 · 暂不可下载' in js
 
 
 class TestDbIsolation:

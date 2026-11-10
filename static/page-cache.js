@@ -7,7 +7,7 @@ function renderCard(r) {
   const isDl = r.download_status === 'downloading';
   let btnHtml;
   if (isDl) btnHtml = '<span style="font-size:0.68rem;color:var(--text-muted);">下载中...</span>';
-  else if (isDone) btnHtml = `<button class="btn btn-dl-done btn-sm dl-file-btn" data-pid="${r.pixiv_id}">下载</button>`;
+  else if (isDone) btnHtml = `<a href="/download_file/${r.pixiv_id}" class="btn btn-dl-done btn-sm dl-file-btn">下载原图</a>`;
   else btnHtml = `<button class="btn btn-soft btn-sm dl-btn" data-pid="${r.pixiv_id}">下载</button>`;
   // 删除按钮：仅未下载/未下载中显示
   const delBtnHtml = (isDl || isDone) ? '' :
@@ -43,14 +43,10 @@ function renderCard(r) {
     window.location.href = `/detail/${r.pixiv_id}`;
   });
 
-  // Download button
+  // Download button（未下载 = 触发下载；已下载是 <a>，不需要监听器）
   item.querySelector('.dl-btn')?.addEventListener('click', function(e) {
     e.stopPropagation();
     triggerDownload(r.pixiv_id, this);
-  });
-  item.querySelector('.dl-file-btn')?.addEventListener('click', function(e) {
-    e.stopPropagation();
-    downloadFile(r.pixiv_id);
   });
 
   // 删除按钮
