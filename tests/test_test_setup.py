@@ -10,7 +10,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_TESTS_SCRIPT = PROJECT_ROOT / "scripts" / "run_tests.ps1"
-CONFIG_PATH = PROJECT_ROOT / "config.py"
+CONFIG_PATH = PROJECT_ROOT / "pixivviewer" / "config.py"
 POWERSHELL = shutil.which("powershell.exe")
 
 
@@ -209,13 +209,16 @@ def _same_path(left, right):
 
 
 def _load_config_probe(target_dir, monkeypatch, instance_dir=None):
-    """把 config.py 复制到 target_dir 后独立 exec，返回该模块。
+    """把 config.py 复制成 `<target_dir>/pixivviewer/config_probe.py` 后独立 exec，返回该模块。
 
-    BASE_DIR 随 __file__ 落在 target_dir，于是「默认实例目录」与「PIXIV_INSTANCE_DIR
-    覆盖」两条分支都能在临时目录里验证 —— 直接 exec 仓库里的 config.py 验证默认分支
-    必然要读写真实 instance/。
+    包化后 `BASE_DIR` 是**包的上一级**（config.py 在 pixivviewer/ 里），所以探针也必须
+    放在 target_dir 的子目录里，BASE_DIR 才落在 target_dir —— 于是「默认实例目录」与
+    「PIXIV_INSTANCE_DIR 覆盖」两条分支都能在临时目录里验证；直接 exec 仓库里的 config.py
+    验证默认分支必然要读写真实 instance/。
     """
-    probe = target_dir / "config_probe.py"
+    probe_dir = target_dir / "pixivviewer"
+    probe_dir.mkdir(exist_ok=True)
+    probe = probe_dir / "config_probe.py"
     shutil.copy(CONFIG_PATH, probe)
     if instance_dir is None:
         monkeypatch.delenv("PIXIV_INSTANCE_DIR", raising=False)
@@ -232,26 +235,25 @@ def test_conftest_redirects_instance_dir_before_importing_config():
 
     # 事后覆盖无效：config.py 在 import 时就算好了实例目录/密钥/DB 路径，
     # app.py 还会往里写 .secret_key；且必须强制覆盖，不能 setdefault。
-    assert conftest.index("os.environ['PIXIV_INSTANCE_DIR']") < conftest.index("\nimport config")
+    assert conftest.index("os.environ['PIXIV_INSTANCE_DIR']") < conftest.index("\nfrom pixivviewer import config")
     assert "setdefault('PIXIV_INSTANCE_DIR'" not in conftest
 
 
 def test_instance_dir_isolated_in_tests():
     """测试进程派生出的每一个实例路径都必须落在临时目录。"""
-    import config
-    import routes_gallery
-    import routes_settings
-    import runtime
-
+    from pixivviewer import config
+    from pixivviewer.routes import gallery as routes_gallery
+    from pixivviewer.routes import settings as routes_settings
+    from pixivviewer import runtime
     temp_root = os.path.normcase(os.path.realpath(tempfile.gettempdir())) + os.sep
     derived = {
-        'config._instance_dir': config._instance_dir,
-        'config._cursor_secret_path': config._cursor_secret_path,
-        'config.DATABASE_PATH': config.DATABASE_PATH,
-        'config._settings_path': config._settings_path,
-        'routes_settings._SETTINGS_PATH': routes_settings._SETTINGS_PATH,
-        'routes_gallery.CACHE_DIR': routes_gallery.CACHE_DIR,
-        'runtime.thumb_redirect_state_path()': runtime.thumb_redirect_state_path(),
+        'pixivviewer.config._instance_dir': config._instance_dir,
+        'pixivviewer.config._cursor_secret_path': config._cursor_secret_path,
+        'pixivviewer.config.DATABASE_PATH': config.DATABASE_PATH,
+        'pixivviewer.config._settings_path': config._settings_path,
+        'pixivviewer.routes.settings._SETTINGS_PATH': routes_settings._SETTINGS_PATH,
+        'pixivviewer.routes.gallery.CACHE_DIR': routes_gallery.CACHE_DIR,
+        'pixivviewer.runtime.thumb_redirect_state_path()': runtime.thumb_redirect_state_path(),
     }
     for name, path in derived.items():
         assert os.path.normcase(os.path.realpath(path)).startswith(temp_root), f'{name} 未隔离：{path}'

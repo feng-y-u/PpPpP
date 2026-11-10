@@ -8,23 +8,23 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-import fetcher
-import helpers
-import pixiv_client
-import runtime
+from . import fetcher
+from . import helpers
+from . import pixiv_client
+from . import runtime
 from sqlalchemy import or_, text, update
 
-import backups
-import config
-from config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
+from . import backups
+from . import config
+from .config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
                     PREFETCH_EVICT_UNREFRESHED_AFTER,
                     PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
                     PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE)
-from fetcher import build_credentialless_session, build_pixiv_session, fetch_following
-from helpers import _get_download_dir, _extract_ext, check_image_url
-from models import (get_session, Illust, SearchCache,
+from .fetcher import build_credentialless_session, build_pixiv_session, fetch_following
+from .helpers import _get_download_dir, _extract_ext, check_image_url
+from .models import (get_session, Illust, SearchCache,
                     DownloadLog, safe_commit)
-from runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
+from .runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
                      _snapshot_state, _snapshot_stop,
                      _queued_downloads, _download_progress,
                      _download_queue_lock, is_queued_download,
@@ -777,7 +777,7 @@ def take_database_snapshot() -> str | None:
         _snapshot_state['count'] = len(backups.snapshot_paths(db_path))
         return None
 
-    import models  # 延迟导入：与预取循环同款，避免模块级绑定挡住测试补丁
+    from . import models  # 延迟导入：与预取循环同款，避免模块级绑定挡住测试补丁
     target = backups.take_snapshot(db_path, engine=models.engine)
     removed = backups.prune_snapshots(db_path, int(_snapshot_state['keep'] or 1))
     _snapshot_state.update({

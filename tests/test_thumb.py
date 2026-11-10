@@ -13,9 +13,8 @@ import time
 import pytest
 import requests
 
-import runtime
-import routes_gallery
-
+from pixivviewer import runtime
+from pixivviewer.routes import gallery as routes_gallery
 THUMB = 'https://i.pximg.net/c/250x250/img/test.jpg'
 CROSS_HOST = 'img-cdn.example.net'
 CROSS_TARGET = f'https://{CROSS_HOST}/img/new.jpg'
@@ -646,7 +645,7 @@ def test_thumb_stats_counts_served_and_cache_hits(thumb_env, client):
 # ── /api/image 三分支（审计 S18 补齐）──
 
 def _make_done_illust(pixiv_id: int, paths: list[str]):
-    from models import Illust, get_session, safe_commit
+    from pixivviewer.models import Illust, get_session, safe_commit
     with get_session() as db:
         db.add(Illust(pixiv_id=pixiv_id, title='t', download_status='done',
                       local_paths_list=paths))
@@ -661,8 +660,7 @@ def test_api_image_resolution_has_three_branches(client, clean_db, tmp_path, mon
     重定向），断言形状也都是"状态码 + 拿到的字节/页号"，故合在一条里；404 那一支本身
     就含三种形态（目录不存在、index 越界、DB 有记录但文件已删）。
     """
-    import helpers
-
+    from pixivviewer import helpers
     monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
 
     # ① DB 命中且文件在盘上：直接回文件（带 7 天 max_age，详情页不再每张发 304）

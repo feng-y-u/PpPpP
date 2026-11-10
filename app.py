@@ -13,7 +13,7 @@ from flask import (
     Flask, jsonify, render_template, Response,
 )
 
-from config import (
+from pixivviewer.config import (
     DOWNLOAD_DIR,
     ITEMS_PER_PAGE,
     MAX_BOOKMARKS_DEFAULT,
@@ -22,25 +22,25 @@ from config import (
     _instance_dir,  # 实例目录单一来源：密钥文件路径由它派生（PIXIV_INSTANCE_DIR 可整体重定向）
     _load_or_create_secret,  # 密钥文件统一入口：长度校验 + 权限收紧（与 .cursor_secret 同一助手）
 )
-from models import init_db, get_session  # get_session：tests 补丁目标（test_prefetch.py setattr(app, 'get_session')）
-import fetcher
+from pixivviewer.models import init_db, get_session  # get_session：tests 补丁目标（test_prefetch.py setattr(app, 'get_session')）
+from pixivviewer import fetcher
 # 以下为 app 命名空间测试补丁契约绑定，勿删（见 docs/architecture.md「测试契约」）
-from fetcher import search_by_tag, search_by_user, browse_discovery, paginated_search, build_pixiv_session
+from pixivviewer.fetcher import search_by_tag, search_by_user, browse_discovery, paginated_search, build_pixiv_session
 
 # 以下为 app 命名空间测试补丁契约绑定，勿删（见 docs/architecture.md「测试契约」）
-from helpers import enforce_image_cache_limit, query_cached_tag
-import runtime  # 模块级引用：启动时恢复越界重定向发现表
-from runtime import (_scan_cache, _db_pids_cache, _prefetch_state,
-                     SEARCH_TASK_TTL, _rate_limit_store)
+from pixivviewer.helpers import enforce_image_cache_limit, query_cached_tag
+from pixivviewer import runtime  # 模块级引用：启动时恢复越界重定向发现表
+from pixivviewer.runtime import (_scan_cache, _db_pids_cache, _prefetch_state,
+                                 SEARCH_TASK_TTL, _rate_limit_store)
 # 中间件（认证/CSRF/限流/安全头）——app 级钩子经 middleware_bp 注册全局生效；
 # _rate_limit_store 仍在 app 命名空间可见（tests/test_auth.py 清空同一共享 dict）；
 # _get_csrf_token/_safe_next 亦为 app 命名空间契约（模板渲染 / test_auth.py 直接调用）
-from middleware import bp as middleware_bp, _get_csrf_token, _safe_next
+from pixivviewer.middleware import bp as middleware_bp, _get_csrf_token, _safe_next
 
-# 后台线程与下载引擎（auto_follow / 预取 / 下载 / 启动重置）已迁至 background.py：
+# 后台线程与下载引擎（auto_follow / 预取 / 下载 / 启动重置）在 background 模块：
 # 以下 app 命名空间绑定为测试补丁契约，勿删（见 docs/architecture.md「测试契约」）
-import background
-from background import (
+from pixivviewer import background
+from pixivviewer.background import (
     _shutdown_background_threads, _reset_stuck_downloads, _reset_stuck_prefetch,
     _prefetch_one_tag,
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
@@ -51,12 +51,12 @@ from background import (
 # _SETTINGS_PATH/_load_settings 同样保持在 app 命名空间：test_prefetch_api.py 夹具
 # monkeypatch('app._SETTINGS_PATH') 重定向 settings.json，routes_prefetch.prefetch_config_post
 # 经 app 命名空间调用 app._load_settings()/app._SETTINGS_PATH 以看到该补丁。
-from routes_search import bp as search_bp, _cleanup_search_tasks
-from routes_gallery import CACHE_DIR, bp as gallery_bp
-from routes_download import bp as download_bp
-from routes_prefetch import bp as prefetch_bp
-from routes_settings import bp as settings_bp, _SETTINGS_PATH, _load_settings
-from routes_home import bp as home_bp
+from pixivviewer.routes.search import bp as search_bp, _cleanup_search_tasks
+from pixivviewer.routes.gallery import CACHE_DIR, bp as gallery_bp
+from pixivviewer.routes.download import bp as download_bp
+from pixivviewer.routes.prefetch import bp as prefetch_bp
+from pixivviewer.routes.settings import bp as settings_bp, _SETTINGS_PATH, _load_settings
+from pixivviewer.routes.home import bp as home_bp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +69,10 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+# 装配入口：Flask 以**包目录**为根（pixivviewer/templates、pixivviewer/static 自动解析）。
+# 不写 Flask(__name__)：本文件在仓库根，__name__ 会是 "__main__"/"app"，
+# 模板与静态目录就指不回包里。
+app = Flask('pixivviewer')
 
 # 反代后还原真实客户端 IP（限流/open-dir 本机判断依赖）；x_proto 供 HTTPS 判定
 from werkzeug.middleware.proxy_fix import ProxyFix

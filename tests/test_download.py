@@ -23,10 +23,10 @@ import pytest
 from sqlalchemy import update as sa_update
 from sqlalchemy.exc import OperationalError
 
-import background
-import routes_download
-from models import DownloadLog, Illust, get_session, safe_commit
-from runtime import (_download_progress, _queued_downloads,
+from pixivviewer import background
+from pixivviewer.routes import download as routes_download
+from pixivviewer.models import DownloadLog, Illust, get_session, safe_commit
+from pixivviewer.runtime import (_download_progress, _queued_downloads,
                      _download_queue_lock, is_queued_download,
                      download_cancellations)
 
@@ -82,7 +82,7 @@ class _FakeSession:
 @pytest.fixture
 def dl_env(monkeypatch, tmp_path, clean_db):
     """隔离的下载目录 + 去掉页间延迟 + 清理进程级下载状态。"""
-    import helpers
+    from pixivviewer import helpers
     monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
     monkeypatch.setattr(background, 'PAGE_DOWNLOAD_INTERVAL', 0)
     for state in (background.download_locks, download_cancellations,
@@ -318,7 +318,7 @@ def test_reset_after_completion_returns_400_and_keeps_files(dl_env, clean_db, mo
 def test_reset_racing_worker_never_leaves_phantom_done(dl_env, clean_db, monkeypatch, app):
     """worker 与 reset 同时起跑若干轮，断言不变式：
     状态 done ⇒ 文件全部存在；且不残留锁与取消标记。"""
-    import helpers
+    from pixivviewer import helpers
     assert helpers.DOWNLOAD_DIR == str(dl_env)
 
     for round_no in range(12):
@@ -411,7 +411,7 @@ def test_terminal_commit_failure_always_resets_to_failed(dl_env, monkeypatch, ca
     monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
     calls = _fail_commit_on(monkeypatch, 2)      # 1=开始下载，2=下载结束
 
-    with caplog.at_level(logging.ERROR, logger='background'):
+    with caplog.at_level(logging.ERROR, logger='pixivviewer.background'):
         background._download_illust(pid)
 
     assert calls['raised'] == 1
@@ -625,7 +625,7 @@ def test_queued_download_access_always_under_lock(dl_env, clean_db, monkeypatch,
     monkeypatch.setattr(background, 'build_pixiv_session', lambda: _FakeSession())
 
     guarded = _LockAuditedSet()
-    import runtime
+    from pixivviewer import runtime
     for module in (runtime, background, routes_download):
         monkeypatch.setattr(module, '_queued_downloads', guarded)
 
@@ -759,7 +759,7 @@ def test_download_illust_noop_when_done(dl_env, clean_db, monkeypatch, caplog):
 
 def test_redownload_after_delete_still_works(dl_env, clean_db, monkeypatch):
     """回归：删除图库文件把状态复位成 None 后，重下必须照常可用（守卫不许挡住）。"""
-    import helpers
+    from pixivviewer import helpers
     pid = 80505
     with get_session() as db:
         _make_illust(db, pid, _urls(pid, 1))

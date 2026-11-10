@@ -5,7 +5,9 @@ import platform
 import secrets
 import shutil
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 仓库根：本模块在包内（pixivviewer/config.py），实例目录 / .env / downloads
+# 都相对仓库根派生，所以这里要再上移一级 —— 留在包内会把运行数据写进 pixivviewer/。
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── .env 文件加载 ──
 # 必须在实例目录派生之前：PIXIV_INSTANCE_DIR 与其它键一样允许写进 .env。

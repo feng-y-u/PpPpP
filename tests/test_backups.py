@@ -11,13 +11,11 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine
 
-import backups
-import background
-import config
-import routes_settings
-import runtime
-
-
+from pixivviewer import backups
+from pixivviewer import background
+from pixivviewer import config
+from pixivviewer.routes import settings as routes_settings
+from pixivviewer import runtime
 def _make_db(path, rows=3):
     """建一个含 illusts 表的 SQLite 库（列集最小化，只用来验证"数据在不在"）。"""
     con = sqlite3.connect(path)

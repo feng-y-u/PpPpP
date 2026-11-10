@@ -11,10 +11,10 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import requests
 
-import fetcher
-import pixiv_client
-from config import ITEMS_PER_PAGE, PER_PAGE
-from models import BlockedTag, Illust
+from pixivviewer import fetcher
+from pixivviewer import pixiv_client
+from pixivviewer.config import ITEMS_PER_PAGE, PER_PAGE
+from pixivviewer.models import BlockedTag, Illust
 
 
 class TestDetailRateLimiter:
@@ -108,8 +108,8 @@ def _fresh_detail_gate(monkeypatch):
 
 
 class TestProcessItemsBookmarkFill:
-    @patch('fetcher._kick_background_fill')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_existing_zero_bookmark_updated_from_item_in_defer_path(
             self, mock_fetch, mock_fill, clean_db):
         """defer + min_bookmarks=0：已有 0 收藏记录应被条目自带 bookmarkCount 更新，
@@ -132,8 +132,8 @@ class TestProcessItemsBookmarkFill:
         row = clean_db.query(Illust).filter(Illust.pixiv_id == 1001).first()
         assert row.bookmark_count == 500
 
-    @patch('fetcher._kick_background_fill')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_new_item_defer_writes_zero_and_background_fills(self, mock_fetch, mock_fill, clean_db):
         """defer 路径：新记录列表接口无 bookmarkCount（恒缺失），写入 0 并排入后台补全。
 
@@ -156,8 +156,8 @@ class TestProcessItemsBookmarkFill:
         row = clean_db.query(Illust).filter(Illust.pixiv_id == 1004).first()
         assert row.bookmark_count == 0
 
-    @patch('fetcher._kick_background_fill')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_refetch_detail_failure_enqueues_background_fill(
             self, mock_fetch, mock_fill, clean_db):
         """min>0 + 条目无 bookmarkCount + 详情拉取失败：记录应排入后台补全队列，
@@ -196,8 +196,8 @@ class TestProcessItemsBookmarkFill:
         assert results == []
         mock_fill.assert_called_once_with([8003])
 
-    @patch('fetcher._kick_background_fill')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_refetch_success_updates_bookmark(
             self, mock_fetch, mock_fill, clean_db):
         """min>0 + 条目无 bookmarkCount：详情拉取成功时更新 DB 并显示真实值。"""
@@ -225,7 +225,7 @@ class TestProcessItemsBookmarkFill:
         row = clean_db.query(Illust).filter(Illust.pixiv_id == 1003).first()
         assert row.bookmark_count == 900
 
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_max_results_gates_early_stop(self, mock_fetch, clean_db):
         """max_results 是 early_stop 的唯一开关。
 
@@ -277,8 +277,8 @@ class TestProcessItemsBookmarkFill:
     def test_early_stop_returns_immediately(self):
         """early_stop 返回 True 后，_fetch_details_parallel 取消未启动的拉取；
         已启动的请求仍处理完（不 break 丢弃），返回其全部结果。"""
-        with patch('fetcher._get_illust_detail', return_value=None), \
-             patch('fetcher.build_pixiv_session', side_effect=RuntimeError('no net')):
+        with patch('pixivviewer.fetcher._get_illust_detail', return_value=None), \
+             patch('pixivviewer.fetcher.build_pixiv_session', side_effect=RuntimeError('no net')):
             batch = fetcher._fetch_details_parallel(
                 [4001, 4002, 4003, 4004],
                 early_stop=lambda detail: True,
@@ -302,7 +302,7 @@ class TestProcessItemsBookmarkFill:
                 'tags': ['a'],
             }
 
-        with patch('fetcher._get_illust_detail', side_effect=_fake_detail):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=_fake_detail):
             results = fetcher._process_items(
                 clean_db,
                 [_item(6001, 500), _item(6002, 300), _item(6003, 300),
@@ -332,7 +332,7 @@ class TestProcessItemsBookmarkFill:
                 'tags': ['a'],
             }
 
-        with patch('fetcher._get_illust_detail', side_effect=_fake_detail):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=_fake_detail):
             results = fetcher._process_items(
                 clean_db,
                 [_item(5001, 500), _item(5002, 300), _item(5003, 500), _item(5004, 500)],
@@ -386,8 +386,8 @@ class TestInsertNewIllusts:
 class TestProcessItemsDuplicateInsert:
     """同一批输入含重复 pixiv_id 时：结果去重、库内一行、不抛 IntegrityError。"""
 
-    @patch('fetcher._kick_background_fill')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_duplicate_items_deduped_in_both_paths(self, mock_fetch, mock_fill, clean_db):
         """非 defer 与 defer 两条路径都要把批内重复 pid 吃成一条结果、一行记录。"""
         mock_fetch.return_value = _detail_batch({2001: {'bookmark_count': 100, 'tags': ['a']}}, 1)
@@ -440,7 +440,7 @@ class TestDetailProgressPublication:
                 raise AssertionError('先完成的详情始终没跑完，用例死锁')
             return {'pixiv_id': pixiv_id, 'title': f'p{pixiv_id}'}
 
-        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=fake_detail):
             batch = fetcher._fetch_details_parallel(
                 [1, 2, 99],
                 on_detail=lambda pid, detail: seen.append(
@@ -464,7 +464,7 @@ class TestDetailProgressPublication:
                 tags={11: ['a'], 12: ['a'], 13: ['ng'], 14: ['R-18']}[pixiv_id])
 
         events: list[dict] = []
-        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=fake_detail):
             results = fetcher._process_items(
                 clean_db, [_item(pid) for pid in (11, 12, 13, 14, 15)],
                 id_extractor=lambda item: int(item['id']),
@@ -485,8 +485,8 @@ class TestDetailProgressPublication:
     def test_defer_path_publishes_summary_without_detail_requests(self, clean_db):
         """defer 路径（标签/发现/关注）直接用条目摘要发布，不为进度多拉一次详情。"""
         events: list[dict] = []
-        with patch('fetcher._kick_background_fill'), \
-             patch('fetcher._fetch_details_parallel') as mock_fetch:
+        with patch('pixivviewer.fetcher._kick_background_fill'), \
+             patch('pixivviewer.fetcher._fetch_details_parallel') as mock_fetch:
             results = fetcher._process_items(
                 clean_db, [_item(31), _item(32, tags=('ng',))],
                 id_extractor=lambda item: int(item['id']),
@@ -510,7 +510,7 @@ class TestDetailProgressPublication:
         ev.set()
         fetcher._cancel_begin(ev.is_set)
         try:
-            with patch('fetcher._kick_background_fill'):   # 这条记录缺原图，会触发后台补全
+            with patch('pixivviewer.fetcher._kick_background_fill'):   # 这条记录缺原图，会触发后台补全
                 results = fetcher._process_items(
                     clean_db, [_item(41)],
                     id_extractor=lambda item: int(item['id']),
@@ -561,8 +561,8 @@ class TestDetailProgressPublication:
             return batch
 
         events: list[dict] = []
-        with patch('fetcher._get_illust_detail', side_effect=fake_detail), \
-             patch('fetcher._fetch_details_parallel', side_effect=spy_batch):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=fake_detail), \
+             patch('pixivviewer.fetcher._fetch_details_parallel', side_effect=spy_batch):
             results = fetcher._process_items(
                 clean_db, [_item(pid) for pid in (11, 12, 13, 14, 15)],
                 id_extractor=lambda item: int(item['id']),
@@ -590,7 +590,7 @@ class TestDetailProgressPublication:
         def fake_detail(session, pixiv_id, limiter=None):
             raise fetcher.PixivAuthError('Pixiv API returned HTTP 401')
 
-        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=fake_detail):
             with pytest.raises(fetcher.PixivAuthError):
                 fetcher._fetch_details_parallel(
                     [21, 22, 23],
@@ -643,8 +643,8 @@ class TestDetailProgressPublication:
             finally:
                 batch_release.set()
 
-        with patch('fetcher._fetch_details_parallel', side_effect=blocking_batch), \
-             patch('fetcher._kick_background_fill'):
+        with patch('pixivviewer.fetcher._fetch_details_parallel', side_effect=blocking_batch), \
+             patch('pixivviewer.fetcher._kick_background_fill'):
             watcher = threading.Thread(target=observer)
             watcher.start()
             try:
@@ -663,8 +663,8 @@ class TestDetailProgressPublication:
             '批次尚未结束，已入库记录就该出现在 result 事件里'
         assert [e['pixiv_id'] for e in events if e['type'] == 'examined'] == [5001, 5002]
 
-    @patch('fetcher._kick_background_fill')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_duplicate_input_pid_examined_and_published_once(
             self, mock_fetch, mock_fill, clean_db):
         """输入里同一 pixiv_id 出现两次时：examined 只发一次、result 只发布一次。
@@ -809,7 +809,7 @@ class TestHttpErrorClassification:
         """
         session = self._patched(monkeypatch, 403)
         fetcher.clear_search_cache()
-        with caplog.at_level(logging.WARNING, logger='pixiv_client'):
+        with caplog.at_level(logging.WARNING, logger='pixivviewer.pixiv_client'):
             result = fetcher.search_by_tag('s13-403')
 
         assert result == ([], False)
@@ -839,7 +839,7 @@ class TestHttpErrorClassification:
         """回归：详情 API 的 403 = 限流，走退避重试（S13 不动这条语义）。"""
         session = self._failing_session(403)
         monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
-        with patch('pixiv_client.time.sleep'):
+        with patch('pixivviewer.pixiv_client.time.sleep'):
             result = fetcher._get_illust_detail(
                 session, 123, limiter=fetcher._TokenBucket(6000))
 
@@ -972,7 +972,7 @@ class TestBookmarkStaleness:
         illust.bookmark_updated_at = datetime.now(timezone.utc) - timedelta(days=8)
         assert fetcher._is_bookmark_stale(illust) is True
 
-    @patch('fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher._kick_background_fill')
     def test_stale_record_enqueued_for_background_refresh(self, mock_fill, clean_db):
         """收藏数过期的记录必须排入后台补全刷新 —— defer（fetch_following/浏览页）与
         非 defer + min=0（search_by_user）两条路径都算：它们都不该为刷新在前台同步拉详情。"""
@@ -1006,7 +1006,7 @@ class TestBookmarkStaleness:
         assert len(results) == 1
         mock_fill.assert_called_once_with([8002])
 
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_stale_record_sync_refetch_and_timestamp_update(self, mock_fetch, clean_db):
         """min>0：收藏数过期的记录同步拉详情刷新，并更新时间戳。"""
         self._old_illust(clean_db, 7002, 500, days_ago=8)
@@ -1037,7 +1037,7 @@ class TestBookmarkStaleness:
             updated = updated.replace(tzinfo=timezone.utc)
         assert (datetime.now(timezone.utc) - updated).total_seconds() < 60
 
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_non_defer_new_record_stamps_timestamp(self, mock_fetch, clean_db):
         """非 defer 插入（同步拉详情成功）：新记录应带 bookmark_updated_at，
         否则 7 天 TTL 刷新永远不会作用于它。"""
@@ -1090,7 +1090,7 @@ class TestDetailRetryPolicy:
         # 旁路令牌桶，让用例只测重试语义、不受全局限速器残留状态影响
         monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         session = self._FakeSession(exc)
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             try:
                 result = fetcher._get_illust_detail(
                     session, 123, limiter=fetcher._TokenBucket(6000),
@@ -1173,7 +1173,7 @@ class TestDetailRetryPolicy:
     def _run_static(self, monkeypatch, resp, return_dead=False):
         monkeypatch.setattr(pixiv_client, '_total_limiter', pixiv_client._TokenBucket(6000))
         session = self._StaticSession(resp)
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             result = fetcher._get_illust_detail(
                 session, 123, limiter=fetcher._TokenBucket(6000),
                 return_dead=return_dead)
@@ -1238,7 +1238,7 @@ class TestDetailRetryPolicy:
         """
         hostile = 'A' * 500 + '\n伪造日志行'
         monkeypatch.setattr(pixiv_client, '_detail_error_samples', {})
-        with caplog.at_level(logging.WARNING, logger='pixiv_client'):
+        with caplog.at_level(logging.WARNING, logger='pixivviewer.pixiv_client'):
             self._run_static(
                 monkeypatch,
                 self._json_resp({'error': True, 'message': '作品已被删除' + hostile}),
@@ -1249,7 +1249,7 @@ class TestDetailRetryPolicy:
                 return_dead=True)
 
         lines = [r.getMessage() for r in caplog.records
-                 if r.name == 'pixiv_client'
+                 if r.name == 'pixivviewer.pixiv_client'
                  and ('Detail API 永久失败' in r.getMessage()
                       or 'Detail API error for' in r.getMessage())]
         assert len(lines) == 2, '两条报错日志都要覆盖'
@@ -1428,7 +1428,7 @@ class TestFetchFollowingR18Filter:
         fetcher._SEARCH_CACHE.clear()
         session = self._FakeSession(self._payload(items), urls if urls is not None else [])
         monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
-        with patch('fetcher._kick_background_fill'):
+        with patch('pixivviewer.fetcher._kick_background_fill'):
             return fetcher.fetch_following(1, r18_mode=r18_mode)
 
     def test_r18_filtering_follows_mode(self, clean_db, monkeypatch):
@@ -1482,9 +1482,9 @@ class TestUserSearchPageSize:
         mock_fetch.return_value = _detail_batch()
         return fetcher.search_by_user('12345', page=page, max_results=ITEMS_PER_PAGE)
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_slicing_follows_items_per_page(self, mock_fetch, mock_ids, mock_sess, clean_db):
         self._call(clean_db, mock_ids, mock_fetch)
         requested = mock_fetch.call_args[0][0]
@@ -1514,9 +1514,9 @@ class TestUserSearchResultCache:
         mock_fetch.return_value = _detail_batch()
         return fetcher.search_by_user('12345', page=page, max_results=ITEMS_PER_PAGE)
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_cache_key_covers_page(self, mock_fetch, mock_ids, mock_sess, clean_db):
         """同一页第二次搜索命中缓存、不再拉详情；不同页各占一条缓存条目。"""
         mock_ids.return_value = list(range(1, 61))
@@ -1534,9 +1534,9 @@ class TestUserSearchResultCache:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_cache_hit_zeroes_fetch_stats(self, mock_fetch, mock_ids, mock_sess, clean_db):
         """命中缓存时清零统计，否则上次搜索的耗时会张冠李戴到本次。"""
         mock_ids.return_value = list(range(1, 61))
@@ -1550,9 +1550,9 @@ class TestUserSearchResultCache:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_empty_profile_not_cached(self, mock_fetch, mock_ids, mock_sess, clean_db):
         """拉不到作品列表（Cookie 失效/网络故障）不缓存，否则刷新也一直空。"""
         mock_ids.return_value = []
@@ -1564,9 +1564,9 @@ class TestUserSearchResultCache:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_cache_ttl_is_user_search_600s_not_tag_30s(
             self, mock_fetch, mock_ids, mock_sess, clean_db, monkeypatch):
         """钉住作者搜索缓存的 TTL：就是 600 秒，不是标签搜索那条 30 秒。
@@ -1602,9 +1602,9 @@ class TestUserSearchResultCache:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_blocked_fingerprint_is_part_of_cache_key(
             self, mock_fetch, mock_ids, mock_sess, clean_db):
         """屏蔽标签指纹必须参与作者搜索缓存键：同一批输入、只改屏蔽集合就要换条目。
@@ -1653,9 +1653,9 @@ class TestTagSearchResultCacheTTL:
         mock_fetch.return_value = _detail_batch({901: _detail(901)}, 1)
         return fetcher.search_by_tag(keyword, min_bookmarks=500)
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('pixiv_client.fetch_search_illusts')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.pixiv_client.fetch_search_illusts')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_tag_cache_ttl_is_120s(
             self, mock_fetch, mock_items, mock_sess, clean_db, monkeypatch):
         """标签页缓存的 TTL：专用 120 秒（覆盖"看完一屏再回退"的实际节奏）。"""
@@ -1681,8 +1681,8 @@ class TestTagSearchResultCacheTTL:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('pixiv_client.fetch_search_illusts')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.pixiv_client.fetch_search_illusts')
     def test_empty_tag_page_keeps_short_ttl(
             self, mock_items, mock_sess, clean_db, monkeypatch):
         """空结果页**不**跟随 120 秒：它必须留在 30 秒窗口里。
@@ -1711,11 +1711,11 @@ class TestTagSearchResultCacheTTL:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('pixiv_client.fetch_following_latest')
-    @patch('pixiv_client.fetch_discovery_artworks')
-    @patch('fetcher._fetch_details_parallel')
-    @patch('fetcher._kick_background_fill')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.pixiv_client.fetch_following_latest')
+    @patch('pixivviewer.pixiv_client.fetch_discovery_artworks')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher._kick_background_fill')
     def test_other_paths_keep_30s_ttl(
             self, mock_kick, mock_fetch, mock_disc, mock_items, mock_sess, clean_db, monkeypatch):
         """发现页与关注页不得被顺手改成 120 秒：它们是另一套语义，TTL 仍是 30 秒。"""
@@ -1752,11 +1752,11 @@ class TestTagSearchResultCacheTTL:
         finally:
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('pixiv_client.fetch_discovery_artworks')
-    @patch('pixiv_client.fetch_search_illusts')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.pixiv_client.fetch_discovery_artworks')
+    @patch('pixivviewer.pixiv_client.fetch_search_illusts')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_budget_exhausted_page_not_cached(
             self, mock_fetch, mock_items, mock_disc, mock_ids, mock_sess, clean_db):
         """预算中途耗尽 = 本页还有条目没判定完（结果残缺、has_more 失真）：标签、发现、
@@ -1804,8 +1804,8 @@ class TestTagSearchResultCacheTTL:
             fetcher._budget_end()
             fetcher.clear_search_cache()
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('pixiv_client.fetch_search_illusts')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.pixiv_client.fetch_search_illusts')
     def test_upstream_auth_error_not_cached(self, mock_items, mock_sess, clean_db):
         """认证/上游异常必须原样抛出，绝不能顺手写一条空结果的"成功"缓存。
 
@@ -1825,10 +1825,10 @@ class TestTagSearchResultCacheTTL:
 class TestRateLimitedSearchCache:
     """限流截断的搜索不得写成功缓存：残缺结果被 TTL 固化后，用户重试也拿不到补全。"""
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('pixiv_client.fetch_search_illusts')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.pixiv_client.fetch_search_illusts')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_rate_limited_page_not_cached(
             self, mock_fetch, mock_items, mock_ids, mock_sess, clean_db):
         """标签与作者搜索两条路径都必须抛 SearchRateLimitedError 且不写成功缓存。
@@ -1868,11 +1868,11 @@ class TestSearchFunctionProgressPassThrough:
     的形参而不是 `_process_items` 的形参。
     """
 
-    @patch('fetcher.build_pixiv_session')
-    @patch('fetcher._get_user_profile_ids')
-    @patch('pixiv_client.fetch_discovery_artworks')
-    @patch('pixiv_client.fetch_search_illusts')
-    @patch('fetcher._fetch_details_parallel')
+    @patch('pixivviewer.fetcher.build_pixiv_session')
+    @patch('pixivviewer.fetcher._get_user_profile_ids')
+    @patch('pixivviewer.pixiv_client.fetch_discovery_artworks')
+    @patch('pixivviewer.pixiv_client.fetch_search_illusts')
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_all_search_entries_forward_progress(
             self, mock_fetch, mock_items, mock_disc, mock_ids, mock_sess, clean_db):
         mock_items.return_value = ([_item(61)], 1)
@@ -2059,7 +2059,7 @@ class TestSearchCancellation:
         """取消后再进 _fetch_details_parallel：一个请求都不发、不计 attempted。"""
         ev = threading.Event()
         ev.set()
-        with patch('fetcher._get_illust_detail') as mock_detail:
+        with patch('pixivviewer.fetcher._get_illust_detail') as mock_detail:
             fetcher._cancel_begin(ev.is_set)
             try:
                 batch = fetcher._fetch_details_parallel([1, 2, 3, 4, 5])
@@ -2084,7 +2084,7 @@ class TestSearchCancellation:
             ev.set()   # 第一批全部在途时用户取消
             return {'id': pixiv_id, 'title': f'p{pixiv_id}'}
 
-        with patch('fetcher._get_illust_detail', side_effect=fake_detail):
+        with patch('pixivviewer.fetcher._get_illust_detail', side_effect=fake_detail):
             fetcher._cancel_begin(ev.is_set)
             try:
                 batch = fetcher._fetch_details_parallel(ids)
@@ -2195,8 +2195,8 @@ class TestPrefetchTagWedgeOnGateOpen:
     def test_tag_recovers_next_round_and_cleanup_still_runs(self, clean_db, monkeypatch,
                                                              _cookie_file):
         import app
-        import background
-        from models import SearchCache
+        from pixivviewer import background
+        from pixivviewer.models import SearchCache
 
         # 上一轮已入库的作品 + 已缓存的标签列表（本轮失败不得把它们清掉）
         clean_db.add(Illust(pixiv_id=7, title='cached', bookmark_count=600))
@@ -2266,8 +2266,7 @@ class TestRefreshPathMapsGateRefusalToGlobalFailure:
 
     def test_open_gate_aborts_refresh_without_per_work_backoff(self, clean_db, monkeypatch):
         import app
-        import background
-
+        from pixivviewer import background
         old = datetime.now(timezone.utc) - timedelta(days=2)
         for pid in (61, 62, 63):
             clean_db.add(Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,

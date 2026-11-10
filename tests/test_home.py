@@ -10,9 +10,9 @@ import pathlib
 
 import pytest
 
-import helpers
-import routes_home
-from models import BlockedTag, Illust
+from pixivviewer import helpers
+from pixivviewer.routes import home as routes_home
+from pixivviewer.models import BlockedTag, Illust
 
 
 def _jst_now() -> datetime:
@@ -321,7 +321,7 @@ class TestHomeRandom:
         assert 'name="csrf-token"' in html, '滚动加载用 POST，页面必须下发 CSRF token'
         assert 'name="items-per-page"' in html, '页大小必须读服务端下发的值'
 
-        js = pathlib.Path('static/page-home.js').read_text(encoding='utf-8')
+        js = pathlib.Path('pixivviewer/static/page-home.js').read_text(encoding='utf-8')
         assert '/api/home/more' in js, '滚动加载必须调用随机接口'
         assert 'IntersectionObserver' in js, '滚动到底要自动加载'
         assert 'feed-divider' in js, '随机段之前要有分隔条'
@@ -341,7 +341,7 @@ class TestHomePages:
         assert page.status_code == 200
         assert b'page-home.js' in page.data
 
-        js = pathlib.Path('static/page-home.js').read_text(encoding='utf-8')
+        js = pathlib.Path('pixivviewer/static/page-home.js').read_text(encoding='utf-8')
         assert 'grid.appendChild(node)' in js, '卡片必须显式挂进 #homeGrid'
         assert 'lightbox' not in js, '灯箱已移除'
         assert 'window.location.href = `/detail/${r.pixiv_id}`' in js, \

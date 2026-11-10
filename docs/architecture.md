@@ -1,43 +1,45 @@
 # 后端模块架构（模块化重构后）
 
 > 2026-08-26 起实施（分支 `refactor/backend-modularization`；重构前状态 commit `6eafaea`，重构 commit 序列 `e947796`…`632d080`）。
+> 2026-11-10 起代码收进 `pixivviewer/` 包（分支 `refactor/pixivviewer-package`），根目录只留入口 `app.py`。
 > 本文档给出拆分后的模块职责地图与两条最重要的开发约定：`-w 1` 单进程语义、**app 命名空间测试补丁契约**。
 
 ## 模块地图
 
 | 模块 | 职责一句话 | 关键符号 / 说明 |
 |---|---|---|
-| `app.py` | 组装入口：创建 Flask app、注册全部 Blueprint、启动后台线程；仅剩 5 个页面/辅助路由 | `/`（首页）、`/explore`（搜索页）、`/cache`、`/csrf-token`、`/favicon.ico`；import 时序：`init_db()` → `_reset_stuck_*`（清理残留）→ `background.start_background_threads()` → `atexit.register(_shutdown_background_threads)` |
-| `runtime.py` | 进程内存状态（`-w 1` 单进程语义，全部模块级变量） | `_scan_cache`/`_SCAN_CACHE_TTL`、`_db_pids_cache`、`_thumb_sem`/`_thumb_failed`/`_THUMB_FAIL_COOLDOWN`、`_thumb_failures`/`_thumb_failures_lock`（取图统计）、`_snapshot_state`/`_snapshot_stop`（滚动快照）、`_credential_health_cache`/`_CREDENTIAL_HEALTH_TTL`、`_auto_follow_state`/`_auto_follow_stop`、`_prefetch_state`、`_queued_downloads`/`_download_progress`/`download_cancellations`/`download_executor`、`_search_tasks`/`_search_tasks_lock`/`SEARCH_TASK_TTL`、`find_running_preview`（运行中搜索预览的只读查找，供 `/detail` 兜底）、`_rate_limit_store` |
-| `helpers.py` | 纯工具函数与库内查询（**叶子**，模块级不得 import models） | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`（中图扩展名恒 `.jpg`）、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`（函数内延迟 import models）、`query_home_feed`/`home_since`（首页窗口，JST 口径）、`_delete_illust_files` |
-| `backups.py` | 数据库**滚动快照**（与迁移前备份互补） | `take_snapshot`、`prune_snapshots`、`snapshot_due`、`snapshot_paths`/`latest_snapshot`、`backup_dir_for`、`SNAPSHOT_LABEL`；只清点/清理 `<库名>.snapshot-*.bak` |
-| `middleware.py` | 认证/CSRF/限流/安全头；app 级钩子随 `middleware_bp` 注册即全局生效 | `_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_csrf_required`、`_require_login`（`before_app_request`）、`_security_headers`（`after_app_request`）、`_safe_next`、`_is_authed` |
-| `background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh`/`_is_user_owned` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
-| `pixiv_client.py` | **Pixiv 适配层**（Ajax 传输 + 协议）：端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析 | `endpoint_*`（5 个端点，**Ajax 路径字符串的唯一来源**）、`envelope_error`、`handle_list_request_error`、`parse_tags`/`extract_original_urls`/`item_pixiv_id`/`item_bookmark_count`/`parse_illust_summary`/`parse_illust_detail`、`fetch_illust_detail`/`fetch_original_urls`/`fetch_search_illusts`/`fetch_discovery_artworks`/`fetch_user_profile_ids`/`fetch_following_latest`、`build_pixiv_session`/`build_credentialless_session`/`get_pooled_session`/`reset_pooled_session`/`set_cookie_cache`、`_TokenBucket` 与三个桶、`PixivAuthError`、`DEAD_DETAIL`/`RETRYABLE_GLOBAL_DETAIL`、`get_detail_error_samples`、`R18_TAGS`、`build_search_query` |
-| `fetcher.py` | Pixiv **业务层**：过滤/缓存/分页/入库；Ajax 细节全部委托适配层 | `search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、`_process_items`、`_insert_new_illusts`（冲突容忍入库）、`clear_search_cache`、`_fetch_details_parallel`（并发与 early_stop）、`_kick_background_fill`；并**再导出**适配层符号（见「测试契约」） |
-| `models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/SearchCache |
-| `config.py` | 常量、环境变量覆盖、`instance/settings.json` import 时覆盖 | `DOWNLOAD_DIR`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE`、`ITEMS_PER_PAGE` 等；**import 时执行全部副作用**（读 `.env`/settings.json、生成密钥） |
-| `routes_home.py` | 首页数据：最近 48 小时热门（只读本地库） | `/api/home`（`?window=48` 禁降级）；`clear_home_cache`（60 秒缓存，屏蔽标签变更时清）；查询本体在 `helpers.query_home_feed` |
-| `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `/search`、`/api/search/status/<task_id>`、`/api/cache/*`、`/api/following`；`_submit_search_task`/`_cleanup_search_tasks` |
-| `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理（含页面路由） | `/gallery`、`/detail/<pid>`、`/api/gallery*`、`/thumb/<b64>`、`/api/thumb/stats`（取图统计）、`/api/thumb/redirect-hosts`、`/api/image/<pid>/<index>`、`/api/open-dir` |
-| `routes_download.py` | 下载触发/状态/取消/批量/下载管理（含页面路由） | `/download/<pid>`、`/api/download/batch`、`/download/cancel|reset/<pid>`、`/download_status/<pid>`、`/api/download/status/batch`、`/download_file/<pid>`、`/downloads`、`/api/downloads`；`_cancel_download_internal` |
-| `routes_prefetch.py` | 预取管理 API | `/api/prefetch/config|tags|status|refresh|refresh-reset`；`_PREFETCH_SETTINGS_KEYS` |
-| `routes_settings.py` | 登录 / 设置 / 屏蔽标签 / 自动关注控制 / 运维观测（含页面路由） | `/login`(GET/POST)、`/settings`、`/api/settings*`、`/api/blocked-tags`、`/api/auto-follow/*`、`/api/backups`（滚动快照观测）、`/api/pixiv/health`（凭据体检）；`_SETTINGS_PATH`/`_SETTINGS_DEFAULTS`/`_load_settings`/`_settings_locked` |
+| `app.py`（仓库根） | 组装入口：创建 Flask app（`Flask('pixivviewer')`）、注册全部 Blueprint、启动后台线程；仅剩 5 个页面/辅助路由 | `/`（首页）、`/explore`（搜索页）、`/cache`、`/csrf-token`、`/favicon.ico`；import 时序：`init_db()` → `_reset_stuck_*`（清理残留）→ `background.start_background_threads()` → `atexit.register(_shutdown_background_threads)`；模板/静态资源从 `pixivviewer/templates`、`pixivviewer/static` 解析 |
+| `pixivviewer/runtime.py` | 进程内存状态（`-w 1` 单进程语义，全部模块级变量） | `_scan_cache`/`_SCAN_CACHE_TTL`、`_db_pids_cache`、`_thumb_sem`/`_thumb_failed`/`_THUMB_FAIL_COOLDOWN`、`_thumb_failures`/`_thumb_failures_lock`（取图统计）、`_snapshot_state`/`_snapshot_stop`（滚动快照）、`_credential_health_cache`/`_CREDENTIAL_HEALTH_TTL`、`_auto_follow_state`/`_auto_follow_stop`、`_prefetch_state`、`_queued_downloads`/`_download_progress`/`download_cancellations`/`download_executor`、`_search_tasks`/`_search_tasks_lock`/`SEARCH_TASK_TTL`、`find_running_preview`（运行中搜索预览的只读查找，供 `/detail` 兜底）、`_rate_limit_store` |
+| `pixivviewer/helpers.py` | 纯工具函数与库内查询（**叶子**，模块级不得 import models） | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`（中图扩展名恒 `.jpg`）、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`（函数内延迟 import models）、`query_home_feed`/`home_since`（首页窗口，JST 口径）、`_delete_illust_files` |
+| `pixivviewer/backups.py` | 数据库**滚动快照**（与迁移前备份互补） | `take_snapshot`、`prune_snapshots`、`snapshot_due`、`snapshot_paths`/`latest_snapshot`、`backup_dir_for`、`SNAPSHOT_LABEL`；只清点/清理 `<库名>.snapshot-*.bak` |
+| `pixivviewer/middleware.py` | 认证/CSRF/限流/安全头；app 级钩子随 `middleware_bp` 注册即全局生效 | `_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_csrf_required`、`_require_login`（`before_app_request`）、`_security_headers`（`after_app_request`）、`_safe_next`、`_is_authed` |
+| `pixivviewer/background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh`/`_is_user_owned` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
+| `pixivviewer/pixiv_client.py` | **Pixiv 适配层**（Ajax 传输 + 协议）：端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析 | `endpoint_*`（5 个端点，**Ajax 路径字符串的唯一来源**）、`envelope_error`、`handle_list_request_error`、`parse_tags`/`extract_original_urls`/`item_pixiv_id`/`item_bookmark_count`/`parse_illust_summary`/`parse_illust_detail`、`fetch_illust_detail`/`fetch_original_urls`/`fetch_search_illusts`/`fetch_discovery_artworks`/`fetch_user_profile_ids`/`fetch_following_latest`、`build_pixiv_session`/`build_credentialless_session`/`get_pooled_session`/`reset_pooled_session`/`set_cookie_cache`、`_TokenBucket` 与三个桶、`PixivAuthError`、`DEAD_DETAIL`/`RETRYABLE_GLOBAL_DETAIL`、`get_detail_error_samples`、`R18_TAGS`、`build_search_query` |
+| `pixivviewer/fetcher.py` | Pixiv **业务层**：过滤/缓存/分页/入库；Ajax 细节全部委托适配层 | `search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、`_process_items`、`_insert_new_illusts`（冲突容忍入库）、`clear_search_cache`、`_fetch_details_parallel`（并发与 early_stop）、`_kick_background_fill`；并**再导出**适配层符号（见「测试契约」） |
+| `pixivviewer/models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/SearchCache |
+| `pixivviewer/config.py` | 常量、环境变量覆盖、`instance/settings.json` import 时覆盖 | `DOWNLOAD_DIR`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE`、`ITEMS_PER_PAGE` 等；**import 时执行全部副作用**（读 `.env`/settings.json、生成密钥） |
+| `pixivviewer/routes/home.py` | 首页数据：最近 48 小时热门（只读本地库） | `/api/home`（`?window=48` 禁降级）；`clear_home_cache`（60 秒缓存，屏蔽标签变更时清）；查询本体在 `helpers.query_home_feed` |
+| `pixivviewer/routes/search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `/search`、`/api/search/status/<task_id>`、`/api/cache/*`、`/api/following`；`_submit_search_task`/`_cleanup_search_tasks` |
+| `pixivviewer/routes/gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理（含页面路由） | `/gallery`、`/detail/<pid>`、`/api/gallery*`、`/thumb/<b64>`、`/api/thumb/stats`（取图统计）、`/api/thumb/redirect-hosts`、`/api/image/<pid>/<index>`、`/api/open-dir` |
+| `pixivviewer/routes/download.py` | 下载触发/状态/取消/批量/下载管理（含页面路由） | `/download/<pid>`、`/api/download/batch`、`/download/cancel|reset/<pid>`、`/download_status/<pid>`、`/api/download/status/batch`、`/download_file/<pid>`、`/downloads`、`/api/downloads`；`_cancel_download_internal` |
+| `pixivviewer/routes/prefetch.py` | 预取管理 API | `/api/prefetch/config|tags|status|refresh|refresh-reset`；`_PREFETCH_SETTINGS_KEYS` |
+| `pixivviewer/routes/settings.py` | 登录 / 设置 / 屏蔽标签 / 自动关注控制 / 运维观测（含页面路由） | `/login`(GET/POST)、`/settings`、`/api/settings*`、`/api/blocked-tags`、`/api/auto-follow/*`、`/api/backups`（滚动快照观测）、`/api/pixiv/health`（凭据体检）；`_SETTINGS_PATH`/`_SETTINGS_DEFAULTS`/`_load_settings`/`_settings_locked` |
 
 ## 加载顺序
 
 依赖单向、无循环 import：
 
 ```
-pixiv_client / config / runtime / helpers / backups（叶子）→ middleware → background → routes_* → app.py（组装）
+pixiv_client / config / runtime / helpers / backups（叶子）→ middleware → background → pixivviewer/routes/* → app.py（组装）
 ```
 
+- `pixivviewer/__init__.py` **有意保持轻量**（不 import config/models、不建 app）：conftest 要在 import config 之前覆盖 `DATABASE_PATH`，包初始化一旦碰 config，engine 就绑到真实库了。
 - `pixiv_client` 只依赖 config 与 requests（传输与协议）；`runtime` 只依赖 config 与标准库；`backups` 依赖 config 与 `migrations.runner` 的复制原语（`backup_database` / `_checkpoint_wal`）。
-- `helpers` 依赖 config / runtime / pixiv_client 与标准库，但**模块级不依赖 models**：唯一需要 DB 的 `query_cached_tag` 在函数体内 `from models import ...`。这条纪律很硬 —— `models` 在 import 那一刻就把 engine 绑到 `config.DATABASE_PATH`，"谁先 import 到 models"会决定连哪个库（2026-09-30 的测试清库事故就是 `import helpers` 触发的）。回归用例：`tests/test_helpers.py::test_helpers_does_not_import_models_at_module_level`。
+- `helpers` 依赖 config / runtime / pixiv_client 与标准库，但**模块级不依赖 models**：唯一需要 DB 的 `query_cached_tag` 在函数体内 `from .models import ...`。这条纪律很硬 —— `models` 在 import 那一刻就把 engine 绑到 `config.DATABASE_PATH`，"谁先 import 到 models"会决定连哪个库（2026-09-30 的测试清库事故就是 `import helpers` 触发的）。回归用例：`tests/test_helpers.py::test_helpers_does_not_import_models_at_module_level`。
 - `middleware` 读取 runtime 状态（限流存储）。
 - `background` 依赖 helpers/runtime/models/fetcher。
-- 各 `routes_*` 依赖 middleware/helpers/runtime/background/models，**模块间不互相导入**。
-- `app.py` 最后组装：创建 app → 注册 7 个 Blueprint（middleware_bp 最先，保证 app 级钩子最先生效）→ 启动后台线程。
+- 各 `pixivviewer/routes/*` 依赖 middleware/helpers/runtime/background/models，**路由模块间不互相导入**（settings 导入 prefetch/home 的两个常量与清缓存函数是既有例外）。
+- 根 `app.py` 最后组装：创建 app → 注册 7 个 Blueprint（middleware_bp 最先，保证 app 级钩子最先生效）→ 启动后台线程。
 
 ## `-w 1` 单进程语义与线程启动
 
@@ -68,8 +70,8 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 | `query_cached_tag` | test_search_cache.py 直接调用 |
 
 **适配层（`pixiv_client`）是第二组 seam**：`fetcher` 用 from-import 把适配层符号再导出，因此
-`@patch('fetcher.build_pixiv_session')` / `patch('fetcher._get_illust_detail')` /
-`patch('fetcher._kick_background_fill')` / `patch('fetcher._fetch_details_parallel')` 仍然有效
+`@patch('pixivviewer.fetcher.build_pixiv_session')` / `patch('pixivviewer.fetcher._get_illust_detail')` /
+`patch('pixivviewer.fetcher._kick_background_fill')` / `patch('pixivviewer.fetcher._fetch_details_parallel')` 仍然有效
 （`_fetch_details_parallel` 按模块级名查找 `_get_illust_detail`，补丁可见）。
 
 但**有状态符号只在 `pixiv_client` 命名空间**，不得再从 `fetcher` 再导出：

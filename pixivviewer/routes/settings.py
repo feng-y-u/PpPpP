@@ -17,18 +17,18 @@ import time
 from flask import (Blueprint, Response, jsonify, redirect, render_template,
                    request, session)
 
-import config as config_module
-import pixiv_client
-from fetcher import clear_search_cache
-from background import get_background_health
-from helpers import _atomic_write_json, _atomic_write_text
-from middleware import (_credential_version, _csrf_required, _get_csrf_token,
+from .. import config as config_module
+from .. import pixiv_client
+from ..fetcher import clear_search_cache
+from ..background import get_background_health
+from ..helpers import _atomic_write_json, _atomic_write_text
+from ..middleware import (_credential_version, _csrf_required, _get_csrf_token,
                         _get_json_body, _is_authed, _rate_limit, _safe_next,
                         _session_authed)
-from routes_prefetch import _PREFETCH_SETTINGS_KEYS
-from routes_home import clear_home_cache
-from models import BlockedTag, get_session, safe_commit
-from runtime import (_CREDENTIAL_HEALTH_TTL, _auto_follow_state,
+from .prefetch import _PREFETCH_SETTINGS_KEYS
+from .home import clear_home_cache
+from ..models import BlockedTag, get_session, safe_commit
+from ..runtime import (_CREDENTIAL_HEALTH_TTL, _auto_follow_state,
                      _credential_health_cache, _prefetch_state, _snapshot_state)
 
 logger = logging.getLogger(__name__)
@@ -171,7 +171,7 @@ def backups_status() -> Response:
     `files` 只列 `pixiv.db.snapshot-*.bak`（本机制自己写的那些）：迁移前备份与用户
     手工放进 `instance/backups/` 的文件不在这里，也不会被保留策略清理。
     """
-    from backups import backup_dir_for, snapshot_paths   # 局部导入：仅本接口需要
+    from ..backups import backup_dir_for, snapshot_paths   # 局部导入：仅本接口需要
     db_path = config_module.DATABASE_PATH
     files = []
     for path in snapshot_paths(db_path):

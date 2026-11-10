@@ -15,11 +15,10 @@ from urllib.parse import urlsplit
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-import config
-from config import DOWNLOAD_DIR, MEDIUM_IMAGE_SIZE
-import pixiv_client
-import runtime
-
+from . import config
+from .config import DOWNLOAD_DIR, MEDIUM_IMAGE_SIZE
+from . import pixiv_client
+from . import runtime
 # ⚠ 本模块**不能**在模块级 `from models import ...`：`models.py` 在 import 那一刻就
 # `create_engine(config.DATABASE_PATH)`，于是"谁先 import 到 models"决定了 engine 绑哪个库
 # —— 2026-09-30 的测试清空生产库事故正是这条链（`-p` 插件 `import helpers` → helpers →
@@ -27,7 +26,7 @@ import runtime
 # 函数内延迟 import，helpers 于是重新成为**叶子**（只依赖 config/runtime/pixiv_client）。
 # 回归用例：tests/test_helpers.py::test_helpers_does_not_import_models_at_module_level。
 if TYPE_CHECKING:   # 仅供注解可读，运行时**不**执行
-    from models import Illust
+    from .models import Illust
 
 
 logger = logging.getLogger(__name__)
@@ -314,7 +313,7 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     """
     # 延迟 import（见文件顶部注释）：把"helpers 依赖 models"收窄到真正需要 DB 的这一个
     # 函数体内，模块 import 顺序就不再能决定 engine 绑到哪个库。
-    from models import BlockedTag, Illust, SearchCache, get_session
+    from .models import BlockedTag, Illust, SearchCache, get_session
 
     with get_session() as db:
         blocked = {t.tag for t in db.query(BlockedTag).all()}
@@ -452,7 +451,7 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
     auto 模式放宽后为 168，前端据此标注口径。
     """
     # 延迟 import（见文件顶部注释）：helpers 依赖 models 只发生在这类函数体内
-    from models import BlockedTag, Illust, get_session
+    from .models import BlockedTag, Illust, get_session
 
     with get_session() as db:
         blocked = sorted({t.tag for t in db.query(BlockedTag).all()})
@@ -520,7 +519,7 @@ def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOK
     Returns: `(results, pool_total)`。`pool_total` 是排除 `exclude` 后的候选总数，
     路由用它算 `has_more`，避免"恰好抽满一屏"时前端还要多打一次空请求。
     """
-    from models import BlockedTag, Illust, get_session
+    from .models import BlockedTag, Illust, get_session
 
     excl: set[int] = set()
     for pid in exclude or []:

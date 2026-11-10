@@ -6,10 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app
-import background
-import config
-import fetcher
-from models import SearchCache, Illust, get_session, safe_commit
+from pixivviewer import background
+from pixivviewer import config
+from pixivviewer import fetcher
+from pixivviewer.models import SearchCache, Illust, get_session, safe_commit
 
 
 class TestPrefetchOneTag:
@@ -218,7 +218,7 @@ class TestIsUserOwned:
           不能当缓存垃圾；
         - `prefetch_deleted` 不算 —— 那是缓存清理自己写的，认它等于给作品永久保护。
         """
-        from models import DownloadLog
+        from pixivviewer.models import DownloadLog
         clean_db.add_all([
             Illust(pixiv_id=6001, title='plain'),
             Illust(pixiv_id=6002, title='failed'),
@@ -252,7 +252,7 @@ class TestCapacityCleanup:
         （同一 pid 再次入库后就再也清不掉了）。同一套造数据方式、断言同构，
         只有喂进去的 action 不同，故合为一条。
         """
-        from models import DownloadLog
+        from pixivviewer.models import DownloadLog
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=1,
@@ -290,7 +290,7 @@ class TestCapacityCleanup:
         任何 DownloadLog（`_is_user_owned` 也判不出），旧实现会把它当缓存垃圾淘汰，
         worker 随后查不到行 → 下载静默消失。
         """
-        import runtime
+        from pixivviewer import runtime
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             Illust(pixiv_id=1, title='low', prefetch_source=1, bookmark_count=10,
@@ -377,7 +377,7 @@ class TestCapacityCleanup:
         受保护的作品不仅要留在库里，还要**留在标签列表里**（列表与行必须一起对齐）。
         两段共用同一套"再造两行未受保护作品"的准备，只有上限压得多狠不同，故合为一条。
         """
-        from models import DownloadLog
+        from pixivviewer.models import DownloadLog
         refreshed = datetime(2021, 1, 1, tzinfo=timezone.utc)
         clean_db.add_all([
             SearchCache(tag='tag_old', illust_ids='[1, 2, 3]',
@@ -496,7 +496,7 @@ class TestCapacityCleanup:
 
     def test_capacity_cleanup_never_evicts_user_owned(self, clean_db, monkeypatch):
         """兜底层同样不能碰用户拥有过的作品，哪怕它是唯一候选。"""
-        from models import DownloadLog
+        from pixivviewer.models import DownloadLog
         clean_db.add_all([
             Illust(pixiv_id=1, title='touched', prefetch_source=1, bookmark_count=1),
             DownloadLog(pixiv_id=1, action='failed', message='下载失败待重试'),
@@ -633,7 +633,7 @@ class TestPrefetchRefreshBookmarks:
     """最终收藏数刷新：满 1 天刷新一次，<10 删除，保护已下载/用户点过下载的。"""
 
     def _old_illust(self, clean_db, pid, days=2, **kw):
-        import models
+        from pixivviewer import models
         old = datetime.now(timezone.utc) - timedelta(days=days)
         illust = Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,
                         bookmark_count=0, created_at=old, **kw)
@@ -718,7 +718,7 @@ class TestPrefetchRefreshBookmarks:
         审计 S3：这个窗口里行状态是 None、也没有 DownloadLog，`_is_user_owned`
         判不出来，旧实现会直接删行 → 排队中的下载静默消失。
         """
-        import runtime
+        from pixivviewer import runtime
         self._old_illust(clean_db, 5011)
         clean_db.add(SearchCache(tag='t', illust_ids='[5011]', status='done'))
         safe_commit(clean_db)
@@ -825,7 +825,7 @@ class TestPrefetchRefreshBookmarks:
         `prefetch_deleted` 日志（该 action 不构成保护，否则同一作品再次入库后
         会获得永久豁免）。三件事都发生在同一次删除里，故合为一条。
         """
-        from models import DownloadLog
+        from pixivviewer.models import DownloadLog
         self._old_illust(clean_db, 5008)
         clean_db.add(SearchCache(tag='t', illust_ids='[5008]', status='done'))
         clean_db.add(SearchCache(tag='t2', illust_ids='[5008, 900]', status='done'))
@@ -852,7 +852,7 @@ class TestPrefetchRefreshBookmarks:
 
         两条保护渠道共用同一条守卫，只有"保护从哪来"不同，故合为一条。
         """
-        from models import DownloadLog
+        from pixivviewer.models import DownloadLog
         self._old_illust(clean_db, 5009, download_status='done')
         self._old_illust(clean_db, 5012)
         clean_db.add(DownloadLog(pixiv_id=5012, action='failed', message='下载失败'))
@@ -1104,7 +1104,7 @@ class TestDownloadLockRegistry:
 
     @pytest.fixture(autouse=True)
     def _cleanup(self):
-        import background
+        from pixivviewer import background
         background.download_locks.clear()
         yield
         background.download_locks.clear()
@@ -1213,7 +1213,7 @@ class TestPrefetchRoundResilience:
 
         monkeypatch.setattr(background, 'safe_commit', _flaky_commit)
 
-        with caplog.at_level(logging.ERROR, logger='background'):
+        with caplog.at_level(logging.ERROR, logger='pixivviewer.background'):
             background._prefetch_one_tag('t')             # 关键：不抛
 
         assert calls['n'] == 2

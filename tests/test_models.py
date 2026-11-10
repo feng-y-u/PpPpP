@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from models import Illust, DownloadLog, SearchCache, safe_commit
+from pixivviewer.models import Illust, DownloadLog, SearchCache, safe_commit
 
 
 class TestIllustCreate:
@@ -122,7 +122,7 @@ class TestIsoUtc:
         且改时区不会挪动它。补 `+00:00` 后 `new Date()` 才会换算。
         `upload_date` 是 Pixiv 的 JST 墙面时间，不能被同一规则波及（补 Z 会整体偏 9 小时）。
         """
-        from models import iso_utc
+        from pixivviewer.models import iso_utc
 
         assert iso_utc(None) is None
         assert iso_utc(datetime(2025, 1, 3)) == '2025-01-03T00:00:00+00:00'
@@ -192,8 +192,8 @@ class TestIsRemoved:
         AttributeError 的形式复活），且共用同一套准备，故合为一条用例。
         """
         import app
-        import models
-        from models import Illust as IllustModel
+        from pixivviewer import models
+        from pixivviewer.models import Illust as IllustModel
 
         # ① 表结构里没有这两列
         with models.engine.connect() as conn:
@@ -253,7 +253,7 @@ class TestSearchCache:
 
         # ② description 从模型属性与表结构里都消失了
         assert not hasattr(sample_illust, 'description')
-        import models
+        from pixivviewer import models
         with models.engine.connect() as conn:
             cols = [r[1] for r in conn.exec_driver_sql('PRAGMA table_info(illusts)').fetchall()]
         assert 'description' not in cols
@@ -261,7 +261,7 @@ class TestSearchCache:
 
 class TestDescriptionPrefetchMigration:
     def test_migration_drops_description_adds_prefetch_source(self, clean_db):
-        import models as m
+        from pixivviewer import models as m
         with m.engine.connect() as conn:
             conn.exec_driver_sql('ALTER TABLE illusts ADD COLUMN description TEXT DEFAULT ""')
             conn.exec_driver_sql('ALTER TABLE illusts DROP COLUMN prefetch_source')
@@ -281,7 +281,7 @@ class TestSafeCommitLocked:
         两段是同一次失败恢复的两个截面（先证明 rollback 被调用，再证明恢复后
         session 真的能用），准备完全相同，故合为一条用例。
         """
-        import models
+        from pixivviewer import models
         import pytest
         from sqlalchemy import text
         from sqlalchemy.exc import OperationalError
@@ -320,7 +320,7 @@ class TestDownloadLog:
 class TestRebuildIllustsTable:
     def test_rebuild_preserves_data_and_schema(self, clean_db, sample_illust):
         """SQLite<3.35 的重建路径（高危未测）：数据与索引必须保留。"""
-        import models as m
+        from pixivviewer import models as m
         from sqlalchemy import text
         m._rebuild_illusts_table(set())
         with m.get_session() as s:

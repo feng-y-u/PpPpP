@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from config import (
+from .config import (
     DOWNLOAD_MAX_WORKERS, AUTO_FOLLOW_INTERVAL, AUTO_FOLLOW_DOWNLOAD,
     PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
     BACKUP_INTERVAL, BACKUP_KEEP,
@@ -125,9 +125,10 @@ _thumb_redirect_rejected: dict[str, int] = {}
 
 def thumb_redirect_state_path() -> str:
     """发现表落盘路径：跟随 config 的实例目录（S8 引入 PIXIV_INSTANCE_DIR 后自动生效）。"""
-    import config
+    from . import config
     instance_dir = (getattr(config, '_instance_dir', '')
-                    or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance'))
+                    # 兜底也要落到仓库根：本模块在包内，'instance' 需上移一级
+                    or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'instance'))
     return os.path.join(instance_dir, 'thumb_redirect_hosts.json')
 
 

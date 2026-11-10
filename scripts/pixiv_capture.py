@@ -31,8 +31,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402  （触发 .env / settings.json 装载，拿到 COOKIE_PATH）
-import pixiv_client  # noqa: E402
+from pixivviewer import config  # noqa: E402  （触发 .env / settings.json 装载，拿到 COOKIE_PATH）
+from pixivviewer import pixiv_client  # noqa: E402
 
 DEFAULT_OUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

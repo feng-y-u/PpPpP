@@ -34,8 +34,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-import pixiv_client
-
+from pixivviewer import pixiv_client
 # 槽位泄漏时工作线程会永久阻塞在 `acquire()` 上；这个超时就是把"挂住"变成"断言失败"
 # 的关键。取 2 秒而不是并发用例里的 5 秒：这里的线程只做纯内存操作（占槽位 /
 # observe_response，没有 I/O），2 秒已是极宽松的上限；留短一点是为了泄漏时整套用例
@@ -736,7 +735,7 @@ class TestFetchIllustDetailGateIntegration:
         attempts = pixiv_client.DETAIL_MAX_RETRIES + 1
         session = _ScriptedSession([403] * attempts)
 
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             result = pixiv_client.fetch_illust_detail(
                 session, 511, limiter=_NoWaitLimiter(events, 'detail'))
 
@@ -759,7 +758,7 @@ class TestFetchIllustDetailGateIntegration:
         monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
         session = _ScriptedSession([401, 401, 401])
 
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             with pytest.raises(pixiv_client.PixivAuthError):
                 pixiv_client.fetch_illust_detail(session, 521, limiter=_NoWaitLimiter())
 
@@ -769,7 +768,7 @@ class TestFetchIllustDetailGateIntegration:
 
         session = _ScriptedSession([404, 404])
 
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             assert pixiv_client.fetch_illust_detail(
                 session, 531, limiter=_NoWaitLimiter()) is None, '404 的默认语义是 None'
             assert pixiv_client.fetch_illust_detail(
@@ -796,7 +795,7 @@ class TestFetchIllustDetailGateIntegration:
                 raise requests.ConnectionError('connect timeout')
 
         session = _ConnectFailSession()
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             assert pixiv_client.fetch_illust_detail(
                 session, 541, limiter=_NoWaitLimiter()) is None
 
@@ -813,7 +812,7 @@ class TestFetchIllustDetailGateIntegration:
         monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
         session = _ScriptedSession([_scripted_429(), _scripted_429()])
 
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             with pytest.raises(pixiv_client.PixivRateLimitedError):
                 pixiv_client.fetch_illust_detail(session, 551, limiter=_NoWaitLimiter())
 
@@ -832,7 +831,7 @@ class TestFetchIllustDetailGateIntegration:
         monkeypatch.setattr(pixiv_client, '_total_limiter', _NoWaitLimiter())
         session = _ScriptedSession([403] * 8)
 
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             assert pixiv_client.fetch_illust_detail(
                 session, 561, limiter=_NoWaitLimiter()) is None
             assert pixiv_client.fetch_illust_detail(
@@ -869,7 +868,7 @@ class TestFetchIllustDetailGateIntegration:
         _open_via_three_distinct_403(gate)
 
         session = _ScriptedSession([])
-        with patch('pixiv_client.time.sleep') as mock_sleep:
+        with patch('pixivviewer.pixiv_client.time.sleep') as mock_sleep:
             result = pixiv_client.fetch_illust_detail(
                 session, 571, limiter=_NoWaitLimiter(), return_dead=True)
 
@@ -891,12 +890,12 @@ class TestFetchIllustDetailGateIntegration:
         hostile = 'A' * 500 + '\n伪造日志行'
         session = _ScriptedSession([_scripted_429(retry_after=hostile)])
 
-        with patch('pixiv_client.time.sleep'):
-            with caplog.at_level(logging.WARNING, logger='pixiv_client'):
+        with patch('pixivviewer.pixiv_client.time.sleep'):
+            with caplog.at_level(logging.WARNING, logger='pixivviewer.pixiv_client'):
                 with pytest.raises(pixiv_client.PixivRateLimitedError):
                     pixiv_client.fetch_illust_detail(session, 591, limiter=_NoWaitLimiter())
 
-        messages = [r.getMessage() for r in caplog.records if r.name == 'pixiv_client']
+        messages = [r.getMessage() for r in caplog.records if r.name == 'pixivviewer.pixiv_client']
         lines = [m for m in messages if 'Retry-After' in m]
         assert lines, '429 必须留下带 Retry-After 的告警'
         line = lines[-1]
@@ -918,7 +917,6 @@ def test_detail_gate_stays_a_pixiv_client_seam():
     assert not _IMPORT_TIME_DETAIL_GATE.is_open, \
         '有状态的闸被某个用例改成开路，会污染同文件/其它文件的详情用例'
 
-    import fetcher
-
+    from pixivviewer import fetcher
     assert not hasattr(fetcher, '_detail_gate'), '闸不许被 fetcher 再导出（补丁会静默失效）'
     assert fetcher._get_illust_detail is pixiv_client.fetch_illust_detail

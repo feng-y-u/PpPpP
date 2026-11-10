@@ -11,7 +11,7 @@ from typing import Callable
 
 from flask import Blueprint, Response, jsonify, redirect, request, session, url_for
 
-from runtime import _rate_limit_store
+from .runtime import _rate_limit_store
 
 bp = Blueprint('middleware', __name__)  # 不承载路由，仅用于挂 app 级钩子；无循环导入问题（不 import app）
 

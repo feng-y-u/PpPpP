@@ -10,13 +10,13 @@ import threading
 
 from flask import Blueprint, Response, jsonify, request
 
-from background import (_collect_other_tag_pids, _find_alias_group,
+from ..background import (_collect_other_tag_pids, _find_alias_group,
                         _search_cache_guard, get_background_health)
-from fetcher import get_detail_error_samples
-from helpers import _atomic_write_json
-from middleware import _csrf_required, _get_json_body
-from models import Illust, SearchCache, get_session, iso_utc, safe_commit
-from runtime import _prefetch_state
+from ..fetcher import get_detail_error_samples
+from ..helpers import _atomic_write_json
+from ..middleware import _csrf_required, _get_json_body
+from ..models import Illust, SearchCache, get_session, iso_utc, safe_commit
+from ..runtime import _prefetch_state
 
 bp = Blueprint('prefetch', __name__)
 

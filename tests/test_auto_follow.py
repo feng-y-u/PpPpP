@@ -17,10 +17,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-import background
-import models
-import runtime
-
+from pixivviewer import background
+from pixivviewer import models
+from pixivviewer import runtime
 #: `/api/auto-follow/status` 的响应键集合（含 `alive`，由路由补上）。
 #: 新增字段必须写进 `runtime._auto_follow_state` 的初始字面量 —— 该 dict 的并发约定是
 #: "键集合固定、只改值"，懒加键会让 `jsonify` 遍历时抛

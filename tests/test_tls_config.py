@@ -7,7 +7,7 @@
 import ast
 import pathlib
 
-import config
+from pixivviewer import config
 from scripts import check_tls
 
 
@@ -21,7 +21,7 @@ def _assigned_source(name: str) -> str:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == name for t in node.targets):
             return ast.unparse(node.value)
-    raise AssertionError(f'config.py 里找不到模块级赋值 {name}')
+    raise AssertionError(f'pixivviewer/config.py 里找不到模块级赋值 {name}')
 
 
 def test_config_security_defaults():

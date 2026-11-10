@@ -5,21 +5,21 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── ⚠ 防线一：`models` 必须在本文件覆盖 DATABASE_PATH **之后**才被导入 ──
-# `models.py` 在 import 的那一刻就 `create_engine(config.DATABASE_PATH)`；engine 一旦
-# 建好，本文件下面那些 `config.DATABASE_PATH = <临时库>` 就**再也改不动它**。所以任何
+# ── ⚠ 防线一：`pixivviewer.models` 必须在本文件覆盖 DATABASE_PATH **之后**才被导入 ──
+# `pixivviewer/models.py` 在 import 的那一刻就 `create_engine(config.DATABASE_PATH)`；engine
+# 一旦建好，本文件下面那些 `config.DATABASE_PATH = <临时库>` 就**再也改不动它**。所以任何
 # 在 conftest 之前 import 到 models 的东西 —— `-p` 加载的自定义 pytest 插件、
 # `sitecustomize`、手写的 runpy/包装脚本 —— 都会让整轮测试直连真实库。
 # 2026-09-30 就真的发生过：一个变异验证用的 `-p` 插件在模块级 `import helpers`，
 # 而 `helpers` 又 `from models import ...`，于是 engine 绑到生产库，`clean_db` 把
 # 1456 件作品的表清空了（靠迁移前自动备份救回）。
 # 这里硬失败：宁可这一轮跑不起来，也绝不能写坏真实数据。
-if 'models' in sys.modules:
+if 'pixivviewer.models' in sys.modules:
     raise RuntimeError(
-        'models 已在 conftest 之前被导入：engine 已绑到 config.DATABASE_PATH（可能是真实库），'
-        '本轮测试会直连并清空它。不要在 conftest 之前 import 任何业务模块'
-        '（典型来源：`-p` 插件的模块级 `import helpers` / `import app`）。'
-        f'当前 sys.modules 里已有：{[m for m in sys.modules if m in ("models", "app", "helpers")]}'
+        'pixivviewer.models 已在 conftest 之前被导入：engine 已绑到 config.DATABASE_PATH'
+        '（可能是真实库），本轮测试会直连并清空它。不要在 conftest 之前 import 任何业务模块'
+        '（典型来源：`-p` 插件的模块级 `import pixivviewer.helpers` / `import app`）。'
+        f'当前 sys.modules 里已有：{[m for m in sys.modules if m.endswith((".models", "helpers")) or m == "app"]}'
     )
 
 # ── ⚠ 必须在 import config 之前重定向实例目录 ──
@@ -33,7 +33,7 @@ os.environ['PIXIV_INSTANCE_DIR'] = _TEST_INSTANCE_DIR
 # ── ⚠ 必须在 import models/app 之前覆盖数据库路径 ──
 # models.py 在 import 时即 create_engine(DATABASE_PATH)，事后覆盖无效，
 # 会导致测试直连并清空生产数据库（2026-07-25 审查 P0-1）。
-import config
+from pixivviewer import config
 _TEST_DB_PATH = os.path.join(tempfile.gettempdir(), f'pixiv_test_{os.getpid()}.db')
 config.DATABASE_PATH = _TEST_DB_PATH
 config.AUTO_FOLLOW_INTERVAL = 0
@@ -45,7 +45,7 @@ config.BACKUP_INTERVAL = 0
 
 import pytest
 
-from models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, SearchCache
+from pixivviewer.models import get_session, safe_commit, Illust, BlockedTag, DownloadLog, SearchCache
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def _assert_engine_points_at_test_db():
     `-k <关键字>` 选中的用例，它也会先执行 —— 上一级防线当时正是因为相关用例被
     `-k` 过滤掉才没能报出来。
     """
-    import models
+    from pixivviewer import models
     url = str(models.engine.url)
     assert 'pixiv_test_' in url, (
         f'engine 指向了非测试库：{url}\n'
@@ -80,7 +80,7 @@ def app():
     flask_app.config.update({'TESTING': True, 'SESSION_COOKIE_SECURE': False})
     yield flask_app
     # Windows 上需先释放引擎持有的文件句柄，否则 unlink 报 WinError 32
-    import models
+    from pixivviewer import models
     models.engine.dispose()
     for suffix in ('', '-wal', '-shm'):
         p = _TEST_DB_PATH + suffix
@@ -108,7 +108,7 @@ def clean_db(db):
     而这里是真正会丢数据的那一行；把校验贴着危险动作放，任何绕过前面防线的路径
     （将来新增的 fixture、直接 `Session(engine)`、外部工具复用这个夹具）都拦得住。
     """
-    import models
+    from pixivviewer import models
     url = str(models.engine.url)
     assert 'pixiv_test_' in url, (
         f'拒绝清表：engine 指向 {url}，这不是测试库。'

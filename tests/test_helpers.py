@@ -5,10 +5,8 @@ import pathlib
 
 import pytest
 
-import config
-import helpers
-
-
+from pixivviewer import config
+from pixivviewer import helpers
 def _mk(path, name, size, mtime):
     p = path / name
     p.write_bytes(b'x' * size)
@@ -343,9 +341,11 @@ class TestOriginalToResized:
             assert helpers._original_to_resized(url) == url, f'应原样返回：{url!r}'
 
 
-# 模块级不得 import 的"上游"：models 会绑 engine，其余是业务/组装层
+# 模块级不得 import 的"上游"：models 会绑 engine，其余是业务/组装层。
+# 包化后有两副面孔：`from .models import ...`（module 名仍是 models）与
+# `from . import models`（module 为 None、名字在 names 里），下面按"末段名"统一判定。
 _FORBIDDEN_MODULE_IMPORTS = {'models', 'fetcher', 'app', 'background', 'middleware',
-                             'routes_gallery'}
+                             'gallery'}
 
 
 def test_helpers_does_not_import_models_at_module_level():
@@ -368,25 +368,33 @@ def test_helpers_does_not_import_models_at_module_level():
     """
     tree = ast.parse(pathlib.Path(helpers.__file__).read_text(encoding='utf-8'))
 
+    def _targets(node) -> list[str]:
+        """一条 import 命中的模块名（按末段判定，相对导入同样适用）。
+
+        `from .models import X` 的 node.module 是 'models'；`from . import models`
+        的 node.module 是 None、模块名在 names 里 —— 两种写法都得算。
+        """
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                return [node.module.split('.')[-1]]
+            return [alias.name.split('.')[0] for alias in node.names]
+        return [alias.name.split('.')[-1] for alias in node.names]
+
     offenders: list[str] = []
     for node in tree.body:                   # 只看模块级顶层语句
-        if isinstance(node, ast.ImportFrom):
-            root = (node.module or '').split('.')[0]
-            if root in _FORBIDDEN_MODULE_IMPORTS:
-                offenders.append(f'from {node.module} import ...（第 {node.lineno} 行）')
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.split('.')[0] in _FORBIDDEN_MODULE_IMPORTS:
-                    offenders.append(f'import {alias.name}（第 {node.lineno} 行）')
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            hits = [t for t in _targets(node) if t in _FORBIDDEN_MODULE_IMPORTS]
+            if hits:
+                offenders.append(f'{ast.unparse(node)}（第 {node.lineno} 行）')
 
     assert not offenders, (
         f'helpers 不再是叶子，模块级出现了违规 import：{offenders}。'
-        f'需要 DB 的函数请在函数体内 `from models import ...`。'
+        f'需要 DB 的函数请在函数体内 `from .models import ...`。'
     )
 
     func = next((node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name == 'query_cached_tag'), None)
     assert func is not None, 'query_cached_tag 不见了？'
     lazy = [node for node in ast.walk(func)
-            if isinstance(node, ast.ImportFrom) and (node.module or '') == 'models']
-    assert lazy, 'query_cached_tag 必须在函数体内延迟 import models（见该函数注释）'
+            if isinstance(node, ast.ImportFrom) and (node.module or '').split('.')[-1] == 'models']
+    assert lazy, 'query_cached_tag 必须在函数体内延迟 `from .models import ...`（见该函数注释）'

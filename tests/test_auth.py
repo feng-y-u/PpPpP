@@ -112,8 +112,7 @@ class TestLogin:
         import hashlib
         import hmac
         import app
-        import routes_settings
-
+        from pixivviewer.routes import settings as routes_settings
         monkeypatch.setattr('app.ACCESS_PASSWORD', '')
         monkeypatch.setattr('app.SETTINGS_PASSWORD', 'settings-secret')
         monkeypatch.setattr(routes_settings.time, 'sleep', lambda _seconds: None)
@@ -184,8 +183,7 @@ class TestRateLimitConcurrency:
             return n
 
     def test_concurrent_burst_cannot_exceed_limit(self):
-        import middleware
-
+        from pixivviewer import middleware
         # 单轮复现率约 2/3（CPython 线程调度决定），跑 40 轮取最大值：
         # 有 bug 时几乎必然被抓到，无 bug 时每轮都恰好放行 limit 个。
         total, limit, rounds = 8, 1, 40
@@ -258,7 +256,7 @@ class TestSettingsCompat:
     def test_unlock_failure_applies_delay(self, client, monkeypatch):
         """解锁失败要像登录失败一样延迟 1 秒，减缓爆破。"""
         import app as app_module
-        import routes_settings
+        from pixivviewer.routes import settings as routes_settings
         monkeypatch.setattr(app_module, 'SETTINGS_PASSWORD', 'settings-pw')
         sleeps = []
 
@@ -421,8 +419,7 @@ class TestSecretFiles:
             `.secret_key` 只检查"是否为空"；
           - 够长：必须原样使用，每次启动换密钥会让所有会话/游标失效。
         """
-        import config
-
+        from pixivviewer import config
         cases = (
             ('缺失', '.cursor_secret', None, False, False),
             ('截断', '.cursor_secret', 'abc', True, False),
@@ -452,8 +449,7 @@ class TestSecretFiles:
         import os
         import stat
         import sys
-        import config
-
+        from pixivviewer import config
         if sys.platform == 'win32':
             pytest.skip('Windows 的 chmod 只映射只读位，没有 POSIX 权限语义')
 
@@ -472,7 +468,7 @@ class TestSecretFiles:
         上一条用例在 Windows 上会 skip，这条用替身盯住实际调用的权限位，保证
         "收紧权限"这件事在任何平台上都被执行（不是"只在 Linux 上想过")。
         """
-        import config
+        from pixivviewer import config
         calls = []
         monkeypatch.setattr(config.os, 'chmod', lambda p, mode: calls.append((str(p), mode)))
         path = tmp_path / '.cursor_secret'
@@ -488,8 +484,7 @@ class TestSecretFiles:
 
     def test_chmod_failure_does_not_break_startup(self, tmp_path, monkeypatch):
         """权限收紧失败（Windows / 文件属主不是本用户）不能让启动炸掉。"""
-        import config
-
+        from pixivviewer import config
         def _boom(path, mode):
             raise OSError('模拟 chmod 不被支持')
 
@@ -511,8 +506,7 @@ class TestSecretFiles:
         import pathlib
 
         import app as app_module
-        import config
-
+        from pixivviewer import config
         tree = ast.parse(pathlib.Path(app_module.__file__).read_text(encoding='utf-8'))
         # 只看模块级语句里的调用：app.py 这里是赋值语句（app.config['SECRET_KEY'] = ...），
         # 不是裸表达式；同时不能把函数体里的同名调用算进来（那样等于没验证启动路径）。

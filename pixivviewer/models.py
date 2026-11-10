@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, In
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
-from config import DATABASE_PATH
+from .config import DATABASE_PATH
 
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
 

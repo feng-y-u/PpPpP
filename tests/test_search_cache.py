@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timezone
 
 import app
-from models import SearchCache, Illust, BlockedTag, safe_commit
+from pixivviewer.models import SearchCache, Illust, BlockedTag, safe_commit
 
 
 class TestQueryCachedTag:

@@ -13,14 +13,14 @@ import pytest
 from sqlalchemy import text
 
 import app
-import fetcher
-import helpers
-import models
-import pixiv_client
-import routes_download
-import routes_gallery
-import runtime
-from config import ITEMS_PER_PAGE
+from pixivviewer import fetcher
+from pixivviewer import helpers
+from pixivviewer import models
+from pixivviewer import pixiv_client
+from pixivviewer.routes import download as routes_download
+from pixivviewer.routes import gallery as routes_gallery
+from pixivviewer import runtime
+from pixivviewer.config import ITEMS_PER_PAGE
 
 # error / cancelled 等"结果不可信"的终态响应的计数器必须全零（与 results=[] 一致）：
 # accepted 是前端"已找到 N 件"的数据源，留着非零值就会在空网格上显示幽灵数字。
@@ -109,13 +109,15 @@ class TestCsrfProtection:
     def test_mutating_endpoint_matrix_is_complete(self):
         """矩阵必须覆盖源码里所有修改型路由（将来新增路由时这里会先失败）。
 
-        只做静态对账：从 `routes_*.py` 抓 `@bp.route(..., methods=[...])` 与矩阵比对。
+        只做静态对账：从包内 `pixivviewer/routes/*.py` 抓 `@bp.route(..., methods=[...])`
+        与矩阵比对。包化前是根目录 `routes_*.py` —— 路径跟着模块搬家，扫描范围不能漏。
         "装饰器是否真的挂在函数上"由矩阵循环（`test_all_mutating_endpoints_require_csrf`）
         负责 —— 两件事都得有人管，缺一个都会让"漏挂 CSRF"重新变成静默风险。
         """
         pattern = re.compile(r"""@bp\.route\(\s*['"]([^'"]+)['"]([^)]*)\)""", re.S)
         found = set()
-        for source_file in pathlib.Path(app.__file__).resolve().parent.glob('routes_*.py'):
+        routes_dir = pathlib.Path(app.__file__).resolve().parent / 'pixivviewer' / 'routes'
+        for source_file in routes_dir.glob('*.py'):
             source = source_file.read_text(encoding='utf-8')
             for route, tail in pattern.findall(source):
                 if 'methods=' not in tail:
@@ -281,7 +283,7 @@ class TestSearch:
         的数据准备：cancel_event 当场被置位（不等旧任务自然结束）、旧任务以
         cancelled + 零计数收尾（cancelled 不是错误，不走 502）、新任务正常 done。
         """
-        from runtime import _search_tasks
+        from pixivviewer.runtime import _search_tasks
         started = threading.Event()
         calls = []
 
@@ -703,9 +705,9 @@ class TestSearchTaskSnapshot:
         # 不会踢后台补全线程，也不会碰真实网络
         fetcher.clear_search_cache()
         try:
-            with patch('pixiv_client.fetch_search_illusts', side_effect=fake_fetch_illusts), \
-                    patch('fetcher._fetch_details_parallel', return_value=batch), \
-                    patch('fetcher.build_pixiv_session'):
+            with patch('pixivviewer.pixiv_client.fetch_search_illusts', side_effect=fake_fetch_illusts), \
+                    patch('pixivviewer.fetcher._fetch_details_parallel', return_value=batch), \
+                    patch('pixivviewer.fetcher.build_pixiv_session'):
                 resp = client.get('/search?type=tag&query=e2e-wiring&min_bookmarks=1')
                 assert resp.status_code == 200
                 final = _poll_search_status(client, resp.get_json()['task_id'])
@@ -745,7 +747,7 @@ class TestSearchTaskSnapshot:
 
         monkeypatch.setattr(threading, 'excepthook', hook)
         with patch('app.search_by_tag', side_effect=fetcher.SearchRateLimitedError('限流')), \
-                patch('fetcher.get_last_fetch_stats', side_effect=fake_stats):
+                patch('pixivviewer.fetcher.get_last_fetch_stats', side_effect=fake_stats):
             task_id = client.get('/search?type=tag&query=test').get_json()['task_id']
             final = _poll_search_status(client, task_id, timeout=20)
             assert hooked.wait(5), '终态分支的异常应逃出任务线程（本用例的前提）'
@@ -885,7 +887,7 @@ class TestDetailPagePreviewFallback:
 
         # 快照自带 original_urls → 不该发起任何原图拉取（离线可跑；这条"零网络请求"
         # 的属性本身也要钉住：将来有人把预置 URL 去掉，这里会立刻炸成几十秒的挂起）
-        with patch('routes_gallery._fetch_original_urls',
+        with patch('pixivviewer.routes.gallery._fetch_original_urls',
                    side_effect=AssertionError('预览快照自带 original_urls，不该发网络请求')):
             resp = client.get(f'/detail/{pid}')
 
@@ -939,7 +941,7 @@ class TestDetailPagePreviewFallback:
                 # 此刻任务仍是 running，库里没有这行 —— 详情页只能靠快照渲染
                 assert clean_db.query(models.Illust).filter(
                     models.Illust.pixiv_id == pid).first() is None
-                with patch('routes_gallery._fetch_original_urls',
+                with patch('pixivviewer.routes.gallery._fetch_original_urls',
                            side_effect=AssertionError('快照自带 original_urls，不该发网络请求')):
                     resp = client.get(f'/detail/{pid}')
         finally:
@@ -1001,7 +1003,7 @@ class TestRoutes:
         assert resp.status_code == 200
         assert b'lightbox' not in resp.data, '灯箱已移除，模板不得再引入 lightbox.js'
 
-        js = pathlib.Path('static/page-index.js').read_text(encoding='utf-8')
+        js = pathlib.Path('pixivviewer/static/page-index.js').read_text(encoding='utf-8')
         assert 'lightbox' not in js, '搜索页脚本不得再引用灯箱'
         # 卡片点击 = 跳详情页（预览卡与已提交卡同一入口）
         assert 'window.location.href = `/detail/${r.pixiv_id}`' in js
@@ -1012,7 +1014,7 @@ class TestRoutes:
 class TestDbIsolation:
     def test_engine_uses_temp_db(self):
         """P0-1 回归测试：测试 engine 必须指向临时库，而非生产 instance/pixiv.db。"""
-        import models
+        from pixivviewer import models
         assert 'pixiv_test_' in str(models.engine.url)
 
 
@@ -1020,7 +1022,7 @@ class TestSessionFactory:
     def _build(self, monkeypatch, proxy=''):
         # Session 构建在适配层：代理配置、Cookie 缓存等状态归 pixiv_client 所有，
         # 补丁必须打在它身上（fetcher 只再导出函数，见 pixiv_client 模块 docstring）。
-        import pixiv_client
+        from pixivviewer import pixiv_client
         monkeypatch.setattr(pixiv_client, 'PROXY', proxy)
         monkeypatch.setattr(pixiv_client, '_load_cookie', lambda: None)
         monkeypatch.setattr(pixiv_client, '_cookie_value', 'test')
@@ -1104,7 +1106,7 @@ class TestGalleryTriggersBookmarkFill:
         - 收藏数=0 且未补全 → 必须进补全名单；
         - 收藏数 1500 或已带原图 URL → 不进（前者不需要补，后者补过了别重复拉）。
         """
-        import fetcher
+        from pixivviewer import fetcher
         called = []
         monkeypatch.setattr(fetcher, '_kick_background_fill', lambda ids: called.append(list(ids)))
         clean_db.add(models.Illust(pixiv_id=91001, title='a', bookmark_count=0,
@@ -1157,7 +1159,7 @@ class TestFollowingRouteR18:
     """/api/following 的 R18 过滤：缺省 safe（默认不显示 R18），显式 r18_mode=all 才包含。"""
 
     def _patch_following(self, monkeypatch):
-        import routes_search
+        from pixivviewer.routes import search as routes_search
         calls = []
         def fake_following(page=1, r18_mode='all'):
             calls.append({'page': page, 'r18_mode': r18_mode})
@@ -1190,7 +1192,7 @@ class TestGalleryDeleteOrphans:
         return client.get('/csrf-token').get_json()['token']
 
     def _patch_download_dir(self, monkeypatch, tmp_path):
-        import helpers
+        from pixivviewer import helpers
         monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
         return tmp_path
 
@@ -1255,7 +1257,7 @@ class TestGalleryDeleteTakesEffectImmediately:
         return client.get('/csrf-token').get_json()['token']
 
     def _done_illust(self, clean_db, monkeypatch, tmp_path, pid):
-        import helpers
+        from pixivviewer import helpers
         monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
         work = tmp_path / str(pid)
         work.mkdir()
@@ -1302,7 +1304,7 @@ class TestGalleryDeleteTakesEffectImmediately:
     def test_batch_delete_counts_already_gone_separately(
             self, client, clean_db, monkeypatch, tmp_path):
         """批量删除里"文件已不在"的作品单独计数，并让扫描缓存失效。"""
-        import helpers
+        from pixivviewer import helpers
         monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path / 'downloads'))
         (tmp_path / 'downloads').mkdir()
         gone = models.Illust(pixiv_id=70013, title='t', download_status='done',
@@ -1336,14 +1338,14 @@ class TestGalleryPageSize:
         html = client.get('/gallery').get_data(as_text=True)
 
         assert '<meta name="items-per-page" content="24">' in html
-        js = pathlib.Path('static/page-gallery.js').read_text(encoding='utf-8')
+        js = pathlib.Path('pixivviewer/static/page-gallery.js').read_text(encoding='utf-8')
         assert 'meta[name="items-per-page"]' in js, '页大小必须读服务端下发的值'
         assert 'const PAGE_SIZE = 50' not in js, '不得再硬编码页大小'
 
     def test_api_gallery_default_limit_follows_setting(self, client, clean_db, monkeypatch,
                                                        tmp_path):
         """不传 limit 时默认页大小同样是 `items_per_page`（前后端同源）。"""
-        import helpers
+        from pixivviewer import helpers
         monkeypatch.setattr(routes_gallery, 'ITEMS_PER_PAGE', 3)
         monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
         for pid in range(70020, 70026):        # 6 件已下载

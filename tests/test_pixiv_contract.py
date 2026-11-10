@@ -21,9 +21,8 @@ from pathlib import Path
 import pytest
 import requests
 
-import config
-import pixiv_client
-
+from pixivviewer import config
+from pixivviewer import pixiv_client
 FIXTURES = Path(__file__).parent / 'fixtures' / 'pixiv'
 
 # `parse_illust_detail` 的规范键集合：多一个键（解析器擅自加字段）或少一个键

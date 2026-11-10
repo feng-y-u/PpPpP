@@ -9,12 +9,12 @@ import time
 
 from flask import Blueprint, Response, jsonify, request
 
-from config import ITEMS_PER_PAGE
-from helpers import (
+from ..config import ITEMS_PER_PAGE
+from ..helpers import (
     HOME_RANDOM_MIN_BOOKMARKS, HOME_WINDOW_HOURS,
     _original_to_resized, _proxy_thumb, query_home_feed, query_home_random,
 )
-from middleware import _csrf_required
+from ..middleware import _csrf_required
 
 bp = Blueprint('home', __name__)
 

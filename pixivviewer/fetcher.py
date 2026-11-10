@@ -14,15 +14,15 @@ from typing import Any, Callable
 
 import requests
 
-from config import (
+from .config import (
     SEARCH_PAGES, PER_PAGE, ITEMS_PER_PAGE,
     DETAIL_MAX_RETRIES,  # 测试断言 `fetcher.DETAIL_MAX_RETRIES`；值本身由配置单点定义
     FETCH_DETAIL_WORKERS, CURSOR_SECRET,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from models import Illust, BlockedTag, get_session, safe_commit
+from .models import Illust, BlockedTag, get_session, safe_commit
 
-import pixiv_client
+from . import pixiv_client
 # ── 适配层再导出（历史调用方 + 测试补丁 seam）──
 # Pixiv 的 Ajax 路径/查询参数/响应字段/认证/限流全部归 `pixiv_client`（分层契约见
 # 该模块顶部 docstring）。这里再导出，是为了让 `fetcher.X` 的老调用方
@@ -32,7 +32,7 @@ import pixiv_client
 # `_detail_error_samples` / `PROXY` / `SSL_VERIFY`）刻意**不**在这里再导出：它们归适配层
 # 所有，读取与补丁都必须直接对 `pixiv_client`。再导出一份只会制造"补丁打了却没生效"的
 # 静默失效（`_TokenBucket` 是无状态类，再导出供测试构造限速器，见 test_fetcher.py）。
-from pixiv_client import (
+from .pixiv_client import (
     PixivAuthError,
     PixivRateLimitedError,
     R18_TAGS,

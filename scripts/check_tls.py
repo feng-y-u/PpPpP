@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402  （只为读取 PROXY / PIXIV_BASE_URL / SSL_VERIFY）
+from pixivviewer import config  # noqa: E402  （只为读取 PROXY / PIXIV_BASE_URL / SSL_VERIFY）
 
 VIAS = ('direct', 'proxy')
 

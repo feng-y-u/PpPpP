@@ -48,7 +48,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from config import (
+from .config import (
     COOKIE_PATH, PIXIV_BASE_URL, DETAIL_TIMEOUT, DETAIL_MAX_RETRIES,
     PROXY, SSL_VERIFY,
 )

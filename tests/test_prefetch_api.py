@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app
-import background
-import helpers
-from models import SearchCache, Illust, safe_commit
+from pixivviewer import background
+from pixivviewer import helpers
+from pixivviewer.models import SearchCache, Illust, safe_commit
 
 
 def _get_token(client):

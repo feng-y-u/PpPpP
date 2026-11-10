@@ -11,12 +11,10 @@ import pytest
 import requests
 
 import app
-import fetcher
-import pixiv_client
-import helpers
-import routes_settings
-
-
+from pixivviewer import fetcher
+from pixivviewer import pixiv_client
+from pixivviewer import helpers
+from pixivviewer.routes import settings as routes_settings
 @pytest.fixture(autouse=True)
 def _isolate_settings(monkeypatch, tmp_path):
     """settings.json 落点重定向到临时文件（路由经 app 命名空间读取该路径）。"""
@@ -270,8 +268,7 @@ class TestSettingsCookie:
         `PHPSESSID=` 形态（且内存态同步）"、"写完真能从磁盘读回来（而不是只看内存赋值
         这层伪装）"。合在一条里，因为它们验的是同一次写入的同一份文件。
         """
-        import config
-
+        from pixivviewer import config
         assert _ORIGINAL_COOKIE_PATHS['app'] == config.COOKIE_PATH
         assert _ORIGINAL_COOKIE_PATHS['pixiv_client'] == config.COOKIE_PATH
 
@@ -500,9 +497,8 @@ class TestAutoFollowStatus:
         成立，界面不能只看 `alive`。worker 侧的写入/清空时机由 `tests/test_auto_follow.py`
         盯住。
         """
-        import background
-        import runtime
-
+        from pixivviewer import background
+        from pixivviewer import runtime
         monkeypatch.setattr(background, '_auto_follow_thread', _AliveThread())
         monkeypatch.setitem(runtime._auto_follow_state, 'interval', 600)
         monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', True)
@@ -527,8 +523,7 @@ class TestAutoFollowStatus:
 
     def test_reports_stopped_thread(self, client, monkeypatch):
         """没启动（None）与启动后已退出（dead）都必须报 False —— 这正是"静默停止"的信号。"""
-        import background
-
+        from pixivviewer import background
         for label, fake_thread in (('从未启动', None), ('启动后已退出', _DeadThread())):
             monkeypatch.setattr(background, '_auto_follow_thread', fake_thread)
 
@@ -538,8 +533,7 @@ class TestAutoFollowStatus:
 
     def test_derived_alive_is_not_written_into_runtime_state(self, client):
         """`alive` 是派生值：写进 `_auto_follow_state` 会污染运行态（config 路由会回传它）。"""
-        import runtime
-
+        from pixivviewer import runtime
         before = dict(runtime._auto_follow_state)
 
         data = client.get('/api/auto-follow/status').get_json()
@@ -558,7 +552,7 @@ class TestAutoFollowStatus:
         `alive` 与 `last_error` 两处接线共用同一套"读模板 + 读脚本"的准备，故合一条；
         后半段还钉住"线程活着但每轮都失败也要标红"这一条界面语义。
         """
-        root = os.path.dirname(os.path.abspath(app.__file__))  # app.py 就在仓库根
+        root = os.path.join(os.path.dirname(os.path.abspath(app.__file__)), 'pixivviewer')
         with open(os.path.join(root, 'templates', 'settings.html'), encoding='utf-8') as f:
             tpl = f.read()
         with open(os.path.join(root, 'static', 'page-settings.js'), encoding='utf-8') as f:
@@ -588,9 +582,9 @@ def _seed_tag_cache():
         'url': 'https://i.pximg.net/thumb/7001.jpg',
         'updateDate': '2026-01-01T00:00:00+09:00', 'tags': [{'tag': 'a'}],
     }
-    with patch('pixiv_client.fetch_search_illusts', return_value=([item], 1)), \
-            patch('fetcher.build_pixiv_session'), \
-            patch('fetcher._fetch_details_parallel',
+    with patch('pixivviewer.pixiv_client.fetch_search_illusts', return_value=([item], 1)), \
+            patch('pixivviewer.fetcher.build_pixiv_session'), \
+            patch('pixivviewer.fetcher._fetch_details_parallel',
                   return_value=fetcher._DetailFetchBatch({}, 0)):
         fetcher.search_by_tag(_TAG_CACHE_PROBE, min_bookmarks=500)
     assert any(k.startswith(f'tag|q={_TAG_CACHE_PROBE}') for k in fetcher._SEARCH_CACHE), \
@@ -688,7 +682,7 @@ class _ProbeSession:
 @pytest.fixture(autouse=True)
 def _reset_credential_health_cache():
     """结论有 30s TTL 缓存，是进程级状态 —— 不清会让相邻用例互相污染。"""
-    import runtime
+    from pixivviewer import runtime
     runtime._credential_health_cache['ts'] = 0.0
     runtime._credential_health_cache['data'] = None
     yield
@@ -748,19 +742,19 @@ class TestPixivHealthEndpoint:
         必须一一对应、且不能互相冒充。共用同一套 Cookie 落点准备，故合在一个用例里 ——
         每段之前清掉 30s TTL 缓存，保证每段都真的重新判定一次。
         """
-        import runtime
+        from pixivviewer import runtime
         cookie = tmp_path / 'cookies.txt'
 
         def call(session=None, exc=None):
             runtime._credential_health_cache['ts'] = 0.0
             runtime._credential_health_cache['data'] = None
             probe = session if session is not None else _ProbeSession(exc=exc)
-            with patch('pixiv_client.build_pixiv_session', return_value=probe):
+            with patch('pixivviewer.pixiv_client.build_pixiv_session', return_value=probe):
                 return client.get('/api/pixiv/health').get_json(), probe
 
         # ① 本地没有 Cookie 文件：结论是 cookie_missing，且不该联网
         assert not cookie.exists()
-        with patch('pixiv_client.build_pixiv_session',
+        with patch('pixivviewer.pixiv_client.build_pixiv_session',
                    side_effect=AssertionError('缺 Cookie 时不该联网')):
             missing = client.get('/api/pixiv/health').get_json()
         assert missing['ok'] is False
@@ -795,7 +789,7 @@ class TestPixivHealthEndpoint:
             'error': False, 'body': {'thumbnails': {'illust': []},
                                      'page': {'isLastPage': True}}}))
 
-        with patch('pixiv_client.build_pixiv_session', return_value=session):
+        with patch('pixivviewer.pixiv_client.build_pixiv_session', return_value=session):
             first = client.get('/api/pixiv/health').get_json()
             second = client.get('/api/pixiv/health').get_json()
 

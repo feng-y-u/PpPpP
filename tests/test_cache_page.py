@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from models import SearchCache, Illust, safe_commit
+from pixivviewer.models import SearchCache, Illust, safe_commit
 
 
 class TestCacheItemsApi:
