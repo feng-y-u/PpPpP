@@ -9,7 +9,7 @@ import time
 from flask import Blueprint, Response, jsonify, request
 
 from config import ITEMS_PER_PAGE
-from helpers import HOME_WINDOW_HOURS, query_home_feed
+from helpers import HOME_WINDOW_HOURS, _original_to_resized, _proxy_thumb, query_home_feed
 
 bp = Blueprint('home', __name__)
 
@@ -30,6 +30,14 @@ def clear_home_cache() -> None:
 def _build_payload(window: str) -> dict:
     # 页大小跟随全局设置（与图库一致）：改 items_per_page 后首页也变
     results, used_hours = query_home_feed(ITEMS_PER_PAGE, window=window)
+    for r in results:
+        # 瀑布流要的是中图（master1200），不是列表接口那个 250px 方形缩略图。
+        # 走详情页同一条链路：原图地址 → `_original_to_resized`（扩展名恒 .jpg）→ `/thumb` 代理。
+        # 没有原图地址（defer 入库、后台补全尚未跑到的行）就退回缩略图 —— 首页不主动
+        # 拉 Pixiv 详情，宁可这张先用缩略图，也不为了画质偷偷发请求。
+        originals = r.get('original_urls') or []
+        medium = _original_to_resized(originals[0]) if originals else ''
+        r['medium_url'] = _proxy_thumb(medium) if medium else _proxy_thumb(r.get('thumb_url') or '')
     return {
         'results': results,
         'window_hours': used_hours,

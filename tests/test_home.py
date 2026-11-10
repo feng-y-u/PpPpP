@@ -5,6 +5,7 @@
 每条用例钉一个不变式，不合并（降级与排序是两件事，缓存与清缓存是第三件）。
 """
 from datetime import datetime, timedelta, timezone
+from base64 import urlsafe_b64decode
 import pathlib
 
 import pytest
@@ -114,6 +115,36 @@ class TestHomeApi:
             f'首页必须恒隐藏 R-18/R-18G，实际 {[r["pixiv_id"] for r in data["results"]]}'
         assert data['window_hours'] == 48
         assert data['fell_back'] is False
+
+    def test_medium_url_is_master1200_not_the_square_thumb(self, client, clean_db):
+        """瀑布流用中图：`medium_url` 必须是 master1200 的代理地址，不是 250px 方形缩略图。
+
+        这条链路与详情页同源（原图地址 → `_original_to_resized` → `/thumb`），
+        所以扩展名恒为 `.jpg`（原图是 PNG 也拼 `.jpg`，否则图床 404）。
+        没有原图地址的行退回缩略图 —— 首页不为画质去拉 Pixiv 详情。
+        """
+        with_original = _illust(clean_db, 4401, bookmarks=900)
+        with_original.original_urls_list = [
+            'https://i.pximg.net/img-original/img/2026/11/09/00/00/00/4401_p0.png',
+        ]
+        clean_db.commit()
+        _illust(clean_db, 4402, bookmarks=800)
+
+        data = client.get('/api/home').get_json()
+        by_id = {r['pixiv_id']: r for r in data['results']}
+
+        medium = by_id[4401]['medium_url']
+        assert medium.startswith('/thumb/'), '中图必须走 /thumb 代理（带 Referer 与缓存）'
+        raw = medium[len('/thumb/'):]
+        decoded = urlsafe_b64decode(raw + '=' * (-len(raw) % 4)).decode()
+        assert decoded.endswith('/4401_p0_master1200.jpg'), \
+            f'中图地址不对（扩展名必须 .jpg）：{decoded}'
+        assert '/c/' in decoded and 'img-master' in decoded, decoded
+
+        fallback = by_id[4402]['medium_url']
+        fallback_raw = fallback[len('/thumb/'):]
+        assert urlsafe_b64decode(fallback_raw + '=' * (-len(fallback_raw) % 4)).decode() \
+            == 'https://i.pximg.net/x/4402.jpg', '没有原图地址时应退回缩略图'
 
     def test_blocked_tags_always_apply(self, client, clean_db):
         """全局屏蔽标签与搜索/图库同口径：命中的作品首页也不出现。"""

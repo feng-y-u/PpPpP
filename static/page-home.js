@@ -5,12 +5,15 @@
 let homeItems = [];
 
 function renderHomeCard(r, index) {
+  // 瀑布流要中图：服务端已把原图地址转成 master1200 并代理成 /thumb/<b64>
+  // （没原图地址的行退回 250px 缩略图，首页不为画质去拉详情）
+  const imgSrc = r.medium_url || proxyThumb(r.thumb_url);
   const item = document.createElement('div');
   item.className = 'masonry-item';
   item.innerHTML = `
     <div class="photo-card" tabindex="0" data-pixiv-id="${r.pixiv_id}">
       <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23f2e8ea'%3E%3C/svg%3E"
-           data-src="${escAttr(proxyThumb(r.thumb_url))}" loading="lazy" class="img-fade" alt="">
+           data-src="${escAttr(imgSrc)}" loading="lazy" class="img-fade" alt="">
       <div class="card-meta">
         <div class="card-meta-title">${escHtml(r.title || '无题')}</div>
         <div class="card-meta-artist">${escHtml(r.user_name || '')}</div>
@@ -26,7 +29,7 @@ function renderHomeCard(r, index) {
     }
     lightbox.open(homeItems.map(x => ({
       pixiv_id: x.pixiv_id,
-      thumbUrl: proxyThumb(x.thumb_url),
+      thumbUrl: x.medium_url || proxyThumb(x.thumb_url),
     })), index);
   };
   card.addEventListener('click', open);
