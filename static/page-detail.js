@@ -26,6 +26,17 @@ if (isDownloaded && localUrls.length) {
 let currentPage = 0;
 let sourceIndex = 0;
 
+// 视觉层：换页/换源时让主图重新淡入一次。纯表现，不参与取图与候选链逻辑。
+// 首屏不触发 —— 交给 CSS 的入场动画（artIn），否则两段动画会互相覆盖。
+let swapPrimed = false;
+function pulseMainImage() {
+  if (!swapPrimed) { swapPrimed = true; return; }
+  const img = $('#mainImage');
+  img.classList.remove('img-swap');
+  void img.offsetWidth;   // 强制回流，让同名动画能够重播
+  img.classList.add('img-swap');
+}
+
 function renderCurrentSource() {
   const img = $('#mainImage');
   const chain = imgSources[currentPage] || [];
@@ -48,6 +59,7 @@ function renderCurrentSource() {
   } else {
     $('#pageIndicator').classList.remove('show');
   }
+  pulseMainImage();
 }
 
 function showPage(index) {

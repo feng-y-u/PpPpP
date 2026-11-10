@@ -8,183 +8,524 @@
 <link href="/static/style.css" rel="stylesheet">
 <meta name="csrf-token" content="{{ csrf_token }}">
 <style>
-/* ── Layout ── */
+/* =========================================================================
+   详情页 · 数字作品展示终端
+   左边观片台（作品优先），右边半透明信息栏；只在视觉层，不动任何取图逻辑。
+   ========================================================================= */
+
 .detail-wrap {
-  display: flex; gap: 0;
-  min-height: calc(100vh - 57px);
+  display: flex;
+  min-height: calc(100vh - 58px);
 }
 
-/* ── Image Area ── */
+/* ── 观片台 ───────────────────────────────────────────────────────────── */
+
 .image-area {
-  flex: 0 0 64%;
-  display: flex; align-items: center; justify-content: center;
-  position: relative; background: #f0efeb;
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
+  /* 冷光台面：中间亮、四周略沉，让作品自己"发光" */
+  background:
+    radial-gradient(120% 92% at 50% 42%, rgba(255,255,255,.96) 0%, rgba(228,240,251,.78) 52%, rgba(206,226,245,.95) 100%);
+  box-shadow: inset 0 0 90px rgba(46,110,175,.10);
 }
+
+/* 台面网格 */
+.image-area::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(120,160,200,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120,160,200,.07) 1px, transparent 1px);
+  background-size: 46px 46px;
+  pointer-events: none;
+}
+
+/* 扫描线：11s 横穿一次，透明度 ≤ .4 */
+.image-area::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 1px;
+  z-index: 2;
+  background: linear-gradient(90deg, transparent, rgba(127,216,242,.55) 30%, rgba(127,216,242,.55) 70%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  animation: stageScan 11s linear infinite;
+}
+@keyframes stageScan {
+  0%   { transform: translateY(0);    opacity: 0; }
+  6%   { opacity: .40; }
+  62%  { transform: translateY(72vh); opacity: .16; }
+  68%, 100% { transform: translateY(72vh); opacity: 0; }
+}
+
+/* 台面边框 + 四角括号 */
+.stage-frame {
+  position: absolute;
+  inset: 18px;
+  z-index: 1;
+  pointer-events: none;
+  border: 1px solid rgba(46,155,234,.10);
+  background:
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) left top / 18px 1px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) left top / 1px 18px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) right top / 18px 1px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) right top / 1px 18px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) left bottom / 18px 1px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) left bottom / 1px 18px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) right bottom / 18px 1px no-repeat,
+    linear-gradient(rgba(46,155,234,.55), rgba(46,155,234,.55)) right bottom / 1px 18px no-repeat;
+}
+
 .image-area img {
-  max-width: 100%; max-height: calc(100vh - 57px);
+  position: relative;
+  z-index: 1;
+  max-width: calc(100% - 96px);
+  max-height: calc(100vh - 130px);
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
+  box-shadow: 0 24px 60px rgba(20,50,90,.20), 0 2px 6px rgba(20,50,90,.10);
+  animation: artIn 1s cubic-bezier(.22,.61,.36,1) both;
+  transition: transform .6s cubic-bezier(.22,.61,.36,1);
 }
+/* 换页时的淡入（由 page-detail.js 补一个纯表现类） */
+.image-area img.img-swap { animation: imgSwap .42s cubic-bezier(.22,.61,.36,1); }
+@keyframes artIn {
+  from { opacity: 0; transform: scale(.985) translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes imgSwap {
+  from { opacity: .15; transform: scale(.996); }
+  to   { opacity: 1; transform: none; }
+}
+
 .image-area .fallback {
-  color: rgba(0,0,0,.12);
-  font-size: 0.85rem; font-family: 'SF Mono', 'Cascadia Code', monospace;
-  letter-spacing: 0.5px;
+  position: relative;
+  z-index: 1;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .18em;
+  color: rgba(27,44,74,.18);
 }
+
+/* 左右翻页 */
 .image-nav {
-  position: absolute; top: 50%; transform: translateY(-50%);
-  width: 42px; height: 72px; border: none;
-  background: rgba(255,255,255,.7);
-  backdrop-filter: blur(12px);
-  color: rgba(0,0,0,.5); font-size: 1.2rem;
-  cursor: pointer; border-radius: 6px;
-  transition: all 0.2s; z-index: 5;
-  display: flex; align-items: center; justify-content: center;
+  position: absolute;
+  top: 50%;
+  z-index: 5;
+  width: 42px;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.15rem;
+  color: var(--ink-soft);
+  background: rgba(255,255,255,.74);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255,255,255,.9);
+  box-shadow: 0 6px 20px rgba(20,50,90,.12);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background .18s ease, color .18s ease, box-shadow .22s ease, opacity .2s ease;
 }
-.image-nav:hover { background: rgba(255,255,255,.9); color: #000; }
-.image-nav.prev { left: 16px; }
-.image-nav.next { right: 16px; }
+.image-nav:hover { background: #fff; color: var(--blue-deep); box-shadow: 0 12px 28px rgba(20,50,90,.18); }
+.image-nav.prev { left: 20px; border-radius: 0 var(--r-s) var(--r-s) 0; }
+.image-nav.next { right: 20px; border-radius: var(--r-s) 0 0 var(--r-s); }
 .image-nav:disabled { opacity: 0; pointer-events: none; }
-.info-header {
-  display: flex; justify-content: flex-end; margin-bottom: 8px;
-}
-.info-back-btn {
-  width: 48px; height: 48px; border-radius: 10px;
-  border: 1px solid var(--border-input);
-  background: var(--bg-elevated); color: var(--text-secondary);
-  font-size: 1.4rem; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  transition: all 0.15s;
-}
-.info-back-btn:hover { background: var(--accent-subtle); color: var(--accent); }
-.illust-nav { display: flex; align-items: center; gap: 8px; margin-right: auto; }
-.illust-nav-btn {
-  height: 48px; padding: 0 14px; border-radius: 10px;
-  border: 1px solid var(--border-input);
-  background: var(--bg-elevated); color: var(--text-secondary);
-  font-size: 0.85rem; cursor: pointer; transition: all 0.15s;
-}
-.illust-nav-btn:hover { background: var(--accent-subtle); color: var(--accent); }
-.illust-nav-btn:disabled { opacity: 0.35; pointer-events: none; }
-.illust-nav-pos { font-size: 0.78rem; color: var(--text-muted); white-space: nowrap; }
+
 .page-indicator {
-  position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
-  background: rgba(0,0,0,.5); backdrop-filter: blur(8px);
-  color: #fff; font-size: 0.75rem; padding: 4px 14px; border-radius: 20px;
-  white-space: nowrap; z-index: 5;
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  z-index: 5;
+  padding: 3px 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .12em;
+  color: #fff;
+  background: rgba(22,35,60,.78);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(127,216,242,.24);
+  border-radius: 3px;
+  white-space: nowrap;
+  transform: translateX(-50%);
   display: none;
 }
 .page-indicator.show { display: block; }
 
-/* ── Info Panel ── */
+/* ── 信息栏 ───────────────────────────────────────────────────────────── */
+
 .info-area {
-  flex: 0 0 36%;
-  padding: 28px 24px;
+  position: relative;
+  flex: 0 0 clamp(360px, 30vw, 440px);
+  padding: 26px 32px 40px;
   overflow-y: auto;
-  max-height: calc(100vh - 57px);
-  border-left: 1px solid var(--border-subtle);
-  background: var(--bg-page);
+  max-height: calc(100vh - 58px);
+  background: linear-gradient(180deg, rgba(255,255,255,.94), rgba(246,251,255,.88));
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-left: 1px solid var(--steel);
+  box-shadow: -18px 0 46px rgba(20,60,110,.06);
 }
-.info-title { font-size: 1.2rem; font-weight: 700; margin: 0 0 4px; line-height: 1.3; color: var(--text-primary); word-break: break-word; }
-.info-id { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 18px; }
-.info-stats { display: flex; gap: 20px; margin-bottom: 18px; }
-.info-stat { text-align: center; }
-.info-stat-value { font-size: 1.1rem; font-weight: 700; color: var(--text-primary); }
-.info-stat-label { font-size: 0.68rem; color: var(--text-muted); margin-top: 1px; }
+/* 左缘竖线 + 两个刻度，暗示"终端侧栏" */
+.info-area::before {
+  content: "";
+  position: absolute;
+  left: -1px; top: 34px; bottom: 34px;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(46,155,234,.45) 18%, rgba(46,155,234,.16) 50%, rgba(46,155,234,.45) 82%, transparent);
+  pointer-events: none;
+}
 
-.info-actions { display: flex; gap: 8px; margin-bottom: 22px; flex-wrap: wrap; }
+.info-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 26px;
+}
+.illust-nav { display: none; align-items: center; gap: 8px; margin-right: auto; }
+.illust-nav-btn {
+  height: 34px;
+  padding: 0 12px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: rgba(255,255,255,.8);
+  border: 1px solid var(--steel);
+  border-radius: var(--r-s);
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease, transform .16s ease;
+}
+.illust-nav-btn:hover { color: var(--blue-deep); border-color: rgba(46,155,234,.45); transform: translateY(-1px); }
+.illust-nav-btn:disabled { opacity: .35; pointer-events: none; }
+.illust-nav-pos {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  color: var(--ink-mute);
+  white-space: nowrap;
+}
+.info-back-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  color: var(--ink-soft);
+  background: rgba(255,255,255,.86);
+  border: 1px solid var(--steel);
+  border-radius: var(--r-s);
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease, background .16s ease, transform .16s ease;
+}
+.info-back-btn:hover { color: var(--blue-deep); border-color: rgba(46,155,234,.42); background: #fff; transform: translateY(-1px); }
+
+.info-topline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.info-id {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: .1em;
+  color: var(--ink-mute);
+  margin-left: auto;
+}
+
+.info-title {
+  font-family: var(--font-display);
+  font-size: 23px;
+  font-weight: 650;
+  letter-spacing: -.018em;
+  line-height: 1.32;
+  color: var(--ink);
+  margin: 0 0 22px;
+  word-break: break-word;
+}
+
+/* 统计：四格 HUD 读数 */
+.info-stats {
+  display: flex;
+  margin-bottom: 24px;
+  padding: 14px 0;
+  border-top: 1px solid var(--steel-soft);
+  border-bottom: 1px solid var(--steel-soft);
+}
+.info-stat {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-left: 16px;
+  border-left: 1px solid var(--steel-soft);
+}
+.info-stat:first-child { padding-left: 0; border-left: none; }
+.info-stat-value {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.info-stat-value.is-status {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .02em;
+  line-height: 1.6;
+}
+.info-stat-label {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+.info-actions { display: flex; gap: 8px; margin-bottom: 26px; flex-wrap: wrap; }
 .info-actions .btn {
-  height: 40px; font-size: 0.82rem; font-weight: 600;
-  border-radius: 8px; display: inline-flex; align-items: center; gap: 6px;
-  padding: 0 20px;
+  height: 44px;
+  padding: 0 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: .04em;
 }
-.btn-primary-accent { background: var(--accent); border: none; color: #fff; }
-.btn-primary-accent:hover { background: var(--accent-hover); box-shadow: 0 4px 14px rgba(212,67,107,.25); }
-.btn-soft { background: var(--accent-subtle); border: 1px solid rgba(212,67,107,.1); color: var(--text-secondary); }
-.btn-soft:hover { background: rgba(212,67,107,.15); color: var(--accent); }
-.btn-dl-done {
-  background: rgba(59,138,94,.15); border: 1px solid rgba(59,138,94,.3); color: var(--success);
+/* 详情页主 CTA：已下载用薄荷绿实心块 —— 全站唯一出现的位置 */
+.info-actions .btn-dl-done {
+  color: #fff;
+  background: linear-gradient(180deg, #46B79A, #26866C);
+  border: 1px solid rgba(20,105,84,.45);
+  box-shadow: 0 1px 0 rgba(255,255,255,.28) inset, 0 6px 18px rgba(38,134,108,.22);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%);
 }
-.btn-dl-done:hover { background: rgba(59,138,94,.25); color: var(--success); }
+.info-actions .btn-dl-done:hover {
+  color: #fff;
+  background: linear-gradient(180deg, #4FC1A3, #2C9175);
+}
 
+/* 作者牌 */
 .artist-card {
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 0; border-top: 1px solid var(--border-subtle);
-  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 26px;
+  padding: 14px;
+  background: rgba(255,255,255,.72);
+  border: 1px solid var(--steel-soft);
+  border-radius: var(--r-s);
+  box-shadow: 0 1px 0 rgba(255,255,255,.9) inset;
+  transition: border-color .2s ease, box-shadow .24s ease, transform .24s ease;
+}
+.artist-card:hover {
+  border-color: rgba(46,155,234,.3);
+  box-shadow: 0 10px 24px rgba(38,104,170,.10);
+  transform: translateY(-1px);
 }
 .artist-avatar {
-  width: 44px; height: 44px; border-radius: 50%;
-  background: var(--accent);
-  display: flex; align-items: center; justify-content: center;
-  color: #fff; font-weight: 700; font-size: 1rem; flex-shrink: 0;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 650;
+  color: #fff;
+  background: linear-gradient(150deg, #63D0F5, var(--blue) 55%, var(--blue-deep));
+  border-radius: 3px;
+  clip-path: polygon(0 0, 100% 0, 100% 66%, 66% 100%, 0 100%);
+  box-shadow: 0 4px 12px rgba(46,155,234,.28);
 }
 .artist-info { flex: 1; min-width: 0; }
-.artist-name { font-size: 0.9rem; font-weight: 600; color: var(--text-primary); }
-.artist-name a { color: var(--accent); text-decoration: none; cursor: pointer; }
-.artist-name a:hover { color: var(--accent-hover); text-decoration: underline; }
-.artist-sub { font-size: 0.72rem; color: var(--text-muted); }
+.artist-name { font-size: 13px; font-weight: 650; color: var(--ink); }
+.artist-name a { color: var(--ink); }
+.artist-name a:hover { color: var(--blue-deep); text-decoration: underline; text-underline-offset: 3px; }
+.artist-sub {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: .07em;
+  color: var(--ink-mute);
+}
 
+/* 分区标题与标签 */
 .section-label {
-  font-size: 0.72rem; font-weight: 600; color: var(--text-muted);
-  text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px;
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
 }
-.tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 20px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 28px; }
 .tag-item {
-  font-size: 0.72rem; padding: 4px 10px; border-radius: 5px;
-  background: var(--accent-subtle); color: var(--text-secondary);
-  cursor: pointer; border: 1px solid transparent; transition: all 0.15s;
+  padding: 5px 11px;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  background: rgba(237,245,253,.9);
+  border: 1px solid var(--steel-soft);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease, transform .15s ease;
 }
-.tag-item:hover { background: rgba(212,67,107,.15); color: var(--accent); border-color: rgba(212,67,107,.2); }
+.tag-item:hover {
+  color: var(--blue-deep);
+  background: rgba(46,155,234,.10);
+  border-color: rgba(46,155,234,.32);
+  transform: translateY(-1px);
+}
 
-/* Related */
+/* 相关作品 */
 .section-label-row {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
 }
-.related-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.related-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .related-item {
-  aspect-ratio: 1; background: var(--bg-thumb); border-radius: 6px;
-  overflow: hidden; cursor: pointer; border: 1px solid var(--border-card);
-  transition: all 0.15s; position: relative;
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: var(--r-s);
+  border: 1px solid var(--steel-soft);
+  background: var(--ice-2);
+  transition: border-color .18s ease, box-shadow .24s ease, transform .3s ease;
 }
-.related-item:hover { border-color: var(--accent); }
+.related-item:hover {
+  border-color: rgba(46,155,234,.5);
+  box-shadow: 0 12px 28px rgba(38,104,170,.16);
+  transform: translateY(-2px);
+}
 .related-item img {
-  width: 100%; height: 100%; object-fit: cover;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform .6s cubic-bezier(.22,.61,.36,1);
 }
-.related-item .related-overlay {
-  position: absolute; inset: 0;
-  background: linear-gradient(to top, rgba(0,0,0,.5) 0%, transparent 50%);
-  opacity: 0; transition: opacity 0.2s;
-  display: flex; flex-direction: column; justify-content: flex-end;
-  padding: 8px;
+.related-item:hover img { transform: scale(1.06); }
+.related-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 9px;
+  background: linear-gradient(to top, rgba(12,26,46,.74) 0%, transparent 58%);
+  opacity: 0;
+  transition: opacity .22s ease;
 }
 .related-item:hover .related-overlay { opacity: 1; }
-.related-overlay-title { font-size: 0.68rem; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.related-overlay-artist { font-size: 0.6rem; color: rgba(255,255,255,.7); }
+.related-overlay-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.related-overlay-artist {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: .04em;
+  color: rgba(127,216,242,.85);
+}
 
-/* ── 搜索预览态提示（作品已筛出但尚未落库，见 routes_gallery.detail_page）── */
+/* 预览态提示（结构由模板与测试共同约定，只改外观） */
 .preview-notice {
-  margin: 0 0 14px; padding: 10px 12px;
-  border: 1px dashed var(--accent); border-radius: 10px;
-  background: var(--accent-subtle);
-  color: var(--text-secondary); font-size: 0.76rem; line-height: 1.55;
+  margin: 0 0 20px;
+  padding: 11px 13px;
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--ink-soft);
+  background: rgba(46,155,234,.06);
+  border: 1px dashed rgba(46,155,234,.42);
+  border-radius: var(--r-s);
 }
-.preview-notice b { color: var(--accent); font-weight: 600; }
+.preview-notice b { color: var(--blue-deep); font-weight: 650; }
 
-/* ── Responsive ── */
-@media (max-width: 768px) {
+/* ── 入场错峰：面板内各块依次浮现 ─────────────────────────────────────── */
+
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+.info-area .r1, .info-area .r2, .info-area .r3,
+.info-area .r4, .info-area .r5, .info-area .r6 {
+  animation: riseIn .62s cubic-bezier(.22,.61,.36,1) both;
+}
+.info-area .r1 { animation-delay: .04s; }
+.info-area .r2 { animation-delay: .10s; }
+.info-area .r3 { animation-delay: .16s; }
+.info-area .r4 { animation-delay: .22s; }
+.info-area .r5 { animation-delay: .28s; }
+.info-area .r6 { animation-delay: .34s; }
+
+/* ── 响应式 ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 1080px) {
+  .info-area { flex: 0 0 380px; padding: 22px 24px 34px; }
+  .info-title { font-size: 21px; }
+}
+
+@media (max-width: 860px) {
   .detail-wrap { flex-direction: column; }
-  .image-area { flex: none; min-height: 50vh; }
-  .image-area img { max-height: 70vh; }
-  .info-area { flex: none; border-left: none; max-height: none; padding: 20px 16px; }
-  .image-nav.prev { left: 8px; }
-  .image-nav.next { right: 8px; }
-  .image-nav { width: 40px; height: 40px; font-size: 1.3rem; }
+  .image-area { flex: none; min-height: 46vh; }
+  .image-area img { max-width: calc(100% - 40px); max-height: 62vh; }
+  .stage-frame { inset: 10px; }
+  .image-nav { width: 38px; height: 38px; }
+  .image-nav.prev { left: 10px; }
+  .image-nav.next { right: 10px; }
+  .info-area {
+    flex: none;
+    max-height: none;
+    padding: 24px 20px 40px;
+    border-left: none;
+    border-top: 1px solid var(--steel);
+    border-radius: 18px 18px 0 0;
+    margin-top: -14px;
+    box-shadow: 0 -14px 36px rgba(20,60,110,.08);
+  }
+  .info-area::before { display: none; }
+  .info-header { margin-bottom: 20px; }
+  .info-title { font-size: 20px; margin-bottom: 18px; }
+  .page-indicator { bottom: 16px; }
 }
 
-/* ── Scrollbar ── */
-.info-area::-webkit-scrollbar { width: 4px; }
-.info-area::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 2px; }
+@media (max-width: 480px) {
+  .info-stat-value { font-size: 17px; }
+  .related-grid { gap: 8px; }
+}
+
+/* ── 无障碍：减少动态效果 ─────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .image-area img,
+  .image-area img.img-swap,
+  .info-area .r1, .info-area .r2, .info-area .r3,
+  .info-area .r4, .info-area .r5, .info-area .r6 { animation: none !important; }
+  .image-area::after { animation: none !important; opacity: 0 !important; }
+  .related-item, .related-item img, .artist-card, .tag-item { transition: none !important; }
+  .related-item:hover img { transform: none !important; }
+}
 </style>
 </head>
 <body>
@@ -209,11 +550,14 @@
 
 <div class="full-page">
 <div class="detail-wrap">
-  <!-- Image -->
-  <div class="image-area" id="imageArea">
+
+  <!-- ── 观片台 ── -->
+  <section class="image-area" id="imageArea">
     {% set page_count = illust.page_count or 1 %}
     {% set is_downloaded = illust.download_status == 'done' %}
     {% set has_images = is_downloaded %}
+
+    <div class="stage-frame" aria-hidden="true"></div>
 
     <img id="mainImage" src="" alt="">
     <div class="fallback" id="fallback"></div>
@@ -221,11 +565,11 @@
     <button class="image-nav prev" id="prevBtn" aria-label="上一张">‹</button>
     <button class="image-nav next" id="nextBtn" aria-label="下一张">›</button>
     <div class="page-indicator" id="pageIndicator"></div>
-  </div>
+  </section>
 
-  <!-- Info -->
-  <div class="info-area">
-    <div class="info-header">
+  <!-- ── 信息栏 ── -->
+  <aside class="info-area">
+    <div class="info-header r1">
       <div class="illust-nav" id="illustNav" style="display:none;">
         <button class="illust-nav-btn" id="prevIllustBtn">‹ 上一作</button>
         <span class="illust-nav-pos" id="illustPos" aria-live="polite"></span>
@@ -233,10 +577,15 @@
       </div>
       <button class="info-back-btn" id="backBtn" aria-label="返回">←</button>
     </div>
-    <h1 class="info-title">{{ illust.title or '无标题' }}</h1>
-    <div class="info-id">#{{ illust.pixiv_id }}{% if illust.upload_date %} · {{ illust.upload_date[:10] }}{% endif %}</div>
 
-    <div class="info-stats">
+    <div class="info-topline r2">
+      <span class="mono-label">ILLUSTRATION</span>
+      <span class="info-id">#{{ illust.pixiv_id }}{% if illust.upload_date %} · {{ illust.upload_date[:10] }}{% endif %}</span>
+    </div>
+
+    <h1 class="info-title r2">{{ illust.title or '无标题' }}</h1>
+
+    <div class="info-stats r3">
       <div class="info-stat">
         <div class="info-stat-value">{{ fmt_num(illust.bookmark_count) }}</div>
         <div class="info-stat-label">收藏</div>
@@ -248,13 +597,13 @@
       <div class="info-stat">
         {% set ds = illust.get('download_status') %}
         {% if ds == 'done' %}
-          <div class="info-stat-value" style="color:var(--success);font-size:0.85rem">已下载</div>
+          <div class="info-stat-value is-status" style="color:var(--success)">已下载</div>
         {% elif ds == 'downloading' %}
-          <div class="info-stat-value" style="color:var(--accent);font-size:0.85rem">下载中</div>
+          <div class="info-stat-value is-status" style="color:var(--accent)">下载中</div>
         {% elif ds == 'failed' %}
-          <div class="info-stat-value" style="color:#c0392b;font-size:0.85rem">失败</div>
+          <div class="info-stat-value is-status" style="color:var(--danger)">失败</div>
         {% else %}
-          <div class="info-stat-value" style="color:var(--text-muted);font-size:0.85rem">未下载</div>
+          <div class="info-stat-value is-status" style="color:var(--text-muted)">未下载</div>
         {% endif %}
         <div class="info-stat-label">下载</div>
       </div>
@@ -273,7 +622,7 @@
     </div>
     {% endif %}
 
-    <div class="info-actions">
+    <div class="info-actions r4">
       {% if preview %}
         {# 未落库的行 POST /download/<pid> 必然 404：给一个点了必然报错的按钮比不给更糟 #}
         <button class="btn btn-soft" id="downloadBtn" data-pid="{{ illust.pixiv_id }}" disabled
@@ -285,19 +634,19 @@
       {% endif %}
     </div>
 
-    <div class="artist-card">
+    <div class="artist-card r4">
       <div class="artist-avatar">{{ illust.user_name[:1] or '?' }}</div>
       <div class="artist-info">
         <div class="artist-name">
           <a href="/?type=user&query={{ illust.user_id }}">{{ illust.user_name or '未知画师' }}</a>
         </div>
-        <div class="artist-sub">UID: {{ illust.user_id }}</div>
+        <div class="artist-sub">UID {{ illust.user_id }}</div>
       </div>
     </div>
 
     {% if illust.tags %}
-    <div class="section-label">标签</div>
-    <div class="tag-list" id="tagList">
+    <div class="section-label r5">标签</div>
+    <div class="tag-list r5" id="tagList">
       {% for tag in illust.tags %}
       <span class="tag-item" data-tag="{{ tag }}">{{ tag }}</span>
       {% endfor %}
@@ -305,10 +654,10 @@
     {% endif %}
 
     {% if related %}
-    <div class="section-label-row">
+    <div class="section-label-row r6">
       <span class="section-label" style="text-transform:none;letter-spacing:0;">相关作品</span>
     </div>
-    <div class="related-grid" id="relatedGrid">
+    <div class="related-grid r6" id="relatedGrid">
       {% for r in related[:4] %}
       <a class="related-item" href="/detail/{{ r.pixiv_id }}">
         <img src="{{ proxy_thumb(r.thumb_url) }}" loading="lazy"  alt="">
@@ -320,7 +669,7 @@
       {% endfor %}
     </div>
     {% endif %}
-  </div>
+  </aside>
 </div>
 
 <div class="toast-container position-fixed bottom-0 end-0 p-3">
@@ -349,3 +698,4 @@
 </footer>
 </body>
 </html>
+

@@ -643,7 +643,7 @@ function renderCard(r, opts) {
   const badges = [];
   // 预览卡多一枚"筛选中"徽标 + 虚线描边（内联，样式表不动）：用户必须能一眼分辨
   // "这是刚刚筛出来的预览"与"这是已提交、可以放心点开的结果"
-  if (preview) badges.push('<span class="photo-badge" style="background:rgba(226,87,126,.9);color:#fff;">筛选中</span>');
+  if (preview) badges.push('<span class="photo-badge" style="background:rgba(46,155,234,.92);color:#fff;">筛选中</span>');
   badges.push(`<span class="photo-badge">♥ ${fmtNum(r.bookmark_count)}</span>`);
   if (r.page_count > 1) badges.push(`<span class="photo-badge">${r.page_count}P</span>`);
   if (isDone) badges.push(`<span class="photo-badge" style="background:rgba(59,138,94,.85);color:#fff;">已下载</span>`);
