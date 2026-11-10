@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PpPpP · 最近 48 小时热门</title>
+<link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
+<link href="/static/style.css" rel="stylesheet">
+<style>
+/* ── 页头 ── */
+.home-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; padding: 2.2rem 0 1.1rem;
+}
+.home-head-title {
+  font-size: 1.4rem; font-weight: 700; letter-spacing: -0.3px;
+  color: var(--text-primary); margin: 0 0 4px;
+}
+.home-head-sub { font-size: 0.8rem; color: var(--text-secondary); margin: 0; }
+.home-head-meta {
+  font-size: 0.72rem; color: var(--text-muted); text-align: right;
+  white-space: nowrap; line-height: 1.7;
+}
+.home-head-meta strong { color: var(--text-secondary); font-weight: 600; }
+
+/* ── 时间窗说明条：正常 / 已放宽到 7 天 ── */
+.window-note {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.74rem; color: var(--text-secondary);
+  background: var(--accent-subtle);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px; margin-bottom: 1.1rem;
+}
+.window-note .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.window-note.fallback {
+  background: rgba(184,135,59,.09);
+  border-color: rgba(184,135,59,.22);
+  color: #8a6528;
+}
+.window-note.fallback .dot { background: #b8873b; }
+.window-note-action {
+  margin-left: auto; font-size: 0.72rem; color: #8a6528;
+  text-decoration: underline; text-underline-offset: 3px;
+  background: none; border: none; padding: 0; cursor: pointer;
+}
+
+/* ── 纯图瀑布流：多列布局，卡片紧贴上一张，没有 flex 那种行内空洞 ──
+   代价是列优先阅读顺序（1-8 在第一列），对"按收藏数 Top N"可接受。 */
+.masonry { column-count: 3; column-gap: 0.8rem; }
+.masonry-item {
+  width: 100%; margin-bottom: 0.8rem;
+  break-inside: avoid;              /* 一张卡不许被劈到两列 */
+  -webkit-column-break-inside: avoid;
+}
+@media (max-width: 992px) { .masonry { column-count: 2; } }
+@media (max-width: 640px) {
+  .masonry { column-count: 2; column-gap: 0.4rem; }
+  .masonry-item { margin-bottom: 0.4rem; }
+}
+
+.photo-card {
+  position: relative; overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--bg-thumb);
+  box-shadow: 0 1px 6px rgba(200,120,140,.07);
+  cursor: zoom-in; outline: none;
+  transition: transform .22s ease, box-shadow .22s ease;
+}
+.photo-card:hover,
+.photo-card:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
+}
+.photo-card:focus-visible { box-shadow: 0 0 0 3px var(--accent-focus), var(--shadow-card-hover); }
+.photo-card img {
+  display: block; width: 100%; height: auto;
+  background: var(--bg-thumb);
+  transition: transform .35s ease;
+}
+.photo-card:hover img,
+.photo-card:focus-visible img { transform: scale(1.03); }
+
+/* ── 左下角信息牌：只有名称与作者，默认藏起来 ── */
+.card-meta {
+  position: absolute; left: 10px; bottom: 10px;
+  max-width: calc(100% - 20px);
+  padding: 6px 10px 7px;
+  border-radius: 10px;
+  background: rgba(24,19,22,.62);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  color: #fff;
+  opacity: 0; transform: translateY(6px);
+  transition: opacity .18s ease, transform .18s ease;
+  pointer-events: none;             /* 不抢点击：整张图都能点开灯箱 */
+}
+.photo-card:hover .card-meta,
+.photo-card:focus-visible .card-meta { opacity: 1; transform: none; }
+.card-meta-title {
+  font-size: 0.76rem; font-weight: 600; line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0,0,0,.25);
+}
+.card-meta-artist {
+  font-size: 0.68rem; line-height: 1.35; margin-top: 1px;
+  color: rgba(255,255,255,.72);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 触屏没有悬浮：信息牌常显，否则永远看不到作者/名称 */
+@media (hover: none) {
+  .card-meta { opacity: 1; transform: none; }
+}
+
+/* ── 页脚说明与空状态 ── */
+.home-foot {
+  margin: 2rem 0 1rem; padding-top: 1rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.72rem; color: var(--text-muted);
+  display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.empty-wrap { padding: 4.5rem 1rem 5rem; text-align: center; }
+.empty-wrap h5 { font-size: 0.95rem; font-weight: 600; color: var(--text-primary); margin: 0 0 6px; }
+.empty-wrap p { font-size: 0.78rem; color: var(--text-secondary); margin: 0 auto 4px; max-width: 34rem; line-height: 1.8; }
+.empty-wrap .hint { color: var(--text-muted); font-size: 0.74rem; }
+.empty-actions { display: flex; gap: 8px; justify-content: center; margin-top: 1.4rem; }
+
+@media (max-width: 640px) {
+  .home-head { flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 1.5rem; }
+  .home-head-meta { text-align: left; }
+  .home-foot { flex-direction: column; gap: 6px; }
+}
+</style>
+</head>
+<body>
+
+<div class="full-page">
+
+<nav class="navbar">
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      PpPpP
+    </a>
+    <button class="nav-toggle" aria-label="菜单" >☰</button>
+    <div class="navbar-links">
+      <a class="navbar-link active" href="/">首页</a>
+      <a class="navbar-link" href="/explore">搜索</a>
+      <a class="navbar-link" href="/gallery">图库</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link" href="/cache">缓存</a>
+      <a class="navbar-link" href="/settings">设置</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+  <div class="home-head">
+    <div>
+      <h1 class="home-head-title">最近 48 小时热门</h1>
+      <p class="home-head-sub">按收藏数排序 · 悬停图片查看作者与名称</p>
+    </div>
+    <div class="home-head-meta">
+      <div><strong id="homeCount">0</strong> 件作品</div>
+      <div id="homeUpdated">加载中</div>
+    </div>
+  </div>
+
+  <div id="windowNote" class="window-note" style="display:none;"></div>
+
+  <div id="homeLoading" class="search-loading" style="display:none;">
+    <div class="spinner"></div>
+    <div>加载中...</div>
+  </div>
+
+  <div id="homeGrid" class="masonry"></div>
+
+  <div id="homeEmpty" class="empty-wrap" style="display:none;">
+    <h5>还没有可展示的近期作品</h5>
+    <p>首页只统计本地缓存里<strong>已补全收藏数</strong>的作品，它不会主动向 Pixiv 拉数据 ——
+       需要先有预取标签或自动关注在跑。</p>
+    <p class="hint">配置之后通常 10 分钟内就会有内容。</p>
+    <div class="empty-actions">
+      <a class="btn btn-sm" href="/settings" style="background:var(--accent);color:#fff;border:none;">去配置预取标签</a>
+      <a class="btn btn-soft btn-sm" href="/settings">打开自动关注</a>
+    </div>
+  </div>
+
+  <div class="home-foot">
+    <span>收藏数来自最近一次详情补全；未补全收藏数的作品不参与排序。</span>
+    <span>数据来自本地缓存</span>
+  </div>
+</div>
+
+</div>
+
+<footer class="site-footer">
+  <a href="https://github.com/feng-y-u/PpPpP" target="_blank" style="color:inherit;text-decoration:none;">github.com/feng-y-u/PpPpP</a>
+</footer>
+
+<script src="/static/vendor/bootstrap-5.3.3/bootstrap.bundle.min.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/lightbox.js"></script>
+<script src="/static/page-home.js"></script>
+</body>
+</html>

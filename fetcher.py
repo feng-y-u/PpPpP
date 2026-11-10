@@ -1230,8 +1230,14 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
         return cached
 
     session = build_pixiv_session()
+    # 上游 mode 固定取最宽的 `all`，R18 只由本地下面的 `hide_r18` 判定（单点过滤）。
+    # 为什么不再把用户的 `safe` 透传给上游：follow_latest 的 mode 语义不可信 ——
+    # 同一账号下 `safe` 曾既可能原样返回 R18 作品（"隐藏R18"失效），也可能只返回
+    # R18 作品/空页，于是"上游先筛一遍 + 本地再筛一遍"把非 R18 的也一起丢光，
+    # 症状就是切到"隐藏R18"后整个关注页"暂无结果"（2026-11-10 用户反馈）。
+    # 本地标签过滤是唯一判定点，上游给全量即可，两边不再互相抵消。
     illusts_data, has_next = pixiv_client.fetch_following_latest(
-        session, r18_mode=r18_mode, page=page)
+        session, r18_mode='all', page=page)
 
     if not illusts_data:
         _cache_put(cache_key, ([], False))
@@ -1245,8 +1251,8 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
             illust_factory=_illust_from_item,
             blocked=blocked,
             defer_details=True,
-            # Pixiv 的 follow_latest mode 参数并不总是过滤 R18（账号开启 R18 显示时
-            # safe/all 可能返回相同结果），本地再按标签兜底过滤一层，与搜索一致
+            # R18 的唯一判定点（上游请求恒为 mode=all，见上面的注释）：
+            # 按标签过滤 R-18 / R-18G，与搜索路径共用 `_rejected` 同一份语义
             hide_r18=(r18_mode == 'safe'),
         )
         safe_commit(db)

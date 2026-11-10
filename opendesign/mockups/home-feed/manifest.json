@@ -1,0 +1,40 @@
+{
+  "slug": "home-feed",
+  "title": "首页 · 最近 48 小时热门",
+  "generated": "2026-11-10T10:36:00+08:00",
+  "design_system": "design-systems/pixiv-viewer-light",
+  "files": [
+    {
+      "label": "首页纯图瀑布流（三状态切换）",
+      "path": "index.html"
+    }
+  ],
+  "variants": [
+    {
+      "id": "normal",
+      "label": "48 小时 · 正常",
+      "note": "24 件，按收藏数降序，标注时间窗"
+    },
+    {
+      "id": "fallback",
+      "label": "48 小时不够 · 退到 7 天",
+      "note": "顶部琥珀色说明条 + 「仍只看 48 小时」回退按钮"
+    },
+    {
+      "id": "empty",
+      "label": "空状态",
+      "note": "库里没有近期作品，引导去配置预取标签 / 自动关注"
+    }
+  ],
+  "card": {
+    "layout": "纯图，3 列多列瀑布流（column-count，卡片紧贴上一张，无行内空洞），卡片内无徽章/标签/按钮",
+    "meta": "左下角深色半透明信息牌，只有名称 + 作者，hover / focus 时淡入",
+    "touch": "@media (hover: none) 下信息牌常显，避免触屏永远看不到作者",
+    "reading_order": "多列布局是列优先（1-8 在第一列），不保证从左到右的排行顺序"
+  },
+  "notes": [
+    "静态预览：不接后端、不请求 Pixiv，卡片图为等宽编号占位块",
+    "复用 static/style.css 的 token；瀑布流与卡片规则按新形态重写，不再复用搜索页的 .photo-card-info",
+    "真实实现中「预览状态」这一条不存在，仅为对比三种口径"
+  ]
+}

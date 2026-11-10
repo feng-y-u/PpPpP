@@ -7,9 +7,9 @@
 
 | 模块 | 职责一句话 | 关键符号 / 说明 |
 |---|---|---|
-| `app.py` | 组装入口：创建 Flask app、注册全部 Blueprint、启动后台线程；仅剩 4 个页面/辅助路由 | `/`、`/cache`、`/csrf-token`、`/favicon.ico`；import 时序：`init_db()` → `_reset_stuck_*`（清理残留）→ `background.start_background_threads()` → `atexit.register(_shutdown_background_threads)` |
+| `app.py` | 组装入口：创建 Flask app、注册全部 Blueprint、启动后台线程；仅剩 5 个页面/辅助路由 | `/`（首页）、`/explore`（搜索页）、`/cache`、`/csrf-token`、`/favicon.ico`；import 时序：`init_db()` → `_reset_stuck_*`（清理残留）→ `background.start_background_threads()` → `atexit.register(_shutdown_background_threads)` |
 | `runtime.py` | 进程内存状态（`-w 1` 单进程语义，全部模块级变量） | `_scan_cache`/`_SCAN_CACHE_TTL`、`_db_pids_cache`、`_thumb_sem`/`_thumb_failed`/`_THUMB_FAIL_COOLDOWN`、`_thumb_failures`/`_thumb_failures_lock`（取图统计）、`_snapshot_state`/`_snapshot_stop`（滚动快照）、`_credential_health_cache`/`_CREDENTIAL_HEALTH_TTL`、`_auto_follow_state`/`_auto_follow_stop`、`_prefetch_state`、`_queued_downloads`/`_download_progress`/`download_cancellations`/`download_executor`、`_search_tasks`/`_search_tasks_lock`/`SEARCH_TASK_TTL`、`find_running_preview`（运行中搜索预览的只读查找，供 `/detail` 兜底）、`_rate_limit_store` |
-| `helpers.py` | 纯工具函数与库内查询（**叶子**，模块级不得 import models） | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`（中图扩展名恒 `.jpg`）、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`（函数内延迟 import models）、`_delete_illust_files` |
+| `helpers.py` | 纯工具函数与库内查询（**叶子**，模块级不得 import models） | `_scan_local_downloads`、`_build_orphan_dicts`、`_page_sort_key`、`_get_download_dir`、`_extract_ext`、`_proxy_thumb`、`_original_to_resized`（中图扩展名恒 `.jpg`）、`_fmt_num`、`_safe_int`、`_fetch_original_urls`、`_pid_filter`、`query_cached_tag`（函数内延迟 import models）、`query_home_feed`/`home_since`（首页窗口，JST 口径）、`_delete_illust_files` |
 | `backups.py` | 数据库**滚动快照**（与迁移前备份互补） | `take_snapshot`、`prune_snapshots`、`snapshot_due`、`snapshot_paths`/`latest_snapshot`、`backup_dir_for`、`SNAPSHOT_LABEL`；只清点/清理 `<库名>.snapshot-*.bak` |
 | `middleware.py` | 认证/CSRF/限流/安全头；app 级钩子随 `middleware_bp` 注册即全局生效 | `_rate_limit`、`_get_csrf_token`、`_get_json_body`、`_csrf_required`、`_require_login`（`before_app_request`）、`_security_headers`（`after_app_request`）、`_safe_next`、`_is_authed` |
 | `background.py` | 后台线程与下载引擎（auto_follow / 预取 / 下载） | `_auto_follow_worker`、`_prefetch_one_tag`/`_prefetch_loop`/`_prefetch_capacity_cleanup`/`_prefetch_refresh_bookmarks`/`reset_prefetch_refresh`/`_is_user_owned` 等、`_download_illust`、`start_background_threads()`（幂等）、`_shutdown_background_threads()` |
@@ -17,6 +17,7 @@
 | `fetcher.py` | Pixiv **业务层**：过滤/缓存/分页/入库；Ajax 细节全部委托适配层 | `search_by_tag`/`search_by_user`/`browse_discovery`/`paginated_search`/`fetch_following`、`_process_items`、`_insert_new_illusts`（冲突容忍入库）、`clear_search_cache`、`_fetch_details_parallel`（并发与 early_stop）、`_kick_background_fill`；并**再导出**适配层符号（见「测试契约」） |
 | `models.py` | SQLAlchemy ORM + DB 会话 | `init_db`、`get_session`、`safe_commit`；Illust/BlockedTag/DownloadLog/SearchCache |
 | `config.py` | 常量、环境变量覆盖、`instance/settings.json` import 时覆盖 | `DOWNLOAD_DIR`、`PREFETCH_*`、`ACCESS_PASSWORD`、`SETTINGS_PASSWORD`、`COOKIE_SECURE`、`ITEMS_PER_PAGE` 等；**import 时执行全部副作用**（读 `.env`/settings.json、生成密钥） |
+| `routes_home.py` | 首页数据：最近 48 小时热门（只读本地库） | `/api/home`（`?window=48` 禁降级）；`clear_home_cache`（60 秒缓存，屏蔽标签变更时清）；查询本体在 `helpers.query_home_feed` |
 | `routes_search.py` | 搜索任务 / 状态轮询 / 缓存浏览 / following | `/search`、`/api/search/status/<task_id>`、`/api/cache/*`、`/api/following`；`_submit_search_task`/`_cleanup_search_tasks` |
 | `routes_gallery.py` | 图库 / 详情 / 图片服务 / 缩略图代理（含页面路由） | `/gallery`、`/detail/<pid>`、`/api/gallery*`、`/thumb/<b64>`、`/api/thumb/stats`（取图统计）、`/api/thumb/redirect-hosts`、`/api/image/<pid>/<index>`、`/api/open-dir` |
 | `routes_download.py` | 下载触发/状态/取消/批量/下载管理（含页面路由） | `/download/<pid>`、`/api/download/batch`、`/download/cancel|reset/<pid>`、`/download_status/<pid>`、`/api/download/status/batch`、`/download_file/<pid>`、`/downloads`、`/api/downloads`；`_cancel_download_internal` |
@@ -36,7 +37,7 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 - `middleware` 读取 runtime 状态（限流存储）。
 - `background` 依赖 helpers/runtime/models/fetcher。
 - 各 `routes_*` 依赖 middleware/helpers/runtime/background/models，**模块间不互相导入**。
-- `app.py` 最后组装：创建 app → 注册 6 个 Blueprint（middleware_bp 最先，保证 app 级钩子最先生效）→ 启动后台线程。
+- `app.py` 最后组装：创建 app → 注册 7 个 Blueprint（middleware_bp 最先，保证 app 级钩子最先生效）→ 启动后台线程。
 
 ## `-w 1` 单进程语义与线程启动
 

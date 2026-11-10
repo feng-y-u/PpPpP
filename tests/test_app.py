@@ -29,7 +29,8 @@ _ZERO_PROGRESS = {'examined': 0, 'accepted': 0, 'detail_failed': 0}
 
 class TestIndexRoute:
     def test_get_returns_200(self, client):
-        resp = client.get('/')
+        """搜索页挪到 `/explore`（`/` 现在是首页）；`/search` 仍是异步搜索 API。"""
+        resp = client.get('/explore')
         assert resp.status_code == 200
         assert b'Pixiv' in resp.data or b'\xe6\x90\x9c\xe7\xb4\xa2' in resp.data
 
@@ -995,7 +996,7 @@ class TestRoutes:
         例外：未落库的 pid 在 `/api/detail/<pid>` 上是 404，灯箱探测不到页源、只能显示
         250px 缩略图，所以它仍然走详情页（那边有内存快照兜底给出中图）。
         """
-        resp = client.get('/')
+        resp = client.get('/explore')
         assert resp.status_code == 200
         assert b'lightbox.js' in resp.data, '搜索页必须引入共享灯箱组件'
 
@@ -1081,10 +1082,15 @@ class TestCollectionApiRemoved:
             assert resp.status_code == 404, f'{method} {path} 仍被注册'
 
     def test_collections_blueprint_not_registered(self, app):
-        """蓝图数 7 → 6：collections 蓝图必须整块摘掉，而不是留着空蓝图。"""
+        """蓝图清单是白名单：collections 蓝图必须整块摘掉，新增蓝图要显式过一遍这条。
+
+        历史：移除收藏夹时是 7 → 6；2026-11-10 新增 `home`（首页）后又回到 7 个。
+        写成精确清单而不是"不含 collections"，是为了让任何新蓝图都必须在此处登记，
+        顺带提醒"路由归属哪个蓝图"这件事需要被想过。
+        """
         assert 'collections' not in app.blueprints
         assert sorted(app.blueprints) == [
-            'download', 'gallery', 'middleware', 'prefetch', 'search', 'settings',
+            'download', 'gallery', 'home', 'middleware', 'prefetch', 'search', 'settings',
         ]
 
 

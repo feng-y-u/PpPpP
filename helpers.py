@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from base64 import urlsafe_b64encode
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -384,8 +385,101 @@ def query_cached_tag(tag: str, min_bookmarks: int, sort_order: str,
     return page_dicts, has_more, next_offset, total
 
 
-# ── URL/展示工具 ──
+# ── 首页热门（只读本地库）──
+#
+# 首页回答"最近 48 小时内收藏数最高的作品"。上游没有对应接口（popular_d 需
+# Premium 且不限定时间窗），所以只能聚合本地库 —— 覆盖率来自预取 / 自动关注 /
+# 手搜，这一点由空状态文案如实交代，不能让人误以为 Pixiv 上就这些。
 
+HOME_WINDOW_HOURS = 48          # 首页默认时间窗（小时）
+HOME_FALLBACK_HOURS = 168       # 不足一批时放宽到的小时数（7 天）
+
+
+def home_since(hours: int) -> datetime:
+    """时间窗左边界，**JST 朴素时间**。
+
+    `illusts.upload_date` 存的是 Pixiv 的 JST 墙面时间（写库时 +09:00 偏移被
+    SQLite 丢掉），直接拿 UTC now 去比会整体偏 9 小时 —— 首页窗口必须同口径。
+    """
+    jst_now = datetime.now(timezone.utc) + timedelta(hours=9)
+    return (jst_now - timedelta(hours=hours)).replace(tzinfo=None)
+
+
+def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], int]:
+    """首页「最近 N 小时热门」：只读本地库，按收藏数降序。
+
+    只统计 `bookmark_count > 0` 的行：为 0 有两种含义（真没人收藏 / 详情从未补全），
+    无法区分，而后者会让新入库作品全部沉底甚至占满一页。候选集变小，但排序可信。
+
+    window: 'auto' —— 48 小时内不足 `limit` 件时放宽到 7 天；
+            '48'   —— 禁止放宽（页面上"仍只看 48 小时"走这条）。
+
+    Returns: `(results_dicts, window_hours)`。`window_hours` 是**实际**窗口，
+    auto 模式放宽后为 168，前端据此标注口径。
+    """
+    # 延迟 import（见文件顶部注释）：helpers 依赖 models 只发生在这类函数体内
+    from models import BlockedTag, Illust, get_session
+
+    with get_session() as db:
+        blocked = sorted({t.tag for t in db.query(BlockedTag).all()})
+
+        # 标签条件单独收集：单条损坏 JSON 会让 json_each 抛错，降级时只丢这一类，
+        # 保留时间窗与收藏数过滤（与 query_cached_tag 同一套降级口径）。
+        r18 = sorted(pixiv_client.R18_TAGS)
+        r18_phs = ','.join(f':r18_{i}' for i in range(len(r18)))
+        tag_wheres = [
+            f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({r18_phs}))',
+        ]
+        tag_params = {f'r18_{i}': t for i, t in enumerate(r18)}
+        if blocked:
+            blk_phs = ','.join(f':blk_{i}' for i in range(len(blocked)))
+            tag_wheres.append(
+                f'NOT EXISTS (SELECT 1 FROM json_each(illusts.tags) je WHERE je.value IN ({blk_phs}))')
+            tag_params.update({f'blk_{i}': t for i, t in enumerate(blocked)})
+
+        order = 'illusts.bookmark_count DESC, illusts.upload_date DESC, illusts.id ASC'
+        base_wheres = [
+            'illusts.upload_date IS NOT NULL',
+            'illusts.upload_date >= :since',
+            'illusts.bookmark_count > 0',
+        ]
+
+        def _fetch(hours: int) -> list[int]:
+            params = {'since': home_since(hours), 'lim': limit, **tag_params}
+            sql = (f"SELECT illusts.id FROM illusts "
+                   f"WHERE {' AND '.join(base_wheres + tag_wheres)} "
+                   f'ORDER BY {order} LIMIT :lim')
+            try:
+                return db.execute(text(sql), params).scalars().all()
+            except OperationalError:
+                logger.warning('首页查询因 tags 数据异常降级（跳过标签过滤）')
+                sql = (f"SELECT illusts.id FROM illusts "
+                       f"WHERE {' AND '.join(base_wheres)} "
+                       f'ORDER BY {order} LIMIT :lim')
+                return db.execute(
+                    text(sql), {'since': params['since'], 'lim': limit}).scalars().all()
+
+        used_hours = HOME_WINDOW_HOURS
+        ids: list[int] = []
+        if limit > 0:
+            ids = _fetch(HOME_WINDOW_HOURS)
+            if window != '48' and len(ids) < limit:
+                wider = _fetch(HOME_FALLBACK_HOURS)
+                # 放宽后没有变多就维持 48 小时口径：既然没捞到新东西，
+                # 没必要让页面声称"已放宽到 7 天"
+                if len(wider) > len(ids):
+                    ids, used_hours = wider, HOME_FALLBACK_HOURS
+
+        if not ids:
+            return [], used_hours
+
+        illusts = db.query(Illust).filter(Illust.id.in_(ids)).all()
+        id_order = {pk: i for i, pk in enumerate(ids)}
+        illusts.sort(key=lambda x: id_order.get(x.id, 0))
+        return [i.to_dict() for i in illusts], used_hours
+
+
+# ── URL/展示工具 ──
 def check_image_url(url: str) -> tuple[str, str | None]:
     """解析并校验一个图片地址，返回 `(host, 拒绝原因)`；原因为 None 表示允许请求。
 

@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>首页 · 最近 48 小时热门（预览）</title>
+<link href="../../../static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
+<link href="../../../static/style.css" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════════════════════════════
+   预览外壳（不属于设计本身）：三个状态切换条
+   ══════════════════════════════════════════════════════════════ */
+/* 不吸顶：它和 navbar 都 sticky top:0 会叠在一起，把导航栏整个盖住 */
+.preview-chrome {
+  position: relative; z-index: 200;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 8px 16px;
+  background: #f2ece8;
+  border-bottom: 1px dashed rgba(180,120,135,.35);
+  font-size: 0.72rem; color: var(--text-muted);
+}
+.preview-chrome-label { letter-spacing: .3px; }
+.preview-tabs { display: flex; gap: 2px; background: rgba(0,0,0,.045); border-radius: 7px; padding: 3px; }
+.preview-tab {
+  padding: 4px 13px; font-size: 0.72rem; border: none; border-radius: 5px;
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+  transition: all .18s;
+}
+.preview-tab:hover { color: var(--text-primary); }
+.preview-tab.active { background: #fff; color: var(--accent); font-weight: 500; box-shadow: 0 1px 3px rgba(200,120,140,.18); }
+
+.variant-panel { display: none; }
+.variant-panel.active { display: block; }
+
+/* ══════════════════════════════════════════════════════════════
+   首页头部
+   ══════════════════════════════════════════════════════════════ */
+.home-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; padding: 2.2rem 0 1.1rem;
+}
+.home-head-title {
+  font-size: 1.4rem; font-weight: 700; letter-spacing: -0.3px;
+  color: var(--text-primary); margin: 0 0 4px;
+}
+.home-head-sub { font-size: 0.8rem; color: var(--text-secondary); margin: 0; }
+.home-head-meta {
+  font-size: 0.72rem; color: var(--text-muted); text-align: right;
+  white-space: nowrap; line-height: 1.7;
+}
+.home-head-meta strong { color: var(--text-secondary); font-weight: 600; }
+
+/* 时间窗说明条：48 小时 / 已放宽到 7 天，都靠它表达口径 */
+.window-note {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.74rem; color: var(--text-secondary);
+  background: var(--accent-subtle);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px; margin-bottom: 1.1rem;
+}
+.window-note .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.window-note.fallback {
+  background: rgba(184,135,59,.09);
+  border-color: rgba(184,135,59,.22);
+  color: #8a6528;
+}
+.window-note.fallback .dot { background: #b8873b; }
+.window-note-action {
+  margin-left: auto; font-size: 0.72rem; color: #8a6528;
+  text-decoration: underline; text-underline-offset: 3px;
+  background: none; border: none; padding: 0; cursor: pointer;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   纯图瀑布流：真·瀑布流（多列），不是 flex 按行排列
+   ──────────────────────────────────────────────────────────────
+   为什么不用 flex-wrap：那样一行的高度由该行最高的图决定，
+   短图下面会留一个空洞（截图里"中间有缝隙"就是它）。
+   多列布局让每张图紧贴上一张，列高自动平衡，没有空洞。
+   代价：阅读顺序变成"先竖着排满一列再排下一列"（1-8 在第一列），
+   对"按收藏数 Top 24"来说是可接受的取舍。
+   ══════════════════════════════════════════════════════════════ */
+.masonry {
+  column-count: 3;
+  column-gap: 0.8rem;
+}
+.masonry-item {
+  width: 100%;
+  margin-bottom: 0.8rem;
+  break-inside: avoid;         /* 一张卡不许被劈到两列 */
+  -webkit-column-break-inside: avoid;
+}
+@media (max-width: 992px) { .masonry { column-count: 2; } }
+@media (max-width: 640px) {
+  .masonry { column-count: 2; column-gap: 0.4rem; }
+  .masonry-item { margin-bottom: 0.4rem; }
+}
+
+.photo-card {
+  position: relative;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  background: var(--bg-thumb);
+  box-shadow: 0 1px 6px rgba(200,120,140,.07);
+  cursor: zoom-in;
+  outline: none;
+  transition: transform .22s ease, box-shadow .22s ease;
+}
+.photo-card:hover,
+.photo-card:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card-hover);
+}
+.photo-card:focus-visible { box-shadow: 0 0 0 3px var(--accent-focus), var(--shadow-card-hover); }
+
+/* 占位图：真实实现里这是 <img>，预览用带尺寸的色块 + 等宽编号 */
+.ph {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%;
+  background: var(--bg-thumb);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.6rem; letter-spacing: .04em;
+  color: rgba(180,120,135,.5);
+  transition: transform .35s ease;
+}
+.photo-card:hover .ph,
+.photo-card:focus-visible .ph { transform: scale(1.03); }
+
+/* ── 左下角信息牌：默认藏起来，悬浮才浮出 ── */
+.card-meta {
+  position: absolute;
+  left: 10px; bottom: 10px;
+  max-width: calc(100% - 20px);
+  padding: 6px 10px 7px;
+  border-radius: 10px;
+  background: rgba(24,19,22,.62);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  color: #fff;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity .18s ease, transform .18s ease;
+  pointer-events: none;          /* 牌子不抢卡片点击，整张图都能点开灯箱 */
+}
+.photo-card:hover .card-meta,
+.photo-card:focus-within .card-meta,
+.photo-card:focus-visible .card-meta {
+  opacity: 1;
+  transform: none;
+}
+.card-meta-title {
+  font-size: 0.76rem; font-weight: 600; line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0,0,0,.25);
+}
+.card-meta-artist {
+  font-size: 0.68rem; line-height: 1.35; margin-top: 1px;
+  color: rgba(255,255,255,.72);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 触屏没有悬浮：信息牌常显，否则永远看不到作者/名称 */
+@media (hover: none) {
+  .card-meta { opacity: 1; transform: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   底部说明
+   ══════════════════════════════════════════════════════════════ */
+.home-foot {
+  margin: 2rem 0 1rem; padding-top: 1rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.72rem; color: var(--text-muted);
+  display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   空状态
+   ══════════════════════════════════════════════════════════════ */
+.empty-wrap { padding: 4.5rem 1rem 5rem; text-align: center; }
+.empty-wrap h5 { font-size: 0.95rem; font-weight: 600; color: var(--text-primary); margin: 0 0 6px; }
+.empty-wrap p { font-size: 0.78rem; color: var(--text-secondary); margin: 0 auto 4px; max-width: 34rem; line-height: 1.8; }
+.empty-wrap .hint { color: var(--text-muted); font-size: 0.74rem; }
+.empty-actions { display: flex; gap: 8px; justify-content: center; margin-top: 1.4rem; }
+
+@media (max-width: 640px) {
+  .home-head { flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 1.5rem; }
+  .home-head-meta { text-align: left; }
+  .home-foot { flex-direction: column; gap: 6px; }
+}
+</style>
+</head>
+<body>
+
+<!-- 预览外壳：真实实现里不存在这一段 -->
+<div class="preview-chrome">
+  <span class="preview-chrome-label">预览状态</span>
+  <div class="preview-tabs" role="tablist">
+    <button class="preview-tab active" data-target="normal">48 小时 · 正常</button>
+    <button class="preview-tab" data-target="fallback">48 小时不够 · 退到 7 天</button>
+    <button class="preview-tab" data-target="empty">空状态</button>
+  </div>
+</div>
+
+<nav class="navbar">
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="#">
+      <span class="navbar-brand-dot"></span>
+      PpPpP
+    </a>
+    <div class="navbar-links">
+      <a class="navbar-link active" href="#">首页</a>
+      <a class="navbar-link" href="#">搜索</a>
+      <a class="navbar-link" href="#">图库</a>
+      <a class="navbar-link" href="#">下载</a>
+      <a class="navbar-link" href="#">缓存</a>
+      <a class="navbar-link" href="#">设置</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ───────────── 状态 A：48 小时内正常 ───────────── -->
+<section class="variant-panel active" data-panel="normal">
+  <div class="container">
+    <div class="home-head">
+      <div>
+        <h1 class="home-head-title">最近 48 小时热门</h1>
+        <p class="home-head-sub">按收藏数排序 · 悬停图片查看作者与名称</p>
+      </div>
+      <div class="home-head-meta">
+        <div><strong>24</strong> 件作品</div>
+        <div>更新于 09:58</div>
+      </div>
+    </div>
+
+    <div class="window-note">
+      <span class="dot"></span>
+      时间窗：最近 48 小时（发布时间，日本时间）
+    </div>
+
+    <div class="masonry" data-grid></div>
+
+    <div class="home-foot">
+      <span>收藏数来自最近一次详情补全；未补全收藏数的作品不参与排序。</span>
+      <span>数据来自本地缓存</span>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────── 状态 B：48 小时内不够，退到 7 天 ───────────── -->
+<section class="variant-panel" data-panel="fallback">
+  <div class="container">
+    <div class="home-head">
+      <div>
+        <h1 class="home-head-title">最近 48 小时热门</h1>
+        <p class="home-head-sub">按收藏数排序 · 悬停图片查看作者与名称</p>
+      </div>
+      <div class="home-head-meta">
+        <div><strong>24</strong> 件作品</div>
+        <div>更新于 09:58</div>
+      </div>
+    </div>
+
+    <div class="window-note fallback">
+      <span class="dot"></span>
+      最近 48 小时内只有 9 件已补全收藏数的作品，已放宽到最近 7 天
+      <button class="window-note-action">仍只看 48 小时</button>
+    </div>
+
+    <div class="masonry" data-grid></div>
+
+    <div class="home-foot">
+      <span>收藏数来自最近一次详情补全；未补全收藏数的作品不参与排序。</span>
+      <span>数据来自本地缓存</span>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────── 状态 C：库里没有近期作品 ───────────── -->
+<section class="variant-panel" data-panel="empty">
+  <div class="container">
+    <div class="home-head">
+      <div>
+        <h1 class="home-head-title">最近 48 小时热门</h1>
+        <p class="home-head-sub">按收藏数排序</p>
+      </div>
+      <div class="home-head-meta">
+        <div><strong>0</strong> 件作品</div>
+        <div>更新于 09:58</div>
+      </div>
+    </div>
+
+    <div class="empty-wrap">
+      <h5>还没有可展示的近期作品</h5>
+      <p>首页只统计本地缓存里已经补全收藏数的作品。它不会主动向 Pixiv 拉数据，所以需要先有预取标签或自动关注在跑。</p>
+      <p class="hint">配置之后通常 10 分钟内就会有内容。</p>
+      <div class="empty-actions">
+        <a class="btn btn-sm" href="#" style="background:var(--accent);color:#fff;border:none;">去配置预取标签</a>
+        <a class="btn btn-soft btn-sm" href="#">打开自动关注</a>
+      </div>
+    </div>
+
+    <div class="home-foot">
+      <span>收藏数来自最近一次详情补全；未补全收藏数的作品不参与排序。</span>
+      <span>数据来自本地缓存</span>
+    </div>
+  </div>
+</section>
+
+<script>
+// 预览用假数据：id / 名称 / 作者 / 收藏数 / 占位比例
+const ITEMS = [
+  [149022521, '夏空のやくそく', '百合園セイア', 9820, '2 / 3'],
+  [149020569, '無題（ケイ）', 'Kei_works', 8640, '3 / 4'],
+  [149018649, 'Blue Archive 白髪', 'shiro_iro', 7930, '1 / 1'],
+  [149015037, '波打ち際まで', 'nami_art', 7410, '4 / 5'],
+  [149013133, '兔女郎', 'Yixuan_', 6880, '2 / 3'],
+  [149012145, '夏空', 'sora_p', 6320, '3 / 4'],
+  [149010906, '鸣潮 · 清宵', 'qing_xiao', 5910, '16 / 11'],
+  [149002873, '今日のお題', 'daily_p', 5570, '1 / 1'],
+  [148998211, '夜の図書館', 'yoru_lib', 5140, '2 / 3'],
+  [148994078, 'Glass Morning', 'aoyama', 4820, '4 / 5'],
+  [148990311, '橙色的午后', 'cheng_se', 4460, '3 / 4'],
+  [148986540, 'Blue Hour', 'blue_h', 4130, '16 / 11'],
+  [148982019, '猫と本', 'neko_hon', 3890, '1 / 1'],
+  [148978764, '逆光', 'gyakko', 3620, '2 / 3'],
+  [148975120, 'Snow Melting', 'yuki_m', 3410, '4 / 5'],
+  [148971388, '水色のワンピース', 'mizu_i', 3180, '3 / 4'],
+  [148967902, '抹茶ラテ', 'matcha_l', 2940, '1 / 1'],
+  [148964455, '黄昏', 'tasogare', 2760, '16 / 11'],
+  [148961003, 'Silent Room', 'silent_r', 2530, '4 / 5'],
+  [148957781, '星屑', 'hoshikuzu', 2310, '2 / 3'],
+  [148954330, '雨の日', 'ame_no_hi', 2100, '1 / 1'],
+  [148950872, '向日葵', 'himawari', 1880, '3 / 4'],
+  [148947415, '白い部屋', 'shiro_heya', 1640, '4 / 5'],
+  [148943990, '青', 'ao_', 1390, '16 / 11'],
+];
+
+function card(item) {
+  const [pid, title, artist, , ratio] = item;
+  return `
+  <div class="masonry-item">
+    <div class="photo-card" tabindex="0" title="">
+      <div class="ph" style="aspect-ratio:${ratio}">illust ${pid}</div>
+      <div class="card-meta">
+        <div class="card-meta-title">${title}</div>
+        <div class="card-meta-artist">${artist}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+document.querySelectorAll('[data-grid]').forEach(grid => {
+  grid.innerHTML = ITEMS.map(card).join('');
+});
+
+// 状态切换
+document.querySelectorAll('.preview-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.preview-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.querySelectorAll('.variant-panel').forEach(p => {
+      p.classList.toggle('active', p.dataset.panel === tab.dataset.target);
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+});
+</script>
+</body>
+</html>

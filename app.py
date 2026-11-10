@@ -55,6 +55,7 @@ from routes_gallery import CACHE_DIR, bp as gallery_bp
 from routes_download import bp as download_bp
 from routes_prefetch import bp as prefetch_bp
 from routes_settings import bp as settings_bp, _SETTINGS_PATH, _load_settings
+from routes_home import bp as home_bp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +90,7 @@ app.config.update(
 
 # 中间件 Blueprint：不承载路由，仅注册 app 级钩子（认证拦截/安全头/限流等）
 app.register_blueprint(middleware_bp)
+app.register_blueprint(home_bp)
 app.register_blueprint(search_bp)
 app.register_blueprint(gallery_bp)
 app.register_blueprint(download_bp)
@@ -159,7 +161,17 @@ def favicon() -> Response:
 
 
 @app.route('/')
-def index() -> str:
+def home() -> str:
+    """首页：最近 48 小时热门（纯图瀑布流，只读本地库）。"""
+    return render_template('home.html')
+
+
+@app.route('/explore')
+def explore() -> str:
+    """搜索页：原来的首页挪到 `/explore`。
+
+    不能叫 `/search` —— 那是异步搜索 API（`GET /search` 返回 task_id）的路径。
+    """
     return render_template('index.html', csrf_token=_get_csrf_token(), max_bookmarks_default=MAX_BOOKMARKS_DEFAULT)
 
 

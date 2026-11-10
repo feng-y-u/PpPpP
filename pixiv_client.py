@@ -204,8 +204,9 @@ def handle_list_request_error(api: str, exc: requests.RequestException) -> None:
 
 # ── payload 解析：Pixiv 字段名的唯一来源 ──
 
-# R18 标签的本地判定词表：`follow_latest` 的 mode 参数并不可靠（账号开启 R18 显示时
-# safe/all 可能返回相同结果），下游要按标签兜底过滤一层。
+# R18 标签的本地判定词表：`follow_latest` 的 mode 参数语义不可信（同一账号下
+# `safe` 既见过原样返回 R18、也见过只返回 R18/空页），业务层因此恒以 `mode=all`
+# 取全量、再由 `fetcher._is_r18` 按标签过滤 —— 这里是那份词表。
 R18_TAGS = {"R-18", "R-18G"}
 
 
@@ -1057,7 +1058,12 @@ def fetch_user_profile_ids(session: requests.Session, user_id: str) -> list[int]
 
 def fetch_following_latest(session: requests.Session, *,
                            r18_mode: str, page: int) -> tuple[list[dict], bool]:
-    """关注画师的最新作品，返回 `(条目列表, 是否还有下一页)`。"""
+    """关注画师的最新作品，返回 `(条目列表, 是否还有下一页)`。
+
+    `r18_mode` 就是上游的 `mode` 查询参数（all/safe/r18），但它的语义不可信：
+    业务层（`fetcher.fetch_following`）恒传 `all`，R18 过滤只在本地按标签做，
+    避免"上游筛一遍、本地再筛一遍"互相抵消。
+    """
     url = endpoint_follow_latest_illust(mode=r18_mode, page=page)
     try:
         resp = session.get(url, timeout=DETAIL_TIMEOUT)

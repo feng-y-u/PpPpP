@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 from datetime import datetime, timezone, timedelta
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
@@ -1387,6 +1388,11 @@ class TestFetchFollowingR18Filter:
     回归背景：fetch_following 曾只依赖 Pixiv follow_latest 的 mode 参数；
     账号开启 R18 显示后该接口 safe/all 可能返回相同结果，"隐藏R18"失效。
     本地 hide_r18 按标签兜底过滤（与搜索路径一致）。
+
+    第二层回归（2026-11-10）：只补本地过滤还不够 —— 上游 `mode=safe` 的语义
+    同样不可信（观察到只返回 R18 项/空页），上游筛完本地再筛就把整页丢光，
+    表现为"隐藏R18 → 暂无结果"。所以上游请求必须恒为 `mode=all`，R18 只在
+    本地一处判定。
     """
 
     class _FakeResponse:
@@ -1400,10 +1406,12 @@ class TestFetchFollowingR18Filter:
             return self._payload
 
     class _FakeSession:
-        def __init__(self, payload):
+        def __init__(self, payload, urls):
             self._payload = payload
+            self.urls = urls
 
-        def get(self, *args, **kwargs):
+        def get(self, url, *args, **kwargs):
+            self.urls.append(url)
             return TestFetchFollowingR18Filter._FakeResponse(self._payload)
 
     @staticmethod
@@ -1416,9 +1424,9 @@ class TestFetchFollowingR18Filter:
             },
         }
 
-    def _run(self, monkeypatch, r18_mode, items):
+    def _run(self, monkeypatch, r18_mode, items, urls=None):
         fetcher._SEARCH_CACHE.clear()
-        session = self._FakeSession(self._payload(items))
+        session = self._FakeSession(self._payload(items), urls if urls is not None else [])
         monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: session)
         with patch('fetcher._kick_background_fill'):
             return fetcher.fetch_following(1, r18_mode=r18_mode)
@@ -1442,6 +1450,21 @@ class TestFetchFollowingR18Filter:
         )
         assert [r['pixiv_id'] for r in results] == [6004, 6005]
 
+    def test_upstream_always_asked_for_mode_all(self, clean_db, monkeypatch):
+        """用户的 R18 选择**不许**透传给上游：两档都请求 mode=all，过滤只在本地。
+
+        事故形态：上游 `safe` 返回的结果本身已被上游按 R18 处理过（只给 R18 或空），
+        本地再按标签筛一次 → 整页被丢光 → "暂无结果"。上游取全量、本地做唯一判定，
+        两个过滤器才不会互相抵消。
+        """
+        cases = [('safe', '本地过滤 R18'), ('all', '原样返回')]
+        for mode, why in cases:
+            urls = []
+            self._run(monkeypatch, mode, [_item(6101, tags=['少女'])], urls)
+            assert len(urls) == 1, f'{mode} 应只发一次上游请求，实际 {urls}'
+            query = parse_qs(urlparse(urls[0]).query)
+            assert query.get('mode') == ['all'], \
+                f'r18_mode={mode}（{why}）时上游必须请求 mode=all，实际 {urls[0]}'
 
 
 class TestUserSearchPageSize:

@@ -26,6 +26,7 @@ from middleware import (_credential_version, _csrf_required, _get_csrf_token,
                         _get_json_body, _is_authed, _rate_limit, _safe_next,
                         _session_authed)
 from routes_prefetch import _PREFETCH_SETTINGS_KEYS
+from routes_home import clear_home_cache
 from models import BlockedTag, get_session, safe_commit
 from runtime import (_CREDENTIAL_HEALTH_TTL, _auto_follow_state,
                      _credential_health_cache, _prefetch_state, _snapshot_state)
@@ -224,6 +225,7 @@ def add_blocked_tag() -> Response:
         db.add(BlockedTag(tag=tag))
         safe_commit(db)
         clear_search_cache()
+        clear_home_cache()   # 首页也有 60 秒缓存：屏蔽集合一变必须立刻生效
         return jsonify({'status': 'added', 'tag': tag})
 
 
@@ -237,6 +239,7 @@ def remove_blocked_tag(tag: str) -> Response:
         db.delete(entry)
         safe_commit(db)
         clear_search_cache()
+        clear_home_cache()   # 同上：取消屏蔽后首页要立刻把作品放回来
         return jsonify({'status': 'deleted', 'tag': tag})
 
 

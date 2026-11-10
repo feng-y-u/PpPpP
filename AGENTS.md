@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 431 用例约 19s，**当前 0 failed**，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 453 用例约 19s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -43,7 +43,7 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 
 | 文件 | 作用 |
 |------|------|
-| `app.py` | 组装入口（Flask app / 配置 / 注册 6 个 Blueprint / 启动后台线程）+ 4 个页面路由（`/`、`/cache`、`/csrf-token`、`/favicon.ico`） |
+| `app.py` | 组装入口（Flask app / 配置 / 注册 7 个 Blueprint / 启动后台线程）+ 5 个页面路由（`/` 首页、`/explore` 搜索页、`/cache`、`/csrf-token`、`/favicon.ico`） |
 | `config.py` | 常量、`.env` 与 `instance/settings.json` 覆盖；`SETTINGS_KEYS` 是**设置键的唯一来源**（config 与设置页共用） |
 | `models.py` | SQLAlchemy ORM：`Illust`、`BlockedTag`、`DownloadLog`、`SearchCache`；`init_db` / `get_session` / `safe_commit` |
 | `runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：扫描/TTL 缓存、预取状态、下载队列与进度、限流存储、异步搜索任务、`/thumb` 取图统计、滚动快照状态、凭据体检缓存 |
@@ -53,12 +53,13 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `background.py` | 后台线程与下载引擎：自动关注、预取循环、下载执行器、`start_background_threads()`（幂等）、`_reset_stuck_*` |
 | `pixiv_client.py` | **Pixiv 适配层**：Ajax 端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析；不碰 DB、不认识 `Illust` |
 | `fetcher.py` | Pixiv **业务层**：屏蔽/R18/收藏数过滤、搜索缓存、游标分页、取消与详情预算、入库、后台详情补全；Ajax 细节全部委托 `pixiv_client`（并把其符号再导出给历史调用方与测试补丁 seam） |
+| `routes_home.py` | 首页数据 `GET /api/home`（只读本地库的"最近 48 小时热门"）+ 60 秒缓存 `clear_home_cache()` |
 | `routes_search.py` | `/search`、搜索任务状态、缓存浏览 `/api/cache/*`、`/api/following` |
 | `routes_gallery.py` | 图库、详情页、图片服务、缩略图代理 `/thumb/<b64>`、`/api/open-dir` |
 | `routes_download.py` | 下载触发/状态/取消/批量、下载管理页 |
 | `routes_prefetch.py` | 预取管理 API（config / tags / status / refresh） |
 | `routes_settings.py` | 登录、设置读写、屏蔽标签、自动关注控制 |
-| `templates/*.html` | 8 个 Jinja2 模板（搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
+| `templates/*.html` | 9 个 Jinja2 模板（首页、搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览） |
 | `static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `lightbox.js` + `style.css` + `vendor/bootstrap-5.3.3/` |
 | `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`check_tls.py`（只读 TLS 拦截诊断，退出码 0/1/2）、`pixiv_capture.py`（抓取并**脱敏** Pixiv 响应样本，刷新契约测试 fixtures）、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
 | `migrations/` | `runner.py`（按 `PRAGMA user_version` 版本化执行，**升级前自动备份**）+ `versions.py` |
@@ -81,7 +82,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 
 ### 扩展点：新增路由
 
-路由全部挂在 Blueprint 上，共 6 个（`middleware_bp` / `search_bp` / `gallery_bp` / `download_bp` / `prefetch_bp` / `settings_bp`）。新增接口时：在对应的 `routes_*.py` 里加路由 → `app.py` 注册该 Blueprint（已注册则无需改动）。**如果新接口的某个依赖将来可能被测试 monkeypatch，该符号必须在 `app.py` 顶部用 from-import 再导出一次**，然后业务代码在函数体内 `import app` 延迟引用 `app.<符号>` —— 见文末「测试契约」。
+路由全部挂在 Blueprint 上，共 7 个（`middleware_bp` / `home_bp` / `search_bp` / `gallery_bp` / `download_bp` / `prefetch_bp` / `settings_bp`）。新增接口时：在对应的 `routes_*.py` 里加路由 → `app.py` 注册该 Blueprint（已注册则无需改动）。**如果新接口的某个依赖将来可能被测试 monkeypatch，该符号必须在 `app.py` 顶部用 from-import 再导出一次**，然后业务代码在函数体内 `import app` 延迟引用 `app.<符号>` —— 见文末「测试契约」。
 
 ---
 
@@ -144,6 +145,8 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 ### API 行为
 
 - **`popular_d` 排序需 Pixiv Premium**，非 Premium 静默返回空结果。`/search` 默认排序 `date_d`，空查询回退 `browse_discovery()` 时也用它。
+- **关注页的 R18 过滤只在本地做**：`/api/following` 的 `r18_mode=safe` **不透传给上游** —— `fetch_following` 恒以 `mode=all` 取全量，由 `_process_items(hide_r18=...)` 按标签滤掉 `R-18`/`R-18G`。原因：`follow_latest` 的 `mode` 语义不可信（同一账号下既见过原样返回 R18、也见过只返回 R18/空页），上游筛一遍再本地筛一遍会把整页丢光，症状是"隐藏R18 → 暂无结果"（2026-11-10 修）。
+- **首页（`/`）是本地库的只读聚合**：`GET /api/home` 取「最近 48 小时内、收藏数 > 0、不含 R-18/R-18G 与屏蔽标签」的作品，按 `bookmark_count DESC` 给 24 条（跟随 `ITEMS_PER_PAGE`）；48 小时内不够一屏就放宽到 7 天，响应带 `window_hours` 让前端标注（`?window=48` 禁止放宽）。三条硬边界：① **不发任何 Pixiv 请求** —— 上游没有"48 小时 + 按收藏数"的接口（`popular_d` 需 Premium 且不限时间窗），覆盖率只来自预取/自动关注/手搜；② 只统计 `bookmark_count > 0`（为 0 可能是"没人收藏"也可能是"从未补全"，后者会让新作品整页沉底）；③ `upload_date` 是 **JST 墙面时间**（偏移在写库时丢了），窗口必须用 `utc now + 9h` 比较，用 UTC 会比全部偏 9 小时。60 秒进程内缓存，屏蔽标签增删时 `clear_home_cache()` 立即失效。
 - **搜索是异步的**：`GET /search` 立即返回 `task_id`，后台线程拉取，前端轮询 `/api/search/status/<task_id>`。任务存于 `_search_tasks`，访问 status 时顺带清理过期任务；游标含时间戳，**24 小时过期**。空页去重与死游标作废由前端处理。
 - **已筛出的预览作品可以立刻点开看**（`runtime.find_running_preview`）：`fetcher._process_items` 在每条详情到手时就发布 `result` 事件，而落库是整页一次的 `safe_commit`（在 `search_by_*` 里）—— 中间那些行只活在任务快照里，按 pid 查库的接口一律 404。所以 `/detail/<pid>` 查库未命中时会回退到**运行中**任务的内存快照（返回 `dict` 副本，绝不污染任务快照），模板据此渲染提示条并 **disabled 下载按钮**。三条硬边界：① 只认 `running` —— `done`/`partial` 的行已提交（查库即命中），`error`/`cancelled` 的行已回滚（兜底会渲染出不存在的结果）；② 兜底**不是**"已入库"的证明，`/download/<pid>` 与 `/api/image` 仍只认库；③ 同一 pid 有库行时**以库行为准**。
 - **提交新搜索会取消所有在途搜索任务**（`_submit_search_task` 置位旧任务的 `cancel_event`，单人应用同时只该有一个搜索在跑，旧任务继续拉详情只会烧令牌桶拖慢新搜索）。fetcher 侧取消机制：`SearchCancelledError` + `_cancel_begin/_cancel_end/_cancelled`（与详情预算同款 `threading.local`，预取/后台补全线程不受影响），检查点在 `paginated_search` 翻页前后与 `_fetch_details_parallel` 每个 worker 发请求前；**在途请求照常处理完并入库**（下次搜索命中 `existing_map` 免重拉），未发起的直接跳过。任务终态：`done` / `error` / `cancelled`（cancelled 返回 200）。前端用搜索代数（`searchGeneration`）让旧任务的轮询静默失效。
@@ -205,7 +208,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 
 ## 测试
 
-- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/**收藏夹端点移除后的 404 契约**/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_backups.py`（**滚动快照**：清点/到期判定/保留策略只删自己命名的文件 + 侧车、WAL 里已提交的数据必须进快照、`/api/backups` 载荷形状）、`test_test_setup.py`（测试环境自校验）。
+- 测试文件：`tests/test_app.py`（路由/API/CSRF/**全量修改型端点的 CSRF 矩阵**/**收藏夹端点移除后的 404 契约**/**作者搜索预算与游标步长**）、`test_auth.py`（认证/限流/安全头/**启动自检与公网部署姿态**/**密钥文件强度与权限**）、`test_models.py`（模型/迁移）、`test_migrations.py`（迁移 runner/备份/**WAL checkpoint 与备份完整性**）、`test_helpers.py`（下载目录扫描等纯工具函数/**原子写 JSON 与纯文本**）、`test_fetcher.py`（API 封装/限流/收藏数补全/**重试策略**/**连接池复用**/**无凭据会话**/**作者搜索切片与结果缓存**/**详情预算**）、`test_pixiv_contract.py`（**Pixiv 适配层离线契约**：端点 URL 形状 / 响应信封遍历路径 / 字段漂移清单 / 三条原图地址解析路径 / 错误分类，样本在 `tests/fixtures/pixiv/`）、`test_download.py`（下载引擎：状态机/CAS 提交/取消与重置竞态/地址校验与凭据分级）、`test_thumb.py`（`/thumb` 越界重定向、磁盘缓存/失败冷却/原子写降级、`/api/image` 三分支）、`test_tls_config.py`（`SSL_VERIFY` 默认值与 `check_tls.py` 判定逻辑）、`test_prefetch.py`（预取引擎/容量清理/**单轮异常韧性**）、`test_search_cache.py`（库内缓存查询）、`test_prefetch_api.py`（预取管理 API）、`test_settings_api.py`（设置读写：GET 脱敏/门禁/Cookie 注入剔除/写盘失败语义/**Cookie 落点同源与原子写、并发读**/**自动关注状态字段与前端接线**）、`test_auto_follow.py`（自动关注后台线程：**新作品入库与 `upload_date` 解析 / 先 commit 再提交下载 / 干净收尾清 `last_error` / 出错留痕与下一轮恢复 / 空关注列表不误报 / 并发读接口时键集合恒定**）、`test_cache_page.py`（缓存浏览 API/页面）、`test_backups.py`（**滚动快照**：清点/到期判定/保留策略只删自己命名的文件 + 侧车、WAL 里已提交的数据必须进快照、`/api/backups` 载荷形状）、`test_test_setup.py`（测试环境自校验）、`test_home.py`（首页：**收藏数排序与 0 收藏排除 / JST 时间窗与严格模式 / 48h 不足退 7 天 / 24 条上限 / R18 恒定过滤 / 屏蔽标签 / 损坏 JSON 降级 / 60 秒缓存与清除 / `/` 与 `/explore` 两个页面**）。
 - `conftest.py` 在 **import app 之前**覆盖 `config.DATABASE_PATH` 为临时文件，并设 `AUTO_FOLLOW_INTERVAL=0` / `PREFETCH_INTERVAL=0` / `BACKUP_INTERVAL=0`（事后覆盖无效，会连到生产库；关掉后台任务是为了让测试确定性 —— 快照逻辑本身由 `tests/test_backups.py` 直接驱动被测函数覆盖，不依赖线程）。
 - ⚠️ **测试绝不允许连生产库：`conftest.py` 有三道防线，都不要拆**。
   根因是 `models.py` 在 import 那一刻就 `create_engine(config.DATABASE_PATH)`，engine 建好后 conftest 再改 `config` 也**改不动它** —— 所以任何在 conftest 之前 import 到 `models` 的东西（`-p` 加载的自定义 pytest 插件、`sitecustomize`、包装脚本）都会让整轮测试直连真实库（`helpers.py` / `app.py` 都在模块级 from-import `models`，一次 `import helpers` 就够了）。**2026-09-30 真实发生过**：一个变异验证用的 `-p <插件>` 在模块级 `import helpers`，`clean_db` 因此清空了真实库的 1456 件作品（靠迁移前自动备份救回）。三道防线：
@@ -218,7 +221,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 431 条 = 429 passed / 2 skipped / 0 failed**，约 19s（2026-09-30 全量套件重排后的数字；重排过程见下条）。
+- **当前实测基线：收集 453 条 = 451 passed / 2 skipped / 0 failed**，约 19s（2026-11-10 首页功能落地后复核；更早的重排过程见下条）。
 - **粒度约定：一个用例 = 一个不变式**。同一不变式的多个输入变体（CSRF 端点矩阵、非法重定向目标矩阵、字段漂移清单、终态枚举、限流状态码矩阵、扩展名矩阵…）写成**一条用例内的循环 / 顺序分段 + 每例断言消息**，不要拆成多条用例，也不要 `parametrize`。判断标准：拆开之后会不会出现"两条用例的前置准备一模一样、只有输入与期望值不同"；会，就合成一条并在循环里带上 `f'{case} …'` 的失败消息。反过来，**不同不变式不要合并** —— `done` 与 `cancelled` 都"不是预览来源"，但前者靠查库命中、后者靠事务回滚；迁移测试不许跨版本合（否则"哪一版坏了"被掩盖）；同一现象的不同触发路径（排队中取消 vs 下载中取消、单条删除 vs 批量删除）也不合。
   **2026-09-30 全量重排**：710 → **431 条（-39%）**，逐文件重排。验收口径是**断言语义与执行次数不降**，不是断言行数：有三处（`test_app.py`、`test_auth.py`、`test_tls_config.py`）`assert` 行数下降，减掉的全部是"同一谓词在另一档输入上重复出现"的行 —— 按执行次数算只多不少（例：密钥校验矩阵从"5 条用例各断言部分属性"变成"4 档输入各断言全部 5 条属性"）。重排时**只允许改 `tests/`**，且必须保留 `docstring` 里"为什么钉这条"的事故叙事。
   重排后做的变异验证（改了立即还原）覆盖：中图扩展名（只坏 `webp` 一档 → 循环仍红）、预取容量三层**层序**（反转 tier → 红，见下条）、预取 CSRF 矩阵（去掉单端点保护 → 红）、`PIXIV_TEST_TMP` 分支、缓存页 R18 过滤。

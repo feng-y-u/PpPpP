@@ -16,6 +16,12 @@
           "files": [
             { "label": "导航栏 + 卡片 · 日系简约浅色主题", "path": "mockups/ui-polish/index.html" }
           ]
+        },
+        {
+          "slug": "home-feed",
+          "files": [
+            { "label": "首页 · 最近 48 小时热门（三状态）", "path": "mockups/home-feed/index.html" }
+          ]
         }
       ]
     },
