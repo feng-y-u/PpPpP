@@ -5,6 +5,7 @@
 每条用例钉一个不变式，不合并（降级与排序是两件事，缓存与清缓存是第三件）。
 """
 from datetime import datetime, timedelta, timezone
+import pathlib
 
 import pytest
 
@@ -155,6 +156,23 @@ class TestHomeApi:
 
 
 class TestHomePages:
+    def test_home_page_card_wiring(self, client):
+        """首页脚本必须把卡片挂进网格，并接上灯箱与信息牌。
+
+        回归背景：`renderInChunks` 只分帧调用渲染函数、**不负责插入**（搜索页也是
+        调用方自己 `appendChild`）。第一版 `page-home.js` 漏了这一步，症状是
+        计数与时间窗说明条都正常、网格永远空白 —— 所以这条用源码断言钉住。
+        """
+        page = client.get('/')
+        assert page.status_code == 200
+        assert b'page-home.js' in page.data
+
+        js = pathlib.Path('static/page-home.js').read_text(encoding='utf-8')
+        assert 'grid.appendChild(node)' in js, '卡片必须显式挂进 #homeGrid'
+        assert 'lightbox.open(' in js, '点卡片要开灯箱（导航上下文 = 首页整批）'
+        assert 'card-meta-title' in js and 'card-meta-artist' in js, \
+            '信息牌只放名称与作者'
+
     def test_home_and_explore_render_their_own_pages(self, client):
         """`/` 是首页（page-home.js），搜索页迁到 `/explore`（`/search` 是异步 API）。"""
         home = client.get('/')

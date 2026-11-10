@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 453 用例约 19s，**当前 0 failed**，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 454 用例约 21s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -221,7 +221,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 453 条 = 451 passed / 2 skipped / 0 failed**，约 19s（2026-11-10 首页功能落地后复核；更早的重排过程见下条）。
+- **当前实测基线：收集 454 条 = 452 passed / 2 skipped / 0 failed**，约 21s（2026-11-10 首页功能落地后复核；更早的重排过程见下条）。
 - **粒度约定：一个用例 = 一个不变式**。同一不变式的多个输入变体（CSRF 端点矩阵、非法重定向目标矩阵、字段漂移清单、终态枚举、限流状态码矩阵、扩展名矩阵…）写成**一条用例内的循环 / 顺序分段 + 每例断言消息**，不要拆成多条用例，也不要 `parametrize`。判断标准：拆开之后会不会出现"两条用例的前置准备一模一样、只有输入与期望值不同"；会，就合成一条并在循环里带上 `f'{case} …'` 的失败消息。反过来，**不同不变式不要合并** —— `done` 与 `cancelled` 都"不是预览来源"，但前者靠查库命中、后者靠事务回滚；迁移测试不许跨版本合（否则"哪一版坏了"被掩盖）；同一现象的不同触发路径（排队中取消 vs 下载中取消、单条删除 vs 批量删除）也不合。
   **2026-09-30 全量重排**：710 → **431 条（-39%）**，逐文件重排。验收口径是**断言语义与执行次数不降**，不是断言行数：有三处（`test_app.py`、`test_auth.py`、`test_tls_config.py`）`assert` 行数下降，减掉的全部是"同一谓词在另一档输入上重复出现"的行 —— 按执行次数算只多不少（例：密钥校验矩阵从"5 条用例各断言部分属性"变成"4 档输入各断言全部 5 条属性"）。重排时**只允许改 `tests/`**，且必须保留 `docstring` 里"为什么钉这条"的事故叙事。
   重排后做的变异验证（改了立即还原）覆盖：中图扩展名（只坏 `webp` 一档 → 循环仍红）、预取容量三层**层序**（反转 tier → 红，见下条）、预取 CSRF 矩阵（去掉单端点保护 → 红）、`PIXIV_TEST_TMP` 分支、缓存页 R18 过滤。

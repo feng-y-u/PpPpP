@@ -84,7 +84,13 @@ async function loadHome(windowMode) {
   }
 
   renderWindowNote(data);
-  await renderInChunks(homeItems, (r, i) => renderHomeCard(r, i), { chunk: 12, delay: 25 });
+  // renderInChunks 只负责分帧调用、不负责插入：卡片必须由这里挂进网格
+  // （曾经漏掉这一步 —— 计数与说明条都正常，网格永远是空的）
+  await renderInChunks(homeItems, (r, i) => {
+    const node = renderHomeCard(r, i);
+    grid.appendChild(node);
+    return node;
+  }, { chunk: 12, delay: 25 });
   lazyLoad();
 }
 
