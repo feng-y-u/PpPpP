@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>预览 · 交互状态表</title>
+<link href="../../../static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
+<link href="preview.css" rel="stylesheet">
+<style>
+  .lab { font-family: var(--font-mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-mute); margin: 0 0 12px; }
+  .strip { display: flex; gap: 22px; align-items: flex-start; padding: 26px 0 10px; }
+  .cell { width: 300px; flex: 0 0 auto; }
+  .row2 { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding: 18px 0 0; }
+  h2 { font-family: var(--font-display); font-size: 18px; font-weight: 650; margin: 0 0 4px; color: var(--ink); }
+  .sub { font-size: 11.5px; color: var(--ink-soft); margin: 0 0 22px; }
+  section { padding: 22px 0; border-top: 1px solid var(--steel-soft); }
+</style>
+</head>
+<body>
+
+<div class="container" style="max-width:1160px;padding-top:26px">
+
+  <h2>交互状态表</h2>
+  <p class="sub">同一张卡在三种状态下的差异：默认 / 悬停 / 悬停并浮出信息牌。</p>
+
+  <section>
+    <p class="lab">Photo Card — Rest / Hover / Hover + Meta</p>
+    <div class="strip">
+      <div class="cell">
+        <div class="photo-card">
+          <img src="art/p1.jpg" alt="" style="aspect-ratio:3/4;object-fit:cover;">
+        </div>
+      </div>
+      <div class="cell">
+        <div class="photo-card demo-hover">
+          <img src="art/p1.jpg" alt="" style="aspect-ratio:3/4;object-fit:cover;">
+        </div>
+      </div>
+      <div class="cell">
+        <div class="photo-card demo-hover">
+          <img src="art/p1.jpg" alt="" style="aspect-ratio:3/4;object-fit:cover;">
+          <div class="card-meta">
+            <div class="card-meta-title">雨上がりの放課後、屋上にて</div>
+            <div class="card-meta-artist">みなと／MINATO</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="lab">Gallery Card — Rest / Hover</p>
+    <div class="strip">
+      <div class="cell" style="width:330px">
+        <div class="gallery-card">
+          <div class="card-img-wrap">
+            <input type="checkbox" class="card-checkbox">
+            <img src="art/sq3.jpg" alt="">
+            <span class="page-badge">3 张</span>
+            <span class="size-badge">9.2 MB</span>
+          </div>
+          <div class="card-body">
+            <div class="card-title">放課後の教室と、少しの光</div>
+            <div class="card-info">#120430955 · ひかり · 3 文件</div>
+            <div class="tags-wrap">
+              <span class="badge tag-badge">教室</span>
+              <span class="badge tag-badge">逆光</span>
+            </div>
+            <div class="d-flex gap-1 mt-1">
+              <button class="btn btn-outline-danger btn-sm flex-fill">删除</button>
+              <button class="btn btn-soft btn-sm">下载</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="cell" style="width:330px">
+        <div class="gallery-card demo-hover">
+          <div class="card-img-wrap">
+            <input type="checkbox" class="card-checkbox">
+            <img src="art/sq3.jpg" alt="">
+            <span class="page-badge">3 张</span>
+            <span class="size-badge">9.2 MB</span>
+          </div>
+          <div class="card-body">
+            <div class="card-title">放課後の教室と、少しの光</div>
+            <div class="card-info">#120430955 · ひかり · 3 文件</div>
+            <div class="tags-wrap">
+              <span class="badge tag-badge">教室</span>
+              <span class="badge tag-badge">逆光</span>
+            </div>
+            <div class="d-flex gap-1 mt-1">
+              <button class="btn btn-outline-danger btn-sm flex-fill">删除</button>
+              <button class="btn btn-soft btn-sm">下载</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="lab">Controls — 主按钮 / 次按钮 / 已下载 / 危险 / 筛选胶囊 / HUD 牌</p>
+    <div class="row2">
+      <button class="btn btn-primary">下载原图</button>
+      <button class="btn btn-success">全部下载</button>
+      <button class="btn btn-soft">下载</button>
+      <button class="btn btn-dl-done">已下载</button>
+      <button class="btn btn-outline-danger">删除</button>
+      <div class="filter-box">
+        <label>排序</label>
+        <select><option>最新</option><option>综合</option></select>
+      </div>
+      <div class="home-head-meta" style="margin-left:auto">
+        <div><strong>24</strong> 件作品</div>
+        <div>UPDATED 14:32 JST</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+</body>
+</html>

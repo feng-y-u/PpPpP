@@ -1,0 +1,50 @@
+{
+  "title": "Pixiv Viewer · Blue Archive 视觉改版预览（含动效层）",
+  "slug": "ba-revamp",
+  "description": "四页视觉预览 + 交互状态表。清透冰蓝、45° 切角、HUD 括号、等宽数据排版；新增缓慢流动的极光背景、扫描线、卡片悬停编排与列表错峰入场。作品图为本地已下载原图的裁切样本，仅作视觉评审。",
+  "design": {
+    "style": "Blue Archive 启发 / 亮色玻璃 / 数字终端 / 克制动效",
+    "tokens": {
+      "ink": "#182A47",
+      "ink-soft": "#4E6386",
+      "ink-mute": "#7C8EAA",
+      "accent": "#2E9BEA",
+      "accent-deep": "#1470CB",
+      "cyan": "#7FD8F2",
+      "navy-terminal": "#16233C",
+      "mint-cta": "#46B79A",
+      "steel": "rgba(122,158,196,.30)",
+      "ease-out": "cubic-bezier(.22,.61,.36,1)",
+      "ease-soft": "cubic-bezier(.4,0,.2,1)"
+    },
+    "motion": {
+      "aurora": "两层 48s / 62s 反向漂移，仅动 transform，blur 一次合成",
+      "scan": "搜索面板 9.5s、观片台 11s，1px 扫描线，透明度 ≤ .55",
+      "card-hover": "上浮 6px / 图片 scale 1.045 / 光泽 380ms / 括号延迟 60ms",
+      "entrance": "cardIn 520ms + 每格 34ms 错峰（真实站由 app.js 内联 delay 接管）",
+      "buttons": "抬升 1px / 按下 scale .985，180ms",
+      "reduced-motion": "全部动画与扫描线在 prefers-reduced-motion 下关闭"
+    },
+    "spacing": {
+      "grid-gap": "14px → 18px",
+      "head-padding": "34px → 46px",
+      "toolbar": "16px → 24px",
+      "detail-panel": "26px → 32px 34px"
+    }
+  },
+  "files": ["home.html", "explore.html", "gallery.html", "detail.html", "states.html", "preview.css"],
+  "screens": [
+    { "file": "states.jpg", "page": "交互状态表（默认 / 悬停 / 悬停+信息牌）" },
+    { "file": "home.jpg", "page": "首页 · 最近 48 小时热门" },
+    { "file": "explore.jpg", "page": "搜索页" },
+    { "file": "gallery.jpg", "page": "图库页（含批量条与分页）" },
+    { "file": "detail.jpg", "page": "详情页" },
+    { "file": "m500.jpg", "page": "窄屏抽检（500px）" }
+  ],
+  "status": "preview-for-review",
+  "notes": [
+    "静态稿，未改动仓库内 templates/ 与 static/ 的任何文件。",
+    "preview.css 类名与真实页面一致，确认后可拆入 static/style.css + 各模板内联样式。",
+    "静态截图看不出背景极光与扫描线，请直接打开 home.html / explore.html 体验。"
+  ]
+}

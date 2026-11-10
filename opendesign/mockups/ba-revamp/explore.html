@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>预览 · 搜索 — PpPpP</title>
+<link href="../../../static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
+<link href="preview.css" rel="stylesheet">
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="#">
+      <span class="navbar-brand-dot"></span>
+      PpPpP
+    </a>
+    <button class="nav-toggle" aria-label="菜单">☰</button>
+    <div class="navbar-links">
+      <a class="navbar-link" href="#">首页</a>
+      <a class="navbar-link active" href="#">搜索</a>
+      <a class="navbar-link" href="#">图库</a>
+      <a class="navbar-link" href="#">下载</a>
+      <a class="navbar-link" href="#">缓存</a>
+      <a class="navbar-link" href="#">设置</a>
+    </div>
+  </div>
+</nav>
+
+<div class="full-page">
+
+<div class="search-hero">
+  <div class="container">
+    <div class="search-hero-title">探索 Pixiv 作品</div>
+    <div class="search-hero-sub">按标签搜索、画师检索、关注动态</div>
+
+    <div class="search-bar-wrap">
+      <div class="search-type-tabs">
+        <button type="button" class="st-tab active">标签</button>
+        <button type="button" class="st-tab">画师</button>
+        <button type="button" class="st-tab">关注</button>
+      </div>
+      <div class="search-bar">
+        <input class="form-control" placeholder="多个标签用逗号分隔（中英逗号均可）">
+        <button class="btn-search">搜索</button>
+      </div>
+    </div>
+
+    <div class="filters-row">
+      <div class="filter-box">
+        <label>排序</label>
+        <select><option>最新</option><option>综合</option></select>
+      </div>
+      <div class="filter-box">
+        <label>组合</label>
+        <select><option>OR</option><option>AND</option></select>
+      </div>
+      <div class="filter-box">
+        <label>收藏 ≥</label>
+        <input type="number" value="1000" step="100">
+      </div>
+      <div class="filter-box">
+        <label>R18</label>
+        <select><option>隐藏R18</option><option>显示全部</option></select>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <button class="btn btn-success btn-sm">全部下载</button>
+      <span id="downloadAllStatus">已下载 3 / 24</span>
+    </div>
+    <div id="resultCount">24 件结果 · 第 1 页</div>
+  </div>
+
+  <div class="masonry flex">
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/p1.jpg" alt="" style="aspect-ratio:4/5;object-fit:cover;object-position:50% 20%;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 12.4K</span>
+          <span class="photo-badge">4P</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">雨上がりの放課後、屋上にて</div>
+          <div class="photo-card-artist">みなと</div>
+          <div class="photo-tags">
+            <span class="photo-tag">オリジナル<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">女の子<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-soft btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/w1a.jpg" alt="" style="aspect-ratio:3/4;object-fit:cover;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 8.1K</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">Ice Blue Reverie</div>
+          <div class="photo-card-artist">しろい</div>
+          <div class="photo-tags">
+            <span class="photo-tag">オリジナル<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">青<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-dl-done btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/w2a.jpg" alt="" style="aspect-ratio:1/1;object-fit:cover;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 6.7K</span>
+          <span class="photo-badge">2P</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">Glass Garden</div>
+          <div class="photo-card-artist">あおい</div>
+          <div class="photo-tags">
+            <span class="photo-tag">風景<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">温室<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-soft btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/p3.jpg" alt="" style="aspect-ratio:3/4.2;object-fit:cover;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 5.2K</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">放課後の教室と、少しの光</div>
+          <div class="photo-card-artist">ひかり</div>
+          <div class="photo-tags">
+            <span class="photo-tag">教室<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">逆光<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-soft btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/p2.jpg" alt="" style="aspect-ratio:4/3;object-fit:cover;object-position:50% 18%;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 4.8K</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">夕暮れの商店街</div>
+          <div class="photo-card-artist">ゆうひ</div>
+          <div class="photo-tags">
+            <span class="photo-tag">街<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">夕方<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-soft btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/w1b.jpg" alt="" style="aspect-ratio:3/4;object-fit:cover;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 3.9K</span>
+          <span class="photo-badge">3P</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">シオン／Blue Terminal</div>
+          <div class="photo-card-artist">カナメ</div>
+          <div class="photo-tags">
+            <span class="photo-tag">オリジナル<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">制服<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-soft btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/w2b.jpg" alt="" style="aspect-ratio:1/1.1;object-fit:cover;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 3.1K</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">春の観測記録</div>
+          <div class="photo-card-artist">はるか</div>
+          <div class="photo-tags">
+            <span class="photo-tag">春<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">空<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <span style="font-size:0.68rem;color:var(--ink-mute);">下载中...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="masonry-item">
+      <div class="photo-card card-enter">
+        <img src="art/sq1.jpg" alt="" style="aspect-ratio:3/3.8;object-fit:cover;">
+        <div class="photo-badges">
+          <span class="photo-badge">♥ 2.6K</span>
+        </div>
+        <div class="photo-card-info">
+          <div class="photo-card-title">Pale Sakura</div>
+          <div class="photo-card-artist">さくら</div>
+          <div class="photo-tags">
+            <span class="photo-tag">桜<span class="tag-block-x">×</span></span>
+            <span class="photo-tag">和風<span class="tag-block-x">×</span></span>
+          </div>
+          <div class="photo-card-actions">
+            <button class="btn btn-soft btn-sm">下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="paginationBar">
+    <div>
+      <button class="btn btn-sm btn-outline-secondary" disabled>上一页</button>
+      <div id="pageNumbers">
+        <button class="btn btn-sm active">1</button>
+        <button class="btn btn-sm">2</button>
+        <button class="btn btn-sm">3</button>
+        <button class="btn btn-sm">4</button>
+      </div>
+      <button class="btn btn-sm btn-outline-primary">下一页</button>
+    </div>
+    <div id="paginationStatus">第 1 / 4 页 · 共 86 件</div>
+  </div>
+</div>
+
+</div>
+
+<footer class="site-footer">
+  github.com/feng-y-u/PpPpP
+</footer>
+
+</body>
+</html>
+
