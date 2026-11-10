@@ -20,8 +20,13 @@ def _jst_now() -> datetime:
     return (datetime.now(timezone.utc) + timedelta(hours=9)).replace(tzinfo=None)
 
 
-def _illust(db, pixiv_id, *, hours_ago=1.0, bookmarks=100, tags=(), title='作品', user='画师'):
-    """造一行作品；hours_ago=None 表示没有发布时间。"""
+def _illust(db, pixiv_id, *, hours_ago=1.0, bookmarks=100, tags=(), title='作品', user='画师',
+            originals=None):
+    """造一行作品；hours_ago=None 表示没有发布时间。
+
+    `originals=None` 用默认原图地址（首页只收带原图的行，见 `query_home_feed`），
+    传 `[]` 可造"没有原图地址"的行。
+    """
     illust = Illust(
         pixiv_id=pixiv_id,
         title=title,
@@ -32,6 +37,9 @@ def _illust(db, pixiv_id, *, hours_ago=1.0, bookmarks=100, tags=(), title='作�
         upload_date=None if hours_ago is None else _jst_now() - timedelta(hours=hours_ago),
     )
     illust.tags_list = list(tags)
+    illust.original_urls_list = originals if originals is not None else [
+        f'https://i.pximg.net/img-original/img/2026/11/09/00/00/00/{pixiv_id}_p0.jpg',
+    ]
     db.add(illust)
     db.commit()
     return illust
@@ -121,14 +129,12 @@ class TestHomeApi:
 
         这条链路与详情页同源（原图地址 → `_original_to_resized` → `/thumb`），
         所以扩展名恒为 `.jpg`（原图是 PNG 也拼 `.jpg`，否则图床 404）。
-        没有原图地址的行退回缩略图 —— 首页不为画质去拉 Pixiv 详情。
         """
         with_original = _illust(clean_db, 4401, bookmarks=900)
         with_original.original_urls_list = [
             'https://i.pximg.net/img-original/img/2026/11/09/00/00/00/4401_p0.png',
         ]
         clean_db.commit()
-        _illust(clean_db, 4402, bookmarks=800)
 
         data = client.get('/api/home').get_json()
         by_id = {r['pixiv_id']: r for r in data['results']}
@@ -141,10 +147,20 @@ class TestHomeApi:
             f'中图地址不对（扩展名必须 .jpg）：{decoded}'
         assert '/c/' in decoded and 'img-master' in decoded, decoded
 
-        fallback = by_id[4402]['medium_url']
-        fallback_raw = fallback[len('/thumb/'):]
-        assert urlsafe_b64decode(fallback_raw + '=' * (-len(fallback_raw) % 4)).decode() \
-            == 'https://i.pximg.net/x/4402.jpg', '没有原图地址时应退回缩略图'
+    def test_rows_without_original_urls_are_excluded(self, client, clean_db):
+        """首页承诺"每张卡都是中图"：没有原图地址的行**不进候选**。
+
+        中图地址是从原图地址拼的，没有原图就只能退回 250px 方形缩略图 —— 大图瀑布流里
+        很显眼。实测生产库 `bookmark_count > 0` 与"有原图地址"完全同步（收藏数只在拉详情
+        时写入，拉详情同时写原图），所以这条不额外排除任何作品，只是把保证写进查询。
+        """
+        _illust(clean_db, 4501, bookmarks=900)
+        _illust(clean_db, 4502, bookmarks=800, originals=[])
+
+        data = client.get('/api/home').get_json()
+
+        assert [r['pixiv_id'] for r in data['results']] == [4501], \
+            '没有原图地址的行不该出现在首页（否则只能显示缩略图）'
 
     def test_blocked_tags_always_apply(self, client, clean_db):
         """全局屏蔽标签与搜索/图库同口径：命中的作品首页也不出现。"""
@@ -163,6 +179,8 @@ class TestHomeApi:
         clean_db.add(Illust(
             pixiv_id=4202, title='坏标签', user_name='u', bookmark_count=900,
             thumb_url='', tags='{oops', upload_date=_jst_now() - timedelta(hours=1),
+            # 带原图地址：首页只收中图候选，这里测的是 tags 降级，不是候选资格
+            original_urls='["https://i.pximg.net/img-original/img/2026/11/09/00/00/00/4202_p0.jpg"]',
         ))
         clean_db.commit()
 

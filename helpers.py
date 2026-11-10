@@ -414,6 +414,14 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
     window: 'auto' —— 48 小时内不足 `limit` 件时放宽到 7 天；
             '48'   —— 禁止放宽（页面上"仍只看 48 小时"走这条）。
 
+    只统计 `bookmark_count > 0` **且带原图地址**的行：
+      - 收藏数为 0 有两种含义（真没人收藏 / 详情从未补全），无法区分，而后者会让
+        新入库作品全部沉底甚至占满一页；
+      - 首页要的是中图，中图地址由原图地址拼出来 —— 没有原图地址的行只能退回 250px
+        方形缩略图，丢进大图瀑布流里很显眼。实测生产库里 `bookmark_count > 0` 与
+        "有原图地址"完全同步（收藏数只在拉详情时写入，拉详情同时写原图），所以这条
+        条件在实践中不额外排除任何作品，只是把"首页只有中图"从巧合变成保证。
+
     Returns: `(results_dicts, window_hours)`。`window_hours` 是**实际**窗口，
     auto 模式放宽后为 168，前端据此标注口径。
     """
@@ -442,6 +450,8 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
             'illusts.upload_date IS NOT NULL',
             'illusts.upload_date >= :since',
             'illusts.bookmark_count > 0',
+            # 中图地址从原图地址拼出来；没有原图的行走不了中图（见 docstring）
+            "COALESCE(illusts.original_urls, '') NOT IN ('', '[]')",
         ]
 
         def _fetch(hours: int) -> list[int]:

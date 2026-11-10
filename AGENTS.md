@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 455 用例约 19s，**当前 0 failed**，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 456 用例约 19s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -146,7 +146,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 
 - **`popular_d` 排序需 Pixiv Premium**，非 Premium 静默返回空结果。`/search` 默认排序 `date_d`，空查询回退 `browse_discovery()` 时也用它。
 - **关注页的 R18 过滤只在本地做**：`/api/following` 的 `r18_mode=safe` **不透传给上游** —— `fetch_following` 恒以 `mode=all` 取全量，由 `_process_items(hide_r18=...)` 按标签滤掉 `R-18`/`R-18G`。原因：`follow_latest` 的 `mode` 语义不可信（同一账号下既见过原样返回 R18、也见过只返回 R18/空页），上游筛一遍再本地筛一遍会把整页丢光，症状是"隐藏R18 → 暂无结果"（2026-11-10 修）。
-- **首页（`/`）是本地库的只读聚合**：`GET /api/home` 取「最近 48 小时内、收藏数 > 0、不含 R-18/R-18G 与屏蔽标签」的作品，按 `bookmark_count DESC` 给 24 条（跟随 `ITEMS_PER_PAGE`）；48 小时内不够一屏就放宽到 7 天，响应带 `window_hours` 让前端标注（`?window=48` 禁止放宽）。三条硬边界：① **不发任何 Pixiv 请求** —— 上游没有"48 小时 + 按收藏数"的接口（`popular_d` 需 Premium 且不限时间窗），覆盖率只来自预取/自动关注/手搜；② 只统计 `bookmark_count > 0`（为 0 可能是"没人收藏"也可能是"从未补全"，后者会让新作品整页沉底）；③ `upload_date` 是 **JST 墙面时间**（偏移在写库时丢了），窗口必须用 `utc now + 9h` 比较，用 UTC 会比全部偏 9 小时。60 秒进程内缓存，屏蔽标签增删时 `clear_home_cache()` 立即失效。**卡片图用 `medium_url`**（`_original_to_resized` → `/thumb` 代理，与详情页同链路，扩展名恒 `.jpg`）；没有原图地址的行退回 250px 缩略图 —— 首页不为画质去拉详情。
+- **首页（`/`）是本地库的只读聚合**：`GET /api/home` 取「最近 48 小时内、收藏数 > 0、带原图地址、不含 R-18/R-18G 与屏蔽标签」的作品，按 `bookmark_count DESC` 给 24 条（跟随 `ITEMS_PER_PAGE`）；48 小时内不够一屏就放宽到 7 天，响应带 `window_hours` 让前端标注（`?window=48` 禁止放宽）。三条硬边界：① **不发任何 Pixiv 请求** —— 上游没有"48 小时 + 按收藏数"的接口（`popular_d` 需 Premium 且不限时间窗），覆盖率只来自预取/自动关注/手搜；② 只统计 `bookmark_count > 0`（为 0 可能是"没人收藏"也可能是"从未补全"，后者会让新作品整页沉底）**且 `original_urls` 非空** —— 中图地址是从原图地址拼的，没原图只能退 250px 方形缩略图，在大图瀑布流里很显眼；实测生产库这两个信号完全同步（收藏数只在拉详情时写入，拉详情同时写原图），所以这条不额外排除任何作品，只是把"首页只有中图"从巧合变成保证；③ `upload_date` 是 **JST 墙面时间**（偏移在写库时丢了），窗口必须用 `utc now + 9h` 比较，用 UTC 会比全部偏 9 小时。60 秒进程内缓存，屏蔽标签增删时 `clear_home_cache()` 立即失效。**卡片图用 `medium_url`**（`_original_to_resized` → `/thumb` 代理，与详情页同链路，扩展名恒 `.jpg`）。
 - **搜索是异步的**：`GET /search` 立即返回 `task_id`，后台线程拉取，前端轮询 `/api/search/status/<task_id>`。任务存于 `_search_tasks`，访问 status 时顺带清理过期任务；游标含时间戳，**24 小时过期**。空页去重与死游标作废由前端处理。
 - **已筛出的预览作品可以立刻点开看**（`runtime.find_running_preview`）：`fetcher._process_items` 在每条详情到手时就发布 `result` 事件，而落库是整页一次的 `safe_commit`（在 `search_by_*` 里）—— 中间那些行只活在任务快照里，按 pid 查库的接口一律 404。所以 `/detail/<pid>` 查库未命中时会回退到**运行中**任务的内存快照（返回 `dict` 副本，绝不污染任务快照），模板据此渲染提示条并 **disabled 下载按钮**。三条硬边界：① 只认 `running` —— `done`/`partial` 的行已提交（查库即命中），`error`/`cancelled` 的行已回滚（兜底会渲染出不存在的结果）；② 兜底**不是**"已入库"的证明，`/download/<pid>` 与 `/api/image` 仍只认库；③ 同一 pid 有库行时**以库行为准**。
 - **提交新搜索会取消所有在途搜索任务**（`_submit_search_task` 置位旧任务的 `cancel_event`，单人应用同时只该有一个搜索在跑，旧任务继续拉详情只会烧令牌桶拖慢新搜索）。fetcher 侧取消机制：`SearchCancelledError` + `_cancel_begin/_cancel_end/_cancelled`（与详情预算同款 `threading.local`，预取/后台补全线程不受影响），检查点在 `paginated_search` 翻页前后与 `_fetch_details_parallel` 每个 worker 发请求前；**在途请求照常处理完并入库**（下次搜索命中 `existing_map` 免重拉），未发起的直接跳过。任务终态：`done` / `error` / `cancelled`（cancelled 返回 200）。前端用搜索代数（`searchGeneration`）让旧任务的轮询静默失效。
@@ -221,7 +221,7 @@ config / runtime / helpers / backups（叶子）→ middleware → background �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 455 条 = 453 passed / 2 skipped / 0 failed**，约 19s（2026-11-10 首页功能落地后复核；更早的重排过程见下条）。
+- **当前实测基线：收集 456 条 = 454 passed / 2 skipped / 0 failed**，约 19s（2026-11-10 首页功能落地后复核；更早的重排过程见下条）。
 - **粒度约定：一个用例 = 一个不变式**。同一不变式的多个输入变体（CSRF 端点矩阵、非法重定向目标矩阵、字段漂移清单、终态枚举、限流状态码矩阵、扩展名矩阵…）写成**一条用例内的循环 / 顺序分段 + 每例断言消息**，不要拆成多条用例，也不要 `parametrize`。判断标准：拆开之后会不会出现"两条用例的前置准备一模一样、只有输入与期望值不同"；会，就合成一条并在循环里带上 `f'{case} …'` 的失败消息。反过来，**不同不变式不要合并** —— `done` 与 `cancelled` 都"不是预览来源"，但前者靠查库命中、后者靠事务回滚；迁移测试不许跨版本合（否则"哪一版坏了"被掩盖）；同一现象的不同触发路径（排队中取消 vs 下载中取消、单条删除 vs 批量删除）也不合。
   **2026-09-30 全量重排**：710 → **431 条（-39%）**，逐文件重排。验收口径是**断言语义与执行次数不降**，不是断言行数：有三处（`test_app.py`、`test_auth.py`、`test_tls_config.py`）`assert` 行数下降，减掉的全部是"同一谓词在另一档输入上重复出现"的行 —— 按执行次数算只多不少（例：密钥校验矩阵从"5 条用例各断言部分属性"变成"4 档输入各断言全部 5 条属性"）。重排时**只允许改 `tests/`**，且必须保留 `docstring` 里"为什么钉这条"的事故叙事。
   重排后做的变异验证（改了立即还原）覆盖：中图扩展名（只坏 `webp` 一档 → 循环仍红）、预取容量三层**层序**（反转 tier → 红，见下条）、预取 CSRF 矩阵（去掉单端点保护 → 红）、`PIXIV_TEST_TMP` 分支、缓存页 R18 过滤。
