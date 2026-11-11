@@ -369,6 +369,18 @@ class TestHomePages:
         assert 'offsetHeight' in js, '最短列优先要读实时列高'
         assert 'matchMedia' in js, '列数（3/2）按视口断点由脚本判定'
 
+    def test_home_masonry_falls_back_to_round_robin_when_columns_have_no_height(self, client):
+        """列高不可用时必须按序号轮询兜底，不能全塞进第一列。
+
+        回归背景（2026-11-11）：卡片图片还是占位 SVG、尚未解码时，所有列的
+        `offsetHeight` 都是 0，`0 < 0` 恒为 false —— 首屏卡片全堆进第 1 列、
+        右边整列空白（手机截图实测）。兜底按 `placed % 列数` 轮询，保证一定分散。
+        """
+        js = pathlib.Path('pixivviewer/static/page-home.js').read_text(encoding='utf-8')
+        assert 'heights.some((h) => h > 0)' in js, '要先判断列高是否可用'
+        assert 'band.placed % band.cols.length' in js, '不可用时按序号轮询兜底'
+        assert 'placed: 0' in js, '列段要记录已放置张数（轮询游标）'
+
     def test_home_and_explore_render_their_own_pages(self, client):
         """`/` 是首页（page-home.js），搜索页迁到 `/explore`（`/search` 是异步 API）。"""
         home = client.get('/')

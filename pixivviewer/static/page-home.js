@@ -76,17 +76,27 @@ function createBand() {
     root.appendChild(col);
     cols.push(col);
   }
-  return { root, cols };
+  return { root, cols, placed: 0 };
 }
 
 // 最短列优先：读实时列高决定落点。卡片高度各不相同（懒加载后才是真实比例），
-// 按 i % 列数轮询会让列高越拉越偏。同高取最左 —— 相同视口 + 相同数据落位可复现。
+// 按 i % 列数轮询会让列高越拉越偏。
+// 但列高不可靠时必须退回按序号轮询：图片还是占位 SVG 时（未解码）所有列的
+// offsetHeight 都是 0，`0 < 0` 恒为 false，首屏卡片会全部堆进第 1 列、右边整列空白
+// （手机实测踩过，2026-11-11）。所以"高度全不可用"时按序号兜底。
 function placeIntoColumns(band, node) {
-  let best = band.cols[0];
-  for (let i = 1; i < band.cols.length; i++) {
-    if (band.cols[i].offsetHeight < best.offsetHeight) best = band.cols[i];
+  const heights = band.cols.map((col) => col.offsetHeight);
+  const usable = heights.some((h) => h > 0);
+  let idx = 0;
+  if (usable) {
+    for (let i = 1; i < heights.length; i++) {
+      if (heights[i] < heights[idx]) idx = i;   // 空列高度为 0，天然优先
+    }
+  } else {
+    idx = band.placed % band.cols.length;
   }
-  best.appendChild(node);
+  band.placed += 1;
+  band.cols[idx].appendChild(node);
   return node;
 }
 

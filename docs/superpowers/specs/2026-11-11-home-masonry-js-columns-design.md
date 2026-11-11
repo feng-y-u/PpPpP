@@ -38,6 +38,18 @@ CSS `grid-template-rows: masonry` 是原生正解，但 Chrome 不支持（Firef
 - 每插入一张前读一次 `offsetHeight` 选最矮列，同高取最左 —— 相同视口 + 相同数据可复现同一分布。
 - 代价：插入会强制一次同步布局（每批 24 张），在当前规模可忽略；换来的是列高均匀。
 
+### 列高不可用时退回按序号轮询（实现后补钉）
+
+首版只用「最短列」判定，部署后手机实测：**首屏卡片全堆进第 1 列、右边整列空白**。
+
+原因：卡片 `<img>` 起始是占位 SVG（`data:` URI），解码前没有内在尺寸，所有列的
+`offsetHeight` 都是 0；`0 < 0` 恒为 false，比较永远选第 0 列。已落位的卡片又"永不移动"，
+所以第一屏整体挤在一列，直到后续批次才开始分散。
+
+修正：先判断「是否至少有一列高度 > 0」。可用就按最短列；全为 0 就按
+`band.placed % 列数` 轮询兜底（列段记录已放置张数）。轮询只保证分散、不追求等高，
+列高确定后立即回到最短列优先。Node 模拟验证：8 张全零高度 → `0,1,0,1,...`；真实高度 500/200 → 选 200 那列。
+
 ### 列数由 JS 判定，CSS 只留间距断点
 
 `column-count` 由 `matchMedia('(max-width: 992px)')` 决定（3 列 / 2 列），与旧 CSS 断点一致。CSS 只剩 `≤640px` 的间距收缩。**列数不能只写 CSS**：DOM 里列容器的个数必须与布局一致，否则隐藏的列会吞掉卡片。
@@ -67,6 +79,7 @@ CSS `grid-template-rows: masonry` 是原生正解，但 Chrome 不支持（Firef
 
 - 2026-11-11：`home.html` 的 `.masonry` 改为 `display:flex` 列段 + `.masonry-col`，删除 `column-count` / `column-span`；`page-home.js` 改为最短列优先追加，新增 `rebuildBands()` 处理跨断点重排。
 - 新增用例 `test_home_masonry_uses_js_columns_not_css_multicol`，更新 `test_home_page_card_wiring` 的插入断言（不变式不变：调用方负责插入）。
-- 测试：`scripts/run_tests.ps1 -q` → **461 passed / 2 skipped / 0 failed**（全量 19.4s；基线 460 passed，新增 1 条用例）。
+- 测试：`scripts/run_tests.ps1 -q` → **462 passed / 2 skipped / 0 failed**（基线 460 passed，新增 2 条用例：禁 CSS 多列、列高不可用轮询兜底）。
+- 补钉（2026-11-11，部署后手机实测"全挤第一列"）：`placeIntoColumns` 增加「高度全为 0 → 按序号轮询」兜底；Node 模拟确认零高度列 `0,1,0,1…` 分散、真实高度仍选最矮列。
 - JS 语法：`node --check pixivviewer/static/page-home.js` 通过。
 - 未做浏览器内手工目测（本地未启动服务）；滚动不位移的不变式由「最短列优先 + 节点只追加」的结构保证。
