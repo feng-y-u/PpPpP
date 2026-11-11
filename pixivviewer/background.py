@@ -89,9 +89,20 @@ def _auto_follow_worker() -> None:
             continue
         try:
             collected = []
+            # `_process_items` 在返回前已经把新作品写入 DB，所以"事后查库反推新增"
+            # 永远得到 0 条（关注列表里本来就有的也全在库里）——审计 P1-1。
+            # 新增口径改由 `fetch_following` 的 `_ProcessedItems.new_pids` 携带；
+            # 旧调用方/测试替身返回普通 list 时 `saw_new_pids` 保持 False，退回
+            # 原有"查库差集"逻辑，保持兼容。
+            new_pids: set[int] = set()
+            saw_new_pids = False
             page = 1
             while page <= 10:
                 results, has_more = fetch_following(page=page)
+                page_new = getattr(results, 'new_pids', None)
+                if page_new is not None:
+                    saw_new_pids = True
+                    new_pids.update(page_new)
                 if not results:
                     break
                 collected.extend(results)
@@ -113,32 +124,60 @@ def _auto_follow_worker() -> None:
                     unique.append(r)
 
             pixiv_ids = [r['pixiv_id'] for r in unique]
-            with get_session() as db:
-                existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(Illust.pixiv_id.in_(pixiv_ids)).all()}
-
             new_illusts = []
             download_pids: list[int] = []
-            for r in unique:
-                if r['pixiv_id'] in existing_ids:
-                    continue
-                illust = Illust(
-                    pixiv_id=r['pixiv_id'], title=r['title'],
-                    user_id=r['user_id'], user_name=r['user_name'],
-                    page_count=r['page_count'], bookmark_count=r['bookmark_count'],
-                    thumb_url=r['thumb_url'],
-                    # r 是 `_process_items` 的产物，即 `Illust.to_dict()` 形状：这里的
-                    # `upload_date` 是 **isoformat 字符串**（`to_dict()` 就是这么输出的），
-                    # 直接塞进 DateTime 列会让 safe_commit 抛 TypeError，而它会被下面的
-                    # 宽 except 吞成一行日志 —— 症状是"一有新作品就静默失败、下轮重试再
-                    # 失败"，且 last_check 永不更新（审计 §33.5）。用 fetcher 里解析
-                    # Pixiv `updateDate` 的同一个函数转回来（它容忍 None）。
-                    upload_date=fetcher._parse_date(r['upload_date']),
-                )
-                illust.tags_list = r.get('tags', [])
-                illust.original_urls_list = r.get('original_urls', [])
-                new_illusts.append(illust)
-                if _auto_follow_state['auto_download'] and illust.original_urls_list:
-                    download_pids.append(r['pixiv_id'])
+
+            if saw_new_pids:
+                # 新作品已由搜索路径入库，这里只做两件事：报数 + 为自动下载补原图。
+                # defer 入库的行 `original_urls` 还是空的（详情由后台补全线程拉），
+                # 自动下载需要原图地址，所以对这批 pid 惰性拉一次详情并落库。
+                if _auto_follow_state['auto_download'] and new_pids:
+                    with get_session() as db:
+                        rows = db.query(Illust).filter(
+                            Illust.pixiv_id.in_(sorted(new_pids))).all()
+                        for row in rows:
+                            if not row.original_urls_list:
+                                try:
+                                    urls = helpers._fetch_original_urls(row.pixiv_id)
+                                except Exception as e:
+                                    logger.warning(
+                                        f'自动关注：补拉原图地址失败 {row.pixiv_id}: {e}')
+                                    urls = []
+                                if urls:
+                                    row.original_urls_list = urls
+                                    safe_commit(db)
+                            if row.original_urls_list:
+                                download_pids.append(row.pixiv_id)
+                new_count = len(new_pids)
+            else:
+                # 兼容路径：`fetch_following` 被替换成返回普通 list 时（测试替身、
+                # 未来其它调用方），仍按"库里没有就入库"的旧语义处理。
+                with get_session() as db:
+                    existing_ids = {i.pixiv_id for i in db.query(Illust.pixiv_id).filter(
+                        Illust.pixiv_id.in_(pixiv_ids)).all()}
+
+                for r in unique:
+                    if r['pixiv_id'] in existing_ids:
+                        continue
+                    illust = Illust(
+                        pixiv_id=r['pixiv_id'], title=r['title'],
+                        user_id=r['user_id'], user_name=r['user_name'],
+                        page_count=r['page_count'], bookmark_count=r['bookmark_count'],
+                        thumb_url=r['thumb_url'],
+                        # r 是 `_process_items` 的产物，即 `Illust.to_dict()` 形状：这里的
+                        # `upload_date` 是 **isoformat 字符串**（`to_dict()` 就是这么输出的），
+                        # 直接塞进 DateTime 列会让 safe_commit 抛 TypeError，而它会被下面的
+                        # 宽 except 吞成一行日志 —— 症状是"一有新作品就静默失败、下轮重试再
+                        # 失败"，且 last_check 永不更新（审计 §33.5）。用 fetcher 里解析
+                        # Pixiv `updateDate` 的同一个函数转回来（它容忍 None）。
+                        upload_date=fetcher._parse_date(r['upload_date']),
+                    )
+                    illust.tags_list = r.get('tags', [])
+                    illust.original_urls_list = r.get('original_urls', [])
+                    new_illusts.append(illust)
+                    if _auto_follow_state['auto_download'] and illust.original_urls_list:
+                        download_pids.append(r['pixiv_id'])
+                new_count = len(new_illusts)
 
             if new_illusts:
                 with get_session() as db:
@@ -146,11 +185,10 @@ def _auto_follow_worker() -> None:
                     safe_commit(db)
             # 先 commit 再提交下载任务：_download_illust 需要能查到已持久化的
             # Illust 行，否则会在"行不存在"时静默跳过下载（竞态）。
-            for pid in download_pids:
+            for pid in dict.fromkeys(download_pids):
                 with _download_queue_lock:
                     _queued_downloads.add(pid)
                 download_executor.submit(_download_illust, pid)
-            new_count = len(new_illusts)
             _auto_follow_state['last_check'] = datetime.now(timezone.utc).isoformat()
             _auto_follow_state['last_count'] = new_count
             # 干净收尾才清错误（审计 S20 遗留）：非空即"最近一轮有问题"。

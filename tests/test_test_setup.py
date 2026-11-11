@@ -194,7 +194,9 @@ def test_dependency_files_separate_runtime_development_and_locking():
     assert "Flask>=3.1,<3.2" in runtime
     assert "SQLAlchemy>=2.0,<2.1" in runtime
     assert "-r requirements.txt" in development
-    assert "pytest>=8,<10" in development
+    # pytest 9 的 iniconfig 2.3 要求 Python>=3.10；项目声明 3.9+，开发安装
+    # 必须停在 pytest 8（锁定文件也钉 8.4.2，3.9/3.13 两套真实环境均验证可安装）。
+    assert "pytest>=8,<9" in development
     assert "Flask==" in locked
     assert "SQLAlchemy==" in locked
     assert "requests==" in locked

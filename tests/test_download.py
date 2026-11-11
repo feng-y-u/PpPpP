@@ -706,6 +706,16 @@ def test_trigger_download_queued_returns_queued_not_duplicate(dl_env, clean_db, 
     assert is_queued_download(pid)
 
 
+def test_batch_download_rejects_too_many_ids(dl_env, client):
+    """批量下载单次 id 数上限（审计 P2-4）：1MB body 可塞几万个 id，
+    会逼近 SQLite 绑定参数上限并对每个 id 做详情/入队尝试。"""
+    token = client.get('/csrf-token').get_json()['token']
+    resp = client.post('/api/download/batch', json={'ids': list(range(1, 502))},
+                       headers={'X-CSRF-Token': token})
+    assert resp.status_code == 400
+    assert '500' in resp.get_json()['error']
+
+
 def test_batch_download_skips_queued(dl_env, clean_db, monkeypatch, client):
     """批量下载：已在队列中的 pid 计入 skipped，只对其余 pid 提交任务。"""
     queued_pid, fresh_pid = 80502, 80503

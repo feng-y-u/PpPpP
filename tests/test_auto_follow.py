@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import pytest
 
 from pixivviewer import background
+from pixivviewer import fetcher
 from pixivviewer import models
 from pixivviewer import runtime
 #: `/api/auto-follow/status` 的响应键集合（含 `alive`，由路由补上）。
@@ -227,6 +228,162 @@ def test_status_key_set_is_stable_while_worker_writes(client, clean_db, monkeypa
 
     assert len(seen_shapes) == 1, f'响应键集合必须恒定（懒加键会让并发遍历崩）：{seen_shapes}'
     assert STATUS_KEYS <= set(next(iter(seen_shapes))), 'S20/S21 的字段一个都不能少'
+
+
+def test_fetch_following_marks_genuinely_new_pids(clean_db, monkeypatch):
+    """`fetch_following` 必须把"本轮真正新增"的 pid 带出来（审计 P1-1）。
+
+    `_process_items` 在返回前已把新作品写入 DB，所以调用方事后按"库里有没有"
+    反推永远得到空集。`_ProcessedItems.new_pids` 是唯一可信口径；缓存命中时
+    必须退化成普通 list（不得把上一轮的新增再报一次）。
+    """
+    item = _item(900301)
+    # `fetch_following` 的上游输入是 Pixiv 原始条目（`id`），不是 `to_dict()` 形状
+    item['id'] = 900301
+    item['url'] = 'https://i.pximg.net/900301.jpg'
+    monkeypatch.setattr(
+        fetcher.pixiv_client, 'fetch_following_latest',
+        lambda session, **kwargs: ([item], False))
+    monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: None)
+    fetcher.clear_search_cache()
+    try:
+        results, has_more = fetcher.fetch_following(1, r18_mode='all')
+
+        assert has_more is False
+        assert getattr(results, 'new_pids', None) == {900301}, \
+            '首轮必须报告真正新增的 pid'
+        with models.get_session() as db:
+            assert db.query(models.Illust).filter(models.Illust.pixiv_id == 900301).count() == 1
+
+        cached, _ = fetcher.fetch_following(1, r18_mode='all')
+        assert not hasattr(cached, 'new_pids'), \
+            '缓存命中不得携带旧 new_pids，否则自动关注会重复计数/重复下载'
+    finally:
+        # 进程级缓存跨用例共享：本用例预置的假上游结果不能泄漏给后续测试
+        fetcher.clear_search_cache()
+
+
+def test_search_path_new_pids_are_counted_and_downloaded(clean_db, monkeypatch, worker):
+    """真实数据流：新作品已由搜索路径入库，worker 仍要报数并提交自动下载。
+
+    这是审计 P1-1 的症状级回归：旧实现查库反推新增，恒为 0，`last_count`
+    永远 0、`auto_download` 永不触发。这里用 `_ProcessedItems(new_pids=...)`
+    模拟 `fetch_following` 的真实返回，断言计数与下载任务都发生。
+    """
+    illust = models.Illust(pixiv_id=900201, title='新作品', user_id=100,
+                           user_name='画师', page_count=1, bookmark_count=5,
+                           thumb_url='https://i.pximg.net/900201.jpg')
+    illust.original_urls_list = ['https://i.pximg.net/img/900201.jpg']
+    clean_db.add(illust)
+    models.safe_commit(clean_db)
+
+    batch = fetcher._ProcessedItems([illust.to_dict()], new_pids={900201})
+    calls = {'n': 0}
+
+    def fetch_once(page=1):
+        calls['n'] += 1
+        # 只让第一轮返回新作品；后续轮次返回空，避免 0.05s 轮询把同一批
+        # new_pids 再提交一次（测试时序，不是生产行为）。
+        return (batch, False) if calls['n'] == 1 else ([], False)
+
+    monkeypatch.setattr(background, 'fetch_following', fetch_once)
+    monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', True)
+    monkeypatch.setitem(runtime._auto_follow_state, 'last_count', 0)
+
+    submitted: list[int] = []
+    monkeypatch.setattr(background.download_executor, 'submit',
+                        lambda fn, pid: submitted.append(pid))
+
+    worker()
+
+    assert _wait_for(lambda: runtime._auto_follow_state['last_count'] == 1), \
+        '本轮有 1 件真正新增，last_count 必须是 1 而不是 0'
+    assert submitted == [900201], 'auto_download 打开时必须为新作品提交下载任务'
+    with models.get_session() as db:
+        assert db.query(models.Illust).filter(
+            models.Illust.pixiv_id == 900201).count() == 1, '不得重复插入同一 pid'
+
+
+def test_worker_with_real_fetch_following_counts_and_persists(clean_db, monkeypatch, worker):
+    """真实 `fetch_following` + worker 的整链：新增计数、入库、不重复。
+
+    组件级用例分别钉了 `new_pids` 和 worker 分支；这里让 worker 调用**真实的**
+    `fetch_following`（只把最上游 Pixiv 请求替换掉），验证两者接起来仍只入库一次、
+    `last_count` 为 1。首轮后把 interval 拉长，避免 0.05s 轮询干扰断言。
+    """
+    item = _item(900401)
+    item.update({
+        'id': 900401,
+        'url': 'https://i.pximg.net/900401.jpg',
+        'updateDate': '2026-09-11T00:00:00+09:00',
+    })
+    monkeypatch.setattr(
+        fetcher.pixiv_client, 'fetch_following_latest',
+        lambda session, **kwargs: ([item], False))
+    monkeypatch.setattr(fetcher, 'build_pixiv_session', lambda: None)
+    monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', False)
+    monkeypatch.setitem(runtime._auto_follow_state, 'last_count', 0)
+    fetcher.clear_search_cache()
+
+    real_fetch = background.fetch_following
+    calls = {'n': 0}
+
+    def fetch_then_quiesce(*args, **kwargs):
+        result = real_fetch(*args, **kwargs)
+        calls['n'] += 1
+        runtime._auto_follow_state['interval'] = 10  # 首轮后停止下一轮
+        return result
+
+    monkeypatch.setattr(background, 'fetch_following', fetch_then_quiesce)
+
+    try:
+        worker()
+
+        assert _wait_for(lambda: runtime._auto_follow_state['last_count'] == 1), \
+            '真实 fetch_following 的新增必须被 worker 计入'
+        assert calls['n'] == 1
+        with models.get_session() as db:
+            assert db.query(models.Illust).filter(
+                models.Illust.pixiv_id == 900401).count() == 1, '不得重复入库'
+    finally:
+        fetcher.clear_search_cache()
+
+
+def test_auto_download_fetches_missing_original_urls(clean_db, monkeypatch, worker):
+    """defer 入库的新作品没有原图地址：自动下载要先惰性拉详情再提交。
+
+    关注页恒走 defer 路径，详情由后台补全线程稍后拉；自动下载若只看
+    `original_urls_list`，典型新作品会永远被跳过。这里断言 worker 会补拉并落库。
+    """
+    illust = models.Illust(pixiv_id=900202, title='无原图', user_id=100,
+                           user_name='画师', page_count=1, bookmark_count=5,
+                           thumb_url='https://i.pximg.net/900202.jpg')
+    clean_db.add(illust)
+    models.safe_commit(clean_db)
+
+    batch = fetcher._ProcessedItems([illust.to_dict()], new_pids={900202})
+    calls = {'n': 0}
+
+    def fetch_once(page=1):
+        calls['n'] += 1
+        return (batch, False) if calls['n'] == 1 else ([], False)
+
+    monkeypatch.setattr(background, 'fetch_following', fetch_once)
+    monkeypatch.setitem(runtime._auto_follow_state, 'auto_download', True)
+    monkeypatch.setattr(background.helpers, '_fetch_original_urls',
+                        lambda pid: [f'https://i.pximg.net/img/{pid}.jpg'])
+
+    submitted: list[int] = []
+    monkeypatch.setattr(background.download_executor, 'submit',
+                        lambda fn, pid: submitted.append(pid))
+
+    worker()
+
+    assert _wait_for(lambda: submitted == [900202]), \
+        '缺原图地址的新作品必须补拉后提交下载'
+    with models.get_session() as db:
+        row = db.query(models.Illust).filter(models.Illust.pixiv_id == 900202).one()
+        assert row.original_urls_list == ['https://i.pximg.net/img/900202.jpg']
 
 
 def test_new_illust_is_persisted(clean_db, monkeypatch, worker):

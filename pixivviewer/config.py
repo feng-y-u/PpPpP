@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import ipaddress
 import json
 import logging
 import os
@@ -191,6 +194,41 @@ SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
 
 # 全局访问密码（留空 = 免认证，本机使用无需设置；公网部署必须设置）
 ACCESS_PASSWORD = os.environ.get('ACCESS_PASSWORD', '')
+# 免认证时的公网访问逃生阀：默认 False —— 无密码且来源不是受信本机/内网时一律 403。
+# 把服务直接暴露到公网又确实不想设密码的用户可显式设 true（风险自负）。
+ALLOW_UNAUTHENTICATED_PUBLIC = os.environ.get(
+    'ALLOW_UNAUTHENTICATED_PUBLIC', 'false').lower() in ('1', 'true', 'yes', 'on')
+
+
+def _parse_networks(raw: str, default: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """解析 CIDR 列表（环境变量），非法项告警后忽略；空值回退 default。
+
+    默认只信任 loopback：Docker 网桥（172.17.x）和普通内网（192.168/10.x）
+    都不再被自动当成"本机"，避免公网端口映射/反代漏配 XFF 时绕过免认证守卫。
+    需要放开内网时显式设 `LOCAL_NETWORKS`；反代地址需要显式设 `TRUSTED_PROXIES`。
+    """
+    value = raw or default
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for part in value.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                f'[config] 忽略非法 CIDR {part!r}（来自 TRUSTED_PROXIES/LOCAL_NETWORKS）')
+    return tuple(networks)
+
+
+# 只有来自这些地址的 X-Forwarded-For 才可信；默认只信任本机反代（127/8, ::1/128）。
+# 反代部署在别的私网地址时，必须显式把它的 CIDR 加进来，否则 XFF 一律忽略。
+TRUSTED_PROXIES = _parse_networks(
+    os.environ.get('TRUSTED_PROXIES', ''), '127.0.0.0/8,::1/128')
+# 免认证守卫认可的"本机/内网"范围；默认只有 loopback。需要无密码访问内网时
+# 显式设 LOCAL_NETWORKS（例如 `127.0.0.0/8,192.168.1.0/24`），不要放进 Docker 网桥。
+LOCAL_NETWORKS = _parse_networks(
+    os.environ.get('LOCAL_NETWORKS', ''), '127.0.0.0/8,::1/128')
 
 # Session Cookie 仅 HTTPS 传输（公网反代 HTTPS 时应为 True；本地 HTTP 调试可设 false）
 COOKIE_SECURE = os.environ.get('COOKIE_SECURE', 'true').lower() != 'false'
@@ -225,6 +263,30 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'backup_keep': ('BACKUP_KEEP', 7),
 }
 
+# 数值设置的合法区间（下界, 上界；上界 None = 不设上限）。
+# 为什么必须集中在这里：设置页的 `<input min/max>` 只是浏览器提示，保存走的是
+# JS 组装 body + fetch，**不会触发原生校验**；清空输入框时前端还会把空串变成 0。
+# 后端若只做 `max(0, int(v))`，一个误操作就能写进 `download_max_workers=0`
+# （下次启动 ThreadPoolExecutor 直接抛错）或 `prefetch_max_illusts=0`
+# （容量清理立即把整库预取缓存判为超限）。见审计 P1-2。
+# 只有设置页可编辑的数值键需要登记；密码/布尔键不在此表。
+SETTINGS_BOUNDS: dict[str, tuple[int, int | None]] = {
+    'download_max_workers': (1, 8),
+    'per_page': (10, 120),
+    'search_pages': (1, 100),
+    'max_bookmarks_default': (0, None),
+    'auto_follow_interval': (0, None),
+    'fetch_detail_workers': (1, 10),
+    'medium_image_size': (250, 1200),
+    'items_per_page': (1, 60),
+    'prefetch_interval': (0, None),
+    'prefetch_pages': (1, 60),
+    'prefetch_max_illusts': (1, 1_000_000),
+    'backup_interval': (0, None),
+    'backup_keep': (1, 120),
+}
+
+
 def _backup_corrupt_settings(path: str) -> None:
     """把读不出来的 settings.json 留一份副本（审计 S16），回退默认值的行为不变。
 
@@ -255,6 +317,21 @@ if os.path.exists(_settings_path):
                     # 统一布尔化：手改 settings.json 为字符串 "false" 时不能变成
                     # 真值字符串（否则 Session Cookie 被标记 Secure，本地 HTTP 登录失效）
                     _val = str(_val).lower() in ('1', 'true', 'yes', 'on')
+                elif _json_key in SETTINGS_BOUNDS:
+                    # 手改 settings.json 同样要过区间校验：0 个下载线程会让下次启动
+                    # ThreadPoolExecutor(max_workers=0) 直接抛错，0 上限预取会让容量
+                    # 清理清空缓存。越界值回退默认并留告警，不让坏配置拖垮启动。
+                    try:
+                        _val = int(_val)
+                    except (TypeError, ValueError):
+                        logging.getLogger(__name__).warning(
+                            f'[config] settings.json 的 {_json_key} 不是整数，已忽略')
+                        continue
+                    _low, _high = SETTINGS_BOUNDS[_json_key]
+                    if _val < _low or (_high is not None and _val > _high):
+                        logging.getLogger(__name__).warning(
+                            f'[config] settings.json 的 {_json_key}={_val} 超出允许范围，已忽略')
+                        continue
                 globals()[_const_name] = _val
     except Exception as _e:
         logging.getLogger(__name__).warning(

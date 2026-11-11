@@ -192,6 +192,79 @@ class TestSettingsPost:
         assert [p.name for p in _isolate_settings.parent.iterdir()] == ['settings.json']
         assert dict(app._prefetch_state) == before_state, '写盘失败不得更新内存态'
 
+    def test_zero_is_rejected_for_bounded_settings(self, client, _isolate_settings):
+        """有下界的数值设置不允许写成 0（审计 P1-2）。
+
+        设置页保存不触发 HTML `min` 校验，清空输入框后前端会发 0；后端若只做
+        `max(0, int(val))`，就会把 0 写进 settings.json。后果按键不同：0 个下载
+        线程会让下次启动 `ThreadPoolExecutor(max_workers=0)` 直接抛错；0 个详情
+        线程让搜索恒空；`prefetch_max_illusts=0` 更会立即让容量清理把整库预取
+        缓存判为超限。这里把所有"下界为 1"的键逐个打一遍，断言 400 且不落盘。
+        """
+        bounded = (
+            'download_max_workers', 'fetch_detail_workers', 'per_page',
+            'search_pages', 'items_per_page', 'medium_image_size',
+            'prefetch_pages', 'prefetch_max_illusts', 'backup_keep',
+        )
+        for key in bounded:
+            resp = _post_settings(client, {key: 0})
+            assert resp.status_code == 400, f'{key}=0 必须被拒绝，实际 {resp.status_code}'
+            assert not _isolate_settings.exists(), f'{key}=0 被拒绝时不得落盘'
+
+    def test_validation_failure_does_not_touch_cookie(self, client, _isolate_settings,
+                                                      _isolate_cookies_txt):
+        """数值校验失败必须先于 Cookie 落盘（审计 P2-1）。
+
+        旧顺序是"先写 Cookie、再校验设置"：一次带合法 Cookie + 非法数值的保存
+        会返回 400，但 cookies.txt 已经被改掉，用户以为整次保存失败。
+        这里把两个副作用一起钉住：400、Cookie 逐字节不变、settings.json 不存在。
+        """
+        _isolate_cookies_txt.write_text('PHPSESSID=old-token\n', encoding='utf-8')
+
+        resp = _post_settings(client, {
+            'cookie': 'new-token',
+            'download_max_workers': 0,
+        })
+
+        assert resp.status_code == 400
+        assert _isolate_cookies_txt.read_text(encoding='utf-8') == 'PHPSESSID=old-token\n'
+        assert not _isolate_settings.exists(), '校验失败不得写入 settings.json'
+
+    def test_legacy_out_of_range_settings_are_sanitized_for_display_and_save(
+            self, client, _isolate_settings):
+        """历史非法 settings.json 不得把设置页锁死（审计 TD-03）。
+
+        旧版本允许保存 0/越界值。新代码启动时会忽略它们并回退默认，但
+        `_load_settings()` 若原样返回，设置页会显示 0，再点保存就被新边界
+        校验 400 拒绝 —— 页面从此无法保存任何配置。这里验证：GET 返回默认值，
+        然后把 GET 到的设置原样 POST 回去能成功并清洗磁盘文件。
+        """
+        _isolate_settings.write_text(json.dumps({
+            'download_max_workers': 0,
+            'prefetch_max_illusts': 0,
+            'per_page': 999,
+            'medium_image_size': 100,
+            'proxy': 'http://127.0.0.1:7890',
+        }), encoding='utf-8')
+
+        data = client.get('/api/settings').get_json()
+
+        defaults = routes_settings._SETTINGS_DEFAULTS
+        assert data['download_max_workers'] == defaults['download_max_workers']
+        assert data['prefetch_max_illusts'] == defaults['prefetch_max_illusts']
+        assert data['per_page'] == defaults['per_page']
+        assert data['medium_image_size'] == defaults['medium_image_size']
+        assert data['proxy'] == 'http://127.0.0.1:7890', '非数值键必须原样保留'
+
+        resp = _post_settings(client, data)
+
+        assert resp.status_code == 200, resp.get_json()
+        saved = json.loads(_isolate_settings.read_text(encoding='utf-8'))
+        assert saved['download_max_workers'] == defaults['download_max_workers']
+        assert saved['prefetch_max_illusts'] == defaults['prefetch_max_illusts']
+        assert saved['per_page'] == defaults['per_page']
+        assert saved['proxy'] == 'http://127.0.0.1:7890'
+
     def test_prefetch_keys_apply_immediately(self, client, _isolate_settings):
         """prefetch_* 是唯一保存即生效（不需重启）的一组键。
 

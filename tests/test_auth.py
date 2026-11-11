@@ -53,8 +53,29 @@ class TestAuthRequired:
         assert resp.headers['Location'].startswith('/login')
 
     def test_no_password_means_open_access(self, client):
-        # ACCESS_PASSWORD 默认空 → 免认证
+        # ACCESS_PASSWORD 默认空 → 本机/内网免认证
         assert client.get('/').status_code == 200
+
+    def test_public_client_is_denied_when_no_password(self, client, monkeypatch):
+        """免认证只对"本机/内网"成立，公网来源必须拒绝（审计 P1-5）。
+
+        留空 `ACCESS_PASSWORD` 是单人本机部署的既定用法，但用户把服务直接挂到
+        公网时，设置页（可写 cookies.txt）、删除接口、全部 API 都会裸奔。这里
+        加一道运行时守卫：无密码 + 非本机/内网来源 → 403；需要显式接受风险时
+        设 `ALLOW_UNAUTHENTICATED_PUBLIC=1` 放行（不删除免认证功能）。
+        """
+        monkeypatch.setattr('app.ACCESS_PASSWORD', '')
+        monkeypatch.setattr('app.ALLOW_UNAUTHENTICATED_PUBLIC', False)
+
+        public = client.get('/', environ_base={'REMOTE_ADDR': '8.8.8.8'})
+        assert public.status_code == 403, '公网来源在无密码时不得直接进入'
+
+        # 本机来源照旧免认证
+        assert client.get('/').status_code == 200
+
+        # 显式接受风险的逃生阀仍然可用
+        monkeypatch.setattr('app.ALLOW_UNAUTHENTICATED_PUBLIC', True)
+        assert client.get('/', environ_base={'REMOTE_ADDR': '8.8.8.8'}).status_code == 200
 
 
 class TestLogin:
@@ -136,6 +157,92 @@ class TestLogin:
         resp = client.post('/login', json={'password': 'test-secret', 'next': '//evil.com'},
                            headers={'X-CSRF-Token': token})
         assert resp.get_json()['next'] == '/'
+
+    def test_exempt_paths_remain_reachable_for_public_without_password(self, client, monkeypatch):
+        """公网免认证守卫不得连静态资源/登录页/CSRF 一起封死（审计 P2-3）。
+
+        `_AUTH_EXEMPT_PATHS` 的设计是"未登录也要能加载登录页与静态资源"；
+        公网守卫如果先于豁免判断执行，`/static/app.js`、`/login`、`/csrf-token`
+        都会变成 403，登录页/403 页连样式都拿不到。这里钉住顺序。
+        """
+        monkeypatch.setattr('app.ACCESS_PASSWORD', '')
+        monkeypatch.setattr('app.ALLOW_UNAUTHENTICATED_PUBLIC', False)
+        remote = {'REMOTE_ADDR': '8.8.8.8'}
+
+        assert client.get('/static/app.js', environ_base=remote).status_code == 200
+        assert client.get('/csrf-token', environ_base=remote).status_code == 200
+        assert client.get('/favicon.ico', environ_base=remote).status_code == 204
+        # 无密码时登录页本身会重定向到首页（首页再被 403），但不得是 403
+        assert client.get('/login', environ_base=remote).status_code in (200, 302)
+        assert client.get('/', environ_base=remote).status_code == 403
+
+    def test_private_sources_and_spoofed_xff_cannot_enter(self, client, monkeypatch):
+        """只有显式受信的代理和本机范围才能免认证（审计 P2-3/P2-4）。
+
+        默认 `TRUSTED_PROXIES`/`LOCAL_NETWORKS` 都只含 loopback：
+        - Docker 网桥（172.17.0.1）和普通内网（192.168.1.5）不是本机；
+        - 这些来源自带 `X-Forwarded-For: 127.0.0.1` 也不能伪装成本机；
+        - 只有本机反代 + XFF 还原出的本机地址才放行；XFF 是公网地址则拒绝。
+        """
+        import ipaddress
+        from pixivviewer import config as config_module
+
+        monkeypatch.setattr('app.ACCESS_PASSWORD', '')
+        monkeypatch.setattr('app.ALLOW_UNAUTHENTICATED_PUBLIC', False)
+
+        for remote in ('192.168.1.5', '172.17.0.1'):
+            resp = client.get(
+                '/', environ_base={'REMOTE_ADDR': remote},
+                headers={'X-Forwarded-For': '127.0.0.1'})
+            assert resp.status_code == 403, \
+                f'{remote} 伪造 XFF=127.0.0.1 不得进入，实际 {resp.status_code}'
+
+        # 本机反代（默认受信）还原出的本机地址：放行
+        assert client.get(
+            '/', environ_base={'REMOTE_ADDR': '127.0.0.1'},
+            headers={'X-Forwarded-For': '127.0.0.1'}).status_code == 200
+
+        # 本机反代还原出的公网地址：拒绝
+        assert client.get(
+            '/', environ_base={'REMOTE_ADDR': '127.0.0.1'},
+            headers={'X-Forwarded-For': '8.8.8.8'}).status_code == 403
+
+        # 显式把某个私网反代加入 TRUSTED_PROXIES 后才采信它的 XFF
+        monkeypatch.setattr(
+            config_module, 'TRUSTED_PROXIES',
+            (ipaddress.ip_network('192.168.1.5/32'),))
+        assert client.get(
+            '/', environ_base={'REMOTE_ADDR': '192.168.1.5'},
+            headers={'X-Forwarded-For': '8.8.8.8'}).status_code == 403
+        assert client.get(
+            '/', environ_base={'REMOTE_ADDR': '192.168.1.5'},
+            headers={'X-Forwarded-For': '127.0.0.1'}).status_code == 200
+
+    def test_spoofed_xff_from_public_peer_cannot_reset_login_limit(
+            self, client, auth_enabled, monkeypatch):
+        """公网直连客户端自造 XFF 不能换出新的限流桶（审计 P1-4）。
+
+        ProxyFix 会无条件信任 `X-Forwarded-For`：直连部署时每个请求换一个
+        XFF 就能换一个 remote_addr，5 次/分钟的登录限流被完全绕过。限流键必须
+        取**真实直连对端**；只有对端是本机/私网（反代）时才信任还原后的客户端地址。
+        """
+        import app as app_module
+        from pixivviewer.routes import settings as routes_settings
+        monkeypatch.setattr(routes_settings.time, 'sleep', lambda _seconds: None)
+        token = _get_token(client)
+
+        codes = [
+            client.post(
+                '/login', json={'password': 'wrong'},
+                headers={'X-CSRF-Token': token,
+                         'X-Forwarded-For': f'198.51.100.{i + 1}'},
+                environ_base={'REMOTE_ADDR': '8.8.8.8'},
+            ).status_code
+            for i in range(7)
+        ]
+
+        assert codes == [403] * 5 + [429, 429], \
+            f'换 XFF 不得绕过登录限流，实际 {codes}'
 
     def test_http_login_is_capped_at_5_per_minute(self, client, auth_enabled):
         """端到端：限流装饰器确实接在 `/login` 上，阈值就是 5 次/分钟。
@@ -357,7 +464,7 @@ class TestPublicDeploymentPosture:
         assert '_warn_if_unprotected' in module_level_calls
 
     def test_warns_only_when_access_password_missing(self, monkeypatch, caplog):
-        """未设访问密码 = 全站免认证，启动必须留下告警痕迹；设了就不能有噪声。"""
+        """未设访问密码时只有本机范围免认证，启动必须留下告警痕迹；设了就不能有噪声。"""
         import app as app_module
 
         for password, expected in (('', True), ('secret-pw', False)):

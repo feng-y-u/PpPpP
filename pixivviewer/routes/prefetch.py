@@ -46,12 +46,22 @@ def prefetch_config_post() -> Response:
     #             独立绑定看不到补丁
     body = _get_json_body()
     updates: dict[str, int] = {}
+    # interval=0 是合法的"禁用"；pages / max_illusts 的下界是 1 —— 0 会让预取
+    # 一轮什么都不做，或让容量清理把全部预取作品判为超限（审计 P1-2）。
+    bounds = {'interval': (0, None), 'pages': (1, 60), 'max_illusts': (1, 1_000_000)}
     for key in _PREFETCH_SETTINGS_KEYS:
         if key in body:
             try:
-                updates[key] = max(0, int(body[key]))
+                val = int(body[key])
             except (ValueError, TypeError):
                 return jsonify({'error': f'{key} must be integer'}), 400
+            low, high = bounds[key]
+            if key == 'interval':
+                # 保持历史语义：负数一律夹到 0（禁用），不报错。
+                val = max(low, val)
+            if val < low or (high is not None and val > high):
+                return jsonify({'error': f'{key} 取值需满足 {low}~{high}'}), 400
+            updates[key] = val
 
     # 写配置：先全部校验并持久化 settings.json，成功后一次性提交到内存，避免校验/写盘失败时状态漂移
     if updates:

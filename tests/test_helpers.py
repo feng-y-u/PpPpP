@@ -7,6 +7,8 @@ import pytest
 
 from pixivviewer import config
 from pixivviewer import helpers
+
+
 def _mk(path, name, size, mtime):
     p = path / name
     p.write_bytes(b'x' * size)
@@ -398,3 +400,22 @@ def test_helpers_does_not_import_models_at_module_level():
     lazy = [node for node in ast.walk(func)
             if isinstance(node, ast.ImportFrom) and (node.module or '').split('.')[-1] == 'models']
     assert lazy, 'query_cached_tag 必须在函数体内延迟 `from .models import ...`（见该函数注释）'
+
+
+def test_fetch_original_urls_uses_pooled_session(monkeypatch):
+    """惰性拉原图是详情页/下载入口的热点，必须复用线程内连接池（审计 P2-3）。
+
+    每调用一次 `build_pixiv_session()` 都会新建 urllib3 连接池，等于每次详情页
+    补原图都重做一次 TCP+TLS 握手；这里钉住它走 `get_pooled_session()`。
+    """
+    from pixivviewer import pixiv_client
+    session = object()
+    monkeypatch.setattr(pixiv_client, 'get_pooled_session', lambda: session)
+    monkeypatch.setattr(
+        pixiv_client, 'fetch_original_urls',
+        lambda sess, pid: [f'{sess}-{pid}'])
+    monkeypatch.setattr(
+        pixiv_client, 'build_pixiv_session',
+        lambda: (_ for _ in ()).throw(AssertionError('不得新建 Session')))
+
+    assert helpers._fetch_original_urls(7) == [f'{session}-7']

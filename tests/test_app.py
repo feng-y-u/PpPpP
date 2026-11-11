@@ -1218,6 +1218,19 @@ class TestGalleryDeleteOrphans:
                              headers={'X-CSRF-Token': self._token(client)})
         assert resp.status_code == 404
 
+    def test_batch_delete_rejects_too_many_ids(self, client, clean_db):
+        """批量删除必须限制单次 id 数（审计 P2-4）。
+
+        ids 直接拼进 `IN (...)`，1MB body 能塞进几万个 id，逼近 SQLite 绑定参数
+        上限（32766）并对每个 id 做一次磁盘删除。上限取 500，远超正常一屏操作。
+        """
+        resp = client.post('/api/gallery/batch-delete',
+                           data=json.dumps({'ids': list(range(1, 502))}),
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': self._token(client)})
+        assert resp.status_code == 400
+        assert '500' in resp.get_json()['error']
+
     def test_batch_delete_covers_orphans(self, client, clean_db, monkeypatch, tmp_path):
         ddir = self._patch_download_dir(monkeypatch, tmp_path)
         orphan = ddir / '70003'
@@ -1341,6 +1354,32 @@ class TestGalleryPageSize:
         js = pathlib.Path('pixivviewer/static/page-gallery.js').read_text(encoding='utf-8')
         assert 'meta[name="items-per-page"]' in js, '页大小必须读服务端下发的值'
         assert 'const PAGE_SIZE = 50' not in js, '不得再硬编码页大小'
+
+    def test_detail_navigation_page_size_is_server_driven(self, client, clean_db, monkeypatch):
+        """详情页跨作品翻页也必须跟随 `items_per_page`（审计 P1-3）。
+
+        `page-detail.js` 曾把页大小硬编码成 50，而图库按 `items_per_page`（默认
+        24）分页：图库写入的全局 `pos` 与详情页按 50 重算的页号/偏移对不上，
+        第 2 页起"上一作/下一作"会跳错作品或直接失效。这里同时钉住三件事：
+        详情页下发 meta、详情 JS 读 meta、图库与详情对 sessionStorage 序列的
+        版本号一致（v=2）。
+        """
+        monkeypatch.setattr(routes_gallery, 'ITEMS_PER_PAGE', 24)
+        illust = models.Illust(pixiv_id=88001, title='nav', user_id=1,
+                               page_count=1, bookmark_count=5)
+        illust.original_urls_list = ['https://i.pximg.net/img-original/img/a_p0.jpg']
+        clean_db.add(illust)
+        models.safe_commit(clean_db)
+
+        html = client.get('/detail/88001').get_data(as_text=True)
+
+        assert '<meta name="items-per-page" content="24">' in html
+        detail_js = pathlib.Path('pixivviewer/static/page-detail.js').read_text(encoding='utf-8')
+        assert 'meta[name="items-per-page"]' in detail_js, '详情页页大小必须读服务端下发的值'
+        assert 'const PAGE_SIZE = 50' not in detail_js, '不得再硬编码页大小'
+        gallery_js = pathlib.Path('pixivviewer/static/page-gallery.js').read_text(encoding='utf-8')
+        assert 'v: 2' in gallery_js, '图库写入的序列版本必须与详情页读取的一致'
+        assert 's.v !== 2' in detail_js, '详情页读取的序列版本必须与图库写入的一致'
 
     def test_api_gallery_default_limit_follows_setting(self, client, clean_db, monkeypatch,
                                                        tmp_path):

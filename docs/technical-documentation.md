@@ -63,7 +63,7 @@
 
 | 类别 | 选型 | 版本（lock 文件实测） | 说明 |
 | --- | --- | --- | --- |
-| 语言 | Python | 3.13（venv 实测，`requirements-lock.txt` 配套）；语法下限 3.9+（全模块 `from __future__ import annotations`） | 无类型检查 |
+| 语言 | Python | 3.9/3.12/3.13（3.12.14、3.13.13 全量实测，`requirements-lock.txt` 配套）；语法下限 3.9+（全模块 `from __future__ import annotations`） | 无类型检查 |
 | Web 框架 | Flask | 3.1.3 | 传统多页 + Blueprint 路由（6 个） |
 | ORM | SQLAlchemy 2.0 | 2.0.51 | Declarative 映射，原生 SQL（`text()`）用于性能热点 |
 | 数据库 | SQLite | 3.50.4（实测） | WAL 模式、`busy_timeout=10000`、`synchronous=NORMAL`（`models.py`） |
@@ -174,7 +174,7 @@ E:\pixiv\
 │   ├── sandbox_pytest_shim.py     # DSH 沙箱专用插件：剥 os.mkdir 的 mode（0o700 → ACL 问题）
 │   ├── pixiv-cleanup.sh           # 仅清理已下载原图（30 天前 + 收藏 <100），realpath 越界保护
 │   └── _inspect_db.py             # 巡检：打印表名与硬编码表名行数（表名清单已同步 v5 删表）
-├── tests/                         # conftest + 测试文件（当前 460 passed / 2 skipped，约 19s；见 AGENTS.md「测试」）
+├── tests/                         # conftest + 测试文件（当前 482 passed / 2 skipped，约 20s；见 AGENTS.md「测试」与 QUALITY_BASELINE.md）
 ├── docs/
 │   ├── architecture.md            # 模块地图 + -w 1 语义 + app 命名空间测试补丁契约（改动前必读）
 │   ├── maintenance.md             # 运维手册（存储分类 / 备份回退 / gunicorn 部署 / 清理脚本）
@@ -1089,7 +1089,7 @@ graph TD
 | 项 | 要求 |
 | --- | --- |
 | OS | 开发 Windows（命令文档以 PowerShell 为例）；生产 Linux（systemd 示例、`pixiv-cleanup.sh`、`/etc/pixiv-viewer/cookies.txt`） |
-| Runtime | Python ≥3.9（实际开发/测试 3.13） |
+| Runtime | Python ≥3.9（3.9/3.12/3.13 实测；3.12.14 与 3.13.13 全量） |
 | 依赖安装 | `pip install -r requirements-dev.txt`（开发）或 `requirements-lock.txt`（可复现部署） |
 | 数据库 | SQLite（内置，无需服务） |
 | 外部 | 可访问 Pixiv 的网络（或配置 `proxy`）；可选 ip 限制外无其他 |
@@ -1166,7 +1166,7 @@ journalctl -u pixiv-viewer -f | grep prefetch
 ## 23. 开发环境搭建
 
 ```text
-1. 安装 Python 3.13（venv 配套；语法下限 3.9）
+1. 安装 Python 3.12/3.13（venv 配套；语法下限 3.9）
 2. 获取源码（git clone / 本仓库）
 3. python -m venv venv && venv\Scripts\activate
 4. pip install -r requirements-dev.txt

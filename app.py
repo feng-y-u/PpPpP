@@ -18,6 +18,7 @@ from pixivviewer.config import (
     ITEMS_PER_PAGE,
     MAX_BOOKMARKS_DEFAULT,
     SETTINGS_PASSWORD, ACCESS_PASSWORD, COOKIE_SECURE, SSL_VERIFY,
+    ALLOW_UNAUTHENTICATED_PUBLIC,
     COOKIE_PATH,  # Cookie 文件单一来源：fetcher 读它，设置页也必须写它（见下）
     _instance_dir,  # 实例目录单一来源：密钥文件路径由它派生（PIXIV_INSTANCE_DIR 可整体重定向）
     _load_or_create_secret,  # 密钥文件统一入口：长度校验 + 权限收紧（与 .cursor_secret 同一助手）
@@ -112,13 +113,15 @@ init_db()
 
 # ── 启动自检 ──
 def _warn_if_unprotected() -> None:
-    """ACCESS_PASSWORD 为空即全站免认证，启动时明确告警（默认单人本机部署如此）。
+    """ACCESS_PASSWORD 为空时只有 loopback/LOCAL_NETWORKS 免认证，启动告警。
 
     告警而不是阻断：单人本机自部署免认证是既定用法（见 AGENTS.md「认证」），
     这里只是让"忘了设密码就挂到公网"这件事在日志里可见。
     """
     if not ACCESS_PASSWORD:
-        logger.warning('ACCESS_PASSWORD 未设置：全站免认证，仅限本机/可信内网使用；公网部署必须设置')
+        logger.warning(
+            'ACCESS_PASSWORD 未设置：仅 loopback / LOCAL_NETWORKS 可免认证，'
+            '其他来源会被 403；公网部署必须设置')
 
 
 def _warn_if_tls_unverified() -> None:

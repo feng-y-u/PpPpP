@@ -241,7 +241,9 @@ function buildDetailUrl(r, idx) {
 function saveDetailSeq() {
   try {
     sessionStorage.setItem('pv_detail_seq', JSON.stringify({
-      v: 1,
+      // v: 2 —— 与 page-detail.js 的 loadStoredSeq 对齐；旧版写 v:1 而详情页只认
+      // v:2，导致序列永远被丢弃、每次打开详情都要多拉一次 /api/gallery（审计 P1-3）。
+      v: 2,
       sort: sortOrder,
       tag: activeTag || '',
       total: galleryTotal,

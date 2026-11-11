@@ -154,6 +154,20 @@ class TestPrefetchConfigAPI:
         assert resp.get_json()['pages'] == 7
         assert resp.get_json()['interval'] == app._prefetch_state['interval']
 
+    def test_zero_pages_or_capacity_is_rejected(self, client):
+        """`pages` / `max_illusts` 的 0 必须 400：前者让预取一轮空转，
+        后者会让容量清理把全部预取作品判为超限（审计 P1-2）。"""
+        token = _get_token(client)
+        before = dict(app._prefetch_state)
+        for key in ('pages', 'max_illusts'):
+            resp = client.post('/api/prefetch/config',
+                               data=json.dumps({key: 0}),
+                               content_type='application/json',
+                               headers={'X-CSRF-Token': token})
+            assert resp.status_code == 400, f'{key}=0 必须被拒绝，实际 {resp.status_code}'
+        assert app._prefetch_state['pages'] == before['pages']
+        assert app._prefetch_state['max_illusts'] == before['max_illusts']
+
     def test_post_invalid_payload_400_leaves_state_untouched(self, client, _isolate_settings):
         """非法字段一律 400 + 报错，且**校验先于写入**。
 

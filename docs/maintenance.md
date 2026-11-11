@@ -217,8 +217,8 @@ sudo systemctl restart pixiv-viewer     # 服务名以实际 unit 为准
 
 **必须做的**
 
-1. **设置 `ACCESS_PASSWORD`**（`.env` 或环境变量）。留空 = **全站免认证**：任何人可搜索、下载、改设置。启动日志会打印一行
-   `ACCESS_PASSWORD 未设置：全站免认证，仅限本机/可信内网使用；公网部署必须设置` 作提醒。
+1. **设置 `ACCESS_PASSWORD`**（`.env` 或环境变量）。留空 = **仅 loopback 免认证**：Docker 网桥/普通内网默认也会 403，任何人可搜索、下载、改设置。启动日志会打印一行
+   `ACCESS_PASSWORD 未设置：仅 loopback / LOCAL_NETWORKS 可免认证，其他来源会被 403；公网部署必须设置` 作提醒。确需无密码内网访问时，用 `LOCAL_NETWORKS` 显式加入网段（默认仍只有 loopback）。
 2. **只监听 loopback，由反代对外**：
 
    ```bash
@@ -226,13 +226,15 @@ sudo systemctl restart pixiv-viewer     # 服务名以实际 unit 为准
    ```
 
    **禁止 `python app.py` 直跑公网**：它默认只绑 `127.0.0.1`（要改监听地址用 `HOST`/`PORT` 环境变量），但它终究是开发服务器，没有反代的超时/并发/压缩保护。
-3. **反代必须剥离或重写 `X-Forwarded-For`**：
+3. **反代必须剥离或重写 `X-Forwarded-For`，并让应用信任反代地址**：
 
    ```nginx
    proxy_set_header X-Forwarded-For $remote_addr;   # 覆盖掉客户端自带的值
    ```
 
-   应用侧 `ProxyFix(x_for=1)` 按这个头还原真实客户端 IP，**限流与 `/api/open-dir` 的本机判定都依赖它**。若反代原样透传客户端自带的 XFF，访问者就能自称 `127.0.0.1`。
+   应用侧 `_client_ip()` 只采信来自 `TRUSTED_PROXIES`（默认仅 loopback）的 XFF；反代在别的私网地址时，必须把它的 CIDR 加进去，例如
+   `TRUSTED_PROXIES=127.0.0.0/8,10.0.0.5/32`。只写 XFF 而不配置 `TRUSTED_PROXIES` 会被当成不可信来源，公网请求仍然 403。
+   Docker 端口映射（来源是网桥私网）不会被当成反代，必须直接设 `ACCESS_PASSWORD`；`/api/open-dir` 仍对任何带 XFF 的请求 fail-closed。
 4. **`COOKIE_SECURE=true`**（默认已是 true）：HTTPS 下才回传登录态；纯 HTTP 调试必须显式设 `false`，否则登录后立刻掉线。
 5. **证书与压缩都在反代上做**：Flask 自身不 gzip（`/api/gallery?limit=50` 约 25 KB），TLS 也由反代终结。
 

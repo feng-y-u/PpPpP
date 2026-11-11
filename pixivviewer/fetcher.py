@@ -660,9 +660,14 @@ class _ProcessedItems(list):
     `copy()`）都返回普通 list 并丢掉该标记，所以只在 `search_by_*` 边界读它才有意义。
     """
 
-    def __init__(self, items=(), *, rate_limited: bool = False):
+    def __init__(self, items=(), *, rate_limited: bool = False, new_pids=None):
         super().__init__(items)
         self.rate_limited = rate_limited
+        # 本批**真正新增**入库的 pid（已在 existing_map 里的不算）。自动关注需要
+        # 它来区分"这一轮新发现"与"关注列表里本来就有"——`_process_items` 在
+        # 返回前已经把新作品写入 DB，事后按库里是否存在反推会得到"全部已存在"，
+        # 于是新增计数恒 0、自动下载永不触发（审计 P1-1）。
+        self.new_pids = set(new_pids or ())
 
 
 def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int], illust_factory: Callable[[Any, dict], Illust], blocked: set[str], *,
@@ -705,6 +710,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
     published_pids: set[int] = set()
     examined_pids: set[int] = set()
+    new_pids: set[int] = set()
     rate_limited = False
 
     def _emit(event: dict) -> None:
@@ -837,6 +843,9 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         # 冲突容忍写入：并发/本批重复 pid 不炸整批（见 _insert_new_illusts）；
         # 同 pid 只进结果一次（本批重复条目在写入层被合并成一行）
         winners = _insert_new_illusts(db, new_illusts)
+        # 只把"写入前库里没有"的 pid 记为本轮新增；并发线程抢先插入的同一 pid
+        # 也算新增（它确实是这一轮才出现的），但与 existing_map 的差集是权威口径。
+        new_pids.update(pid for pid in winners if pid not in existing_map)
         seen_pids: set[int] = set()
         for illust in new_illusts:
             pid = illust.pixiv_id
@@ -909,6 +918,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
 
         if batch_illusts:
             winners = _insert_new_illusts(db, batch_illusts)
+            new_pids.update(pid for pid in winners if pid not in existing_map)
             for pid in batch_pids:
                 if pid in winners:
                     # 通常已在 `_publish_detail` 里发过（PID 去重会吞掉这次）；
@@ -925,7 +935,7 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
         fetch_stats['seconds'] = time.time() - fetch_start
         _last_fetch_stats.update(fetch_stats)
 
-    return _ProcessedItems(results, rate_limited=rate_limited)
+    return _ProcessedItems(results, rate_limited=rate_limited, new_pids=new_pids)
 
 
 def _illust_from_item(item: dict, detail: dict | None = None) -> Illust:
@@ -1260,7 +1270,7 @@ def fetch_following(page: int = 1, r18_mode: str = 'all') -> tuple[list[dict], b
     # 关注页不需要"残缺页不进缓存"的守卫：它恒走 defer 路径且不传 min_bookmarks，
     # `_process_items` 里会消耗预算的 to_fetch / 会因限流截断的 to_refetch 两条分支
     # 都不会进（后者要求 min_bookmarks > 0），上游异常在到达这里之前就已抛出。
-    _cache_put(cache_key, (results, has_next))
+    _cache_put(cache_key, (list(results), has_next))
     return results, has_next
 
 

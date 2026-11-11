@@ -343,7 +343,9 @@ class TestListEnvelopePaths:
         session = _FixtureSession(payload)
         items, total = pixiv_client.fetch_search_illusts(
             session, 'サンプル', sort_order='date_d', r18_mode='all', page=1)
-        assert items == payload['body']['illust']['data'], '搜索条目必须取自 body.illust.data'
+        expected = [x for x in payload['body']['illust']['data']
+                    if x.get('id') and not x.get('isAdContainer')]
+        assert items == expected, '搜索条目必须取自 body.illust.data 且剔除广告容器'
         assert total == payload['body']['illust']['total'], '搜索总数必须取自 body.illust.total'
 
         # 发现页：条目来自 body.thumbnails.illust，但**非插画条目（漫画/小说）被剔除**
@@ -377,6 +379,26 @@ class TestListEnvelopePaths:
 
 
 class TestSearchContract:
+    def test_search_filters_ad_containers(self):
+        """搜索列表会混入广告容器（`{"isAdContainer": true}`），必须剔除。
+
+        真实联调（2026-11-11）发现：搜索第 39 条是广告容器，`item_pixiv_id`
+        对它抛 `KeyError: 'id'`，`paginated_search` 把整页判失败 → 搜索返回 0 条。
+        这是协议形态，不是"作品缺失"，过滤点应放在适配层的列表解析。
+        """
+        payload = _load('search_illustrations.json')
+        entries = payload['body']['illust']['data']
+        expected = [x for x in entries if x.get('id') and not x.get('isAdContainer')]
+        entries.insert(0, {'isAdContainer': True})
+
+        session = _FixtureSession(payload)
+        items, total = pixiv_client.fetch_search_illusts(
+            session, 'サンプル', sort_order='date_d', r18_mode='all', page=1)
+
+        assert items == expected, '广告容器不得进入作品列表'
+        assert all(item.get('id') for item in items), '透传的每条都必须带 id'
+        assert total == payload['body']['illust']['total']
+
     def test_summary_normalises_every_field_we_store(self):
         payload = _load('search_illustrations.json')
         item = payload['body']['illust']['data'][0]
