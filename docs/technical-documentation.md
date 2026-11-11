@@ -1,7 +1,9 @@
 # 项目技术文档 — Pixiv Viewer
 
 > 本文档由对 `E:\pixiv` 仓库全量源码的逆向分析生成（2026-09）。所有技术结论均标注源码位置（`文件::符号名`）；**刻意不写行号** —— 行号随任何重构整体偏移，留着比没有更误导（本文件曾有 160+ 处行号引用，已全部清除），需要精确定位时 `grep` 搜符号即可。无法从源码确认的内容明确标注 `未确认` 或 `推测`。
-> 符号约定：`文件::符号名` 指该文件内定义的符号。`docs/risk-audit-report.md` 是审计当时的快照，按其原始口径保留行号，不与本文档同规范。本仓库无 README，工程级约定以 `AGENTS.md` 为唯一入口文档，本文档与其互补（面向长期维护/交接的完整技术说明），不替代 `docs/architecture.md`（模块地图+测试契约）与 `docs/maintenance.md`（运维手册）。
+> 符号约定：`文件::符号名` 指该文件内定义的符号。`docs/risk-audit-report.md` 是审计当时的快照，按其原始口径保留行号，不与本文档同规范。README.md 面向使用者（安装/配置/部署），工程级约定以 `AGENTS.md` 为入口文档，本文档与其互补（面向长期维护/交接的完整技术说明），不替代 `docs/architecture.md`（模块地图+测试契约）与 `docs/maintenance.md`（运维手册）。
+>
+> ⚠ 版本提示（2026-11-10）：代码已从仓库根收进 `pixivviewer/` 包（`config.py` → `pixivviewer/config.py`，路由 → `pixivviewer/routes/*.py`）；本文档符号引用沿用重构前的文件名，符号名本身未变，当前目录布局以 `AGENTS.md` / `README.md` 为准。
 
 ## 目录
 
@@ -145,22 +147,24 @@ sequenceDiagram
 
 ```text
 E:\pixiv\
-├── AGENTS.md                      # 唯一工程入口文档（命令/架构/约定/测试契约/并发约定/性能基线）
-├── app.py                         # 组装入口（152 行）：Flask app、ProxyFix、SECRET_KEY、Session 加固、
-│                                  #   注册 6 Blueprint、启动后台线程、4 个页面路由；app 命名空间补丁契约
-├── config.py                      # 常量 + .env（setdefault 手写解析）+ instance/settings.json import 时覆盖；
-│                                  #   SETTINGS_KEYS 是设置键唯一来源
-├── models.py                      # SQLAlchemy ORM（4 表）+ init_db / get_session / safe_commit
-├── runtime.py                     # 进程内存状态（-w 1 语义）：扫描缓存/限流存储/搜索任务/下载队列/预取状态
-├── helpers.py                     # 纯工具与库内查询：缓存淘汰、下载目录扫描、URL 工具、query_cached_tag
-├── middleware.py                  # 认证 / CSRF / 限流 / 安全头；app 级钩子随 middleware_bp 全局生效
-├── background.py                  # 后台线程与下载引擎：自动关注、预取（含最终收藏数刷新状态机）、下载执行器、启动重置
-├── fetcher.py                     # Pixiv API 封装（1373 行）：认证、搜索、详情、令牌桶、重试策略、预算、取消、入库
-├── routes_search.py               # /search（异步任务）、/api/search/status、/api/cache/*、/api/following
-├── routes_gallery.py              # /gallery、/detail、/api/gallery*、/thumb、/api/image、/api/open-dir
-├── routes_download.py             # /download 系列、/api/downloads、/download_file、下载管理页
-├── routes_prefetch.py             # /api/prefetch/{config,tags,status,refresh,refresh-reset}
-├── routes_settings.py             # /login、/settings、/api/settings、/api/blocked-tags、/api/auto-follow/*
+├── AGENTS.md                      # 工程入口文档（命令/架构/约定/测试契约/并发约定/性能基线）
+├── README.md                      # 面向使用者的说明（安装/配置/部署，2026-11 新增）
+├── app.py                         # 组装入口：Flask app（Flask('pixivviewer')）、ProxyFix、SECRET_KEY、
+│                                  #   Session 加固、注册 7 Blueprint、启动后台线程、4 个页面路由；app 命名空间补丁契约
+├── pixivviewer/                   # 应用包（2026-11 起代码全部收进这里）
+│   ├── __init__.py                # 刻意保持轻量：不 import config/models（测试库防线依赖这个顺序）
+│   ├── config.py                  # 常量 + .env（setdefault 手写解析）+ instance/settings.json import 时覆盖；
+│   │                              #   SETTINGS_KEYS 是设置键唯一来源
+│   ├── models.py                  # SQLAlchemy ORM（4 表）+ init_db / get_session / safe_commit
+│   ├── runtime.py                 # 进程内存状态（-w 1 语义）：扫描缓存/限流存储/搜索任务/下载队列/预取状态
+│   ├── helpers.py                 # 纯工具与库内查询（叶子：模块级不 import models）
+│   ├── middleware.py              # 认证 / CSRF / 限流 / 安全头；app 级钩子随 middleware_bp 全局生效
+│   ├── pixiv_client.py            # Pixiv 适配层：端点/认证/连接池/令牌桶/信封判定/字段解析
+│   ├── fetcher.py                 # Pixiv 业务层：搜索、详情、预算、取消、入库、后台补全
+│   ├── background.py              # 后台线程与下载引擎：自动关注、预取（含最终收藏数刷新状态机）、下载执行器、启动重置
+│   ├── routes/                    # 6 个 Blueprint：home / search / gallery / download / prefetch / settings
+│   ├── templates/                 # 9 个 Jinja2 模板
+│   └── static/                    # app.js / page-*.js / style.css / vendor（原生 JS，无构建）
 ├── migrations/
 │   ├── __init__.py                # 导出 MIGRATIONS / LATEST_SCHEMA_VERSION / run_migrations
 │   ├── runner.py                  # PRAGMA user_version 版本化迁移 + 迁移前自动备份（backup_database）
@@ -170,14 +174,7 @@ E:\pixiv\
 │   ├── sandbox_pytest_shim.py     # DSH 沙箱专用插件：剥 os.mkdir 的 mode（0o700 → ACL 问题）
 │   ├── pixiv-cleanup.sh           # 仅清理已下载原图（30 天前 + 收藏 <100），realpath 越界保护
 │   └── _inspect_db.py             # 巡检：打印表名与硬编码表名行数（表名清单已同步 v5 删表）
-├── tests/                         # conftest + 测试文件（实测收集 431 条 = 429 passed / 2 skipped / 0 failed，约 19s；
-│                                  #   2026-09-30 全量重排为"一个用例 = 一个不变式"，同构变体走循环，见 AGENTS.md「测试」）
-├── templates/                     # 8 个 Jinja2 模板（index/gallery/detail/downloads/cache/settings/settings_unlock/login）
-├── static/
-│   ├── app.js                     # 共享工具（$ / escHtml / proxyThumb / fmtSize / pvCache / showToast ...）
-│   ├── page-*.js                  # page-index/gallery/detail/downloads/cache/settings/login/settings_unlock（按页入口）
-│   ├── style.css                  # 粉色系设计令牌、响应式、prefers-reduced-motion 降级
-│   └── vendor/bootstrap-5.3.3/    # 本地 vendor（bootstrap.min.css / bootstrap.bundle.min.js）
+├── tests/                         # conftest + 测试文件（当前 460 passed / 2 skipped，约 19s；见 AGENTS.md「测试」）
 ├── docs/
 │   ├── architecture.md            # 模块地图 + -w 1 语义 + app 命名空间测试补丁契约（改动前必读）
 │   ├── maintenance.md             # 运维手册（存储分类 / 备份回退 / gunicorn 部署 / 清理脚本）
@@ -197,7 +194,7 @@ E:\pixiv\
 └── 0001-fix-reset-stuck-prefetch-*.patch  # 外部补丁（引入 _reset_stuck_prefetch，已并入启动序列）
 ```
 
-分类：**核心代码**＝根目录 14 个 Python 模块 + templates/ + static/；**基础设施**＝migrations/ + scripts/；**配置**＝config.py + 3 个 requirements + pytest.ini + .gitignore；**测试**＝tests/；**工具**＝scripts/_inspect_db.py、scripts/pixiv-cleanup.sh；**入口**＝app.py（`app:app`）；**参考/可选**＝opendesign/、pixiv-api-http-main/、*.patch；**运行数据**＝instance/、downloads/、cookies.txt（全部 gitignore）。
+分类：**核心代码**＝`pixivviewer/`（9 个模块 + routes/ + templates/ + static/）；**基础设施**＝migrations/ + scripts/；**配置**＝`pixivviewer/config.py` + 3 个 requirements + pytest.ini + .gitignore；**测试**＝tests/；**工具**＝scripts/_inspect_db.py、scripts/pixiv-cleanup.sh；**入口**＝app.py（`app:app`）；**文档**＝README.md + AGENTS.md + docs/；**参考/可选**＝opendesign/、pixiv-api-http-main/、*.patch；**运行数据**＝instance/、downloads/、cookies.txt（全部 gitignore）。
 
 ## 7. 模块说明
 
@@ -1436,5 +1433,5 @@ plans（11）：对应上述课题的实施计划与 08-20 个人自用维护整
 [x] 是否泄露 Secret                —— 已检查：未输出任何密钥/Cookie 原文（§15.4 明示）
 [x] Mermaid 图是否与源码一致        —— 5 图均按真实模块/流程绘制（§5/§8/§9/§10/§17）
 [x] 是否存在重复或矛盾描述         —— 已核对：§13.7 错误码表与 §17 异常表一致；未发现矛盾
-[ ] （N/A）README 分析             —— 仓库无 README（AGENTS.md 为入口文档，已在开头说明）
+[x] README 分析                    —— README.md 面向使用者（安装/配置/部署）；AGENTS.md 仍是工程入口（2026-11 新增 README）
 ```

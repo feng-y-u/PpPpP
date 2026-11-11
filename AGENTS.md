@@ -2,7 +2,7 @@
 
 Flask Web 应用，通过 Pixiv 内部 Ajax API（非官方）搜索/浏览/下载 Pixiv 插画。单人自部署服务。
 
-**本仓库无 README —— 本文件是唯一的工程入口文档**，涵盖命令、架构、约定。设计工作流见文末「设计任务（opendesign）」。
+**README.md 面向使用者（安装 / 配置 / 部署），本文件是工程入口文档**（命令、架构、约定、测试契约），改代码前先读这一份。设计工作流见文末「设计任务（opendesign）」。
 
 **技术栈**：Python（开发/测试实际运行 3.13，语法下限 3.9+）/ Flask 3.1 / SQLAlchemy 2.0 / SQLite(WAL) / Bootstrap 5.3 / 原生 ES2020 JS（无构建步骤）/ requests / gunicorn / pytest。无 linter、无类型检查、无打包配置。
 
@@ -44,6 +44,7 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | 文件 | 作用 |
 |------|------|
 | `app.py`（仓库根）| 组装入口（Flask app / 配置 / 注册 7 个 Blueprint / 启动后台线程）+ 5 个页面路由（`/` 首页、`/explore` 搜索页、`/cache`、`/csrf-token`、`/favicon.ico`） |
+| `README.md` | 面向使用者的说明：功能、快速开始、配置、生产部署、已知限制 |
 | `pixivviewer/config.py` | 常量、`.env` 与 `instance/settings.json` 覆盖；`SETTINGS_KEYS` 是**设置键的唯一来源**（config 与设置页共用） |
 | `pixivviewer/models.py` | SQLAlchemy ORM：`Illust`、`BlockedTag`、`DownloadLog`、`SearchCache`；`init_db` / `get_session` / `safe_commit` |
 | `pixivviewer/runtime.py` | 进程内存状态（`-w 1` 单进程常驻）：扫描/TTL 缓存、预取状态、下载队列与进度、限流存储、异步搜索任务、`/thumb` 取图统计、滚动快照状态、凭据体检缓存 |
