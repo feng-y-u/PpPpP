@@ -74,12 +74,14 @@
   border-bottom: 1px solid currentColor;
 }
 
-/* ── 纯图瀑布流 ── */
-.masonry { column-count: 3; column-gap: 18px; }
+/* ── 纯图瀑布流：JS 分列（最短列优先）──
+   不用 CSS 多列（column-count）：多列是"列优先 + 自动平衡"，每追加一批都会重算
+   断列点，已经看过的卡片会被搬到别的列 —— 症状是"后两列总在刷新"。
+   改成独立列容器后，新卡片只往当前最矮的列追加，已落位的卡片不再移动。 */
+.masonry { display: flex; align-items: flex-start; gap: 18px; }
+.masonry-col { flex: 1 1 0; min-width: 0; }
 .masonry-item {
   width: 100%; margin-bottom: 18px;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
   animation: cardIn .52s cubic-bezier(.22,.61,.36,1) backwards;
 }
 .masonry-item:nth-child(1) { animation-delay: .01s; }
@@ -91,9 +93,9 @@
 .masonry-item:nth-child(7) { animation-delay: .22s; }
 .masonry-item:nth-child(8) { animation-delay: .255s; }
 .masonry-item:nth-child(n+9) { animation-delay: .29s; }
-@media (max-width: 992px) { .masonry { column-count: 2; } }
+/* 列数（3 / 2）由 page-home.js 按 992px 断点决定：DOM 里的列容器个数必须与布局一致 */
 @media (max-width: 640px) {
-  .masonry { column-count: 2; column-gap: 8px; }
+  .masonry { gap: 8px; }
   .masonry-item { margin-bottom: 8px; }
 }
 
@@ -239,11 +241,9 @@
 }
 
 /* ── 随机推荐分隔条 / 加载结束提示 ── */
-/* column-span: all 让分隔条横跨三列，把"48 小时热门"与"缓存随机推荐"两段分开；
-   不支持的旧浏览器会退化成某一列里的普通块，功能不受影响。 */
+/* 分隔条把"48 小时热门"与"缓存随机推荐"两段分开：它是 #homeGrid 下的普通块，
+   两段各是一个 .masonry 列段，所以天然整行（不再需要跨列属性）。 */
 .feed-divider {
-  column-span: all;
-  -webkit-column-span: all;
   margin: 4px 0 20px;
   padding: 11px 0 0;
   font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em;
@@ -299,7 +299,7 @@
     <div>加载中...</div>
   </div>
 
-  <div id="homeGrid" class="masonry"></div>
+  <div id="homeGrid"></div>
   <div id="homeFeedEnd" class="feed-end" style="display:none;"></div>
 
   <div id="homeEmpty" class="empty-wrap" style="display:none;">

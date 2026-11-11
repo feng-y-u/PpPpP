@@ -7,6 +7,7 @@
 from datetime import datetime, timedelta, timezone
 from base64 import urlsafe_b64decode
 import pathlib
+import re
 
 import pytest
 
@@ -342,12 +343,31 @@ class TestHomePages:
         assert b'page-home.js' in page.data
 
         js = pathlib.Path('pixivviewer/static/page-home.js').read_text(encoding='utf-8')
-        assert 'grid.appendChild(node)' in js, '卡片必须显式挂进 #homeGrid'
+        assert 'placeIntoColumns(bandHot, node)' in js and 'placeIntoColumns(bandMore, node)' in js, \
+            '卡片必须显式挂进列容器（renderInChunks 不负责插入）'
         assert 'lightbox' not in js, '灯箱已移除'
         assert 'window.location.href = `/detail/${r.pixiv_id}`' in js, \
             '点卡片要跳详情页'
         assert 'card-meta-title' in js and 'card-meta-artist' in js, \
             '信息牌只放名称与作者'
+
+    def test_home_masonry_uses_js_columns_not_css_multicol(self, client):
+        """首页瀑布流必须是 JS 分列，不能退回 CSS 多列（`column-count`）。
+
+        回归背景：CSS 多列是"列优先 + 自动平衡"，每追加一批就要重算断列点，
+        已经看过的卡片会被搬到别的列 —— 用户反馈"后两列看着看着就刷新"
+        （2026-11-11）。JS 分列按"最短列优先"追加，已落位的卡片不再移动。
+        """
+        html = client.get('/').get_data(as_text=True)
+        # 只认"声明"（`column-count:` / `column-span:`），注释里提到这两个词是允许的
+        assert not re.search(r'column-count\s*:', html), \
+            '首页不能用 CSS 多列（追加会跨列重排）'
+        assert not re.search(r'column-span\s*:', html), '分隔条不再需要跨列'
+
+        js = pathlib.Path('pixivviewer/static/page-home.js').read_text(encoding='utf-8')
+        assert "className = 'masonry-col'" in js, '列容器由脚本创建（个数必须与列数一致）'
+        assert 'offsetHeight' in js, '最短列优先要读实时列高'
+        assert 'matchMedia' in js, '列数（3/2）按视口断点由脚本判定'
 
     def test_home_and_explore_render_their_own_pages(self, client):
         """`/` 是首页（page-home.js），搜索页迁到 `/explore`（`/search` 是异步 API）。"""
