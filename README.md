@@ -23,7 +23,7 @@
 
 ## 环境要求
 
-- Python 3.9+（开发与测试在 3.13 上跑）
+- Python 3.9+（3.9.25、3.12.14、3.13.13 均完成验证；Linux 3.12.3 可直接使用）
 - Windows / Linux 均可
 - 一个能用的 Pixiv Cookie（见下）
 
@@ -71,7 +71,10 @@ python app.py
 | 键 | 说明 |
 |---|---|
 | `PIXIV_INSTANCE_DIR` | 把整个实例目录（DB / 密钥 / settings / 图片缓存）搬到别处；必须在启动前设置 |
-| `ACCESS_PASSWORD` | 全站访问密码；留空 = 免认证，公网部署务必设置 |
+| `ACCESS_PASSWORD` | 全站访问密码；留空 = 仅本机（loopback）免认证，其他来源会被 403，公网部署务必设置 |
+| `ALLOW_UNAUTHENTICATED_PUBLIC` | 默认 `false`；确实要在无密码状态下接受公网访问时设为 `true`（风险自负） |
+| `TRUSTED_PROXIES` | 可信反代 CIDR，逗号分隔；默认 `127.0.0.0/8,::1/128`。只有来自这些地址的 `X-Forwarded-For` 才会被采信 |
+| `LOCAL_NETWORKS` | 免认证认可的“本机/内网”CIDR，逗号分隔；默认仅 loopback。要无密码访问内网时显式加入，例如 `127.0.0.0/8,192.168.1.0/24` |
 | `COOKIE_SECURE` | 默认 `true`；本地 HTTP 调试设为 `false` |
 | `PROXY` | HTTP/SOCKS5 代理，如 `http://127.0.0.1:7890` |
 | `SSL_VERIFY` | 默认 `true`；仅在代理做 TLS 拦截时关闭，先跑 `python scripts/check_tls.py` 判定 |
@@ -118,9 +121,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 pytest -q
 ```
 
-当前基线：**460 passed / 2 skipped / 0 failed**，约 19s。测试完全离线，不需要真实 Cookie。
+当前基线：**482 passed / 2 skipped / 0 failed**（484 collected），约 20s。测试完全离线，不需要真实 Cookie。Python 3.9.25 完成 import/启动/关键测试，3.12.14 与 3.13.13 完成全量测试；发布质量门槛与已知技术债见 [QUALITY_BASELINE.md](QUALITY_BASELINE.md)。
 
-更多工程约定（模块依赖、测试补丁 seam、性能与并发注意事项）见 [AGENTS.md](AGENTS.md)、[docs/architecture.md](docs/architecture.md)；运维手册（备份恢复、TLS、公网清单）见 [docs/maintenance.md](docs/maintenance.md)。
+更多工程约定（模块依赖、测试补丁 seam、性能与并发注意事项）见 [AGENTS.md](AGENTS.md)、[docs/architecture.md](docs/architecture.md)；发布质量基线见 [QUALITY_BASELINE.md](QUALITY_BASELINE.md)；运维手册（备份恢复、TLS、公网清单）见 [docs/maintenance.md](docs/maintenance.md)。
 
 ## 已知限制
 

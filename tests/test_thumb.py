@@ -503,6 +503,43 @@ def test_thumb_cache_hit_serves_from_disk_without_network(thumb_env, client):
     assert os.stat(cache_path).st_mtime_ns == before, '读缓存不得改 mtime'
 
 
+def test_thumb_does_not_cache_non_raster_content_type(thumb_env, client):
+    """上游 200 但 Content-Type 不是位图（如 text/html）→ 502 且不落盘。
+
+    旧实现把上游 Content-Type 原样写进 `.meta` 并回放；图床/越界重定向若返回
+    HTML（错误页、SVG 等），`/thumb` 就会以 text/html 或 image/svg+xml 送出，
+    顶层直接打开时可在同源执行脚本（CSP 只管页面里的 img，不管顶层导航）。
+    审计 P2-1：只缓存明确的白名单位图类型。
+    """
+    url = f'{THUMB}?ct=html'
+    thumb_env['registry'].add(url, headers={'Content-Type': 'text/html; charset=utf-8'})
+
+    resp = client.get(f'/thumb/{_b64(url)}')
+
+    assert resp.status_code == 502, f'非位图响应必须按取图失败处理，实际 {resp.status_code}'
+    cache_path, meta_path = _cache_paths(url)
+    assert not os.path.exists(cache_path), '非位图响应不得写入图片缓存'
+    assert not os.path.exists(meta_path)
+
+
+def test_thumb_rejects_svg_redirect_target(thumb_env, client):
+    """B 级跨域重定向返回 image/svg+xml 也必须拒绝（审计 P2-1）。
+
+    `image/svg+xml` 以 `image/` 开头，旧逻辑只检查前缀会放行；SVG 可携带脚本，
+    顶层直接打开 `/thumb/...` 时是同源执行。必须走位图白名单并 502，不落盘。
+    """
+    thumb_env['registry'].redirect(THUMB, CROSS_TARGET)
+    thumb_env['registry'].add(
+        CROSS_TARGET, headers={'Content-Type': 'image/svg+xml'})
+
+    resp = client.get(f'/thumb/{_b64(THUMB)}')
+
+    assert resp.status_code == 502
+    cache_path, meta_path = _cache_paths(THUMB)
+    assert not os.path.exists(cache_path), 'SVG 重定向响应不得写入图片缓存'
+    assert not os.path.exists(meta_path)
+
+
 def test_thumb_cache_hit_without_meta_falls_back_to_extension(thumb_env, client):
     """`.meta` 缺失或为空时**按扩展名**回放 Content-Type，不能一律当 jpeg。
 

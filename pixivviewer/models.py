@@ -4,7 +4,7 @@ import json
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, Index
 from sqlalchemy.exc import OperationalError
@@ -92,20 +92,20 @@ class Illust(Base):
     tags: Mapped[str] = mapped_column(Text, default='[]')
     page_count: Mapped[int] = mapped_column(Integer, default=1)
     bookmark_count: Mapped[int] = mapped_column(Integer, default=0)
-    bookmark_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
-    upload_date: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    bookmark_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+    upload_date: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     thumb_url: Mapped[str] = mapped_column(String, default='')
     original_urls: Mapped[str] = mapped_column(Text, default='[]')
-    local_paths: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    download_status: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
-    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    local_paths: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    download_status: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    downloaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     prefetch_source: Mapped[int] = mapped_column(Integer, default=0)
     # 预取作品"最终收藏数"刷新标记：入库满 1 天后刷新一次收藏数并写入该时间戳
-    prefetch_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    prefetch_refresh_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
     # 预取刷新失败退避时间戳：失败写、成功清；退避期内不再入选候选，
     # 防止永久失败的死作品占住刷新队列名额（配合 _prefetch_refresh_bookmarks）
-    refresh_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    refresh_failed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -205,7 +205,7 @@ class SearchCache(Base):
     # 「吉星排队」与「星引擎party」这种同义标签合并成一行，结果并集去重，
     # 避免缓存页出现两个高度重叠的条目。老数据 '[]' → 行为与单标签完全一致。
     alias_tags: Mapped[str] = mapped_column(Text, default='[]')
-    cached_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cached_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String, default='idle')
     error: Mapped[str] = mapped_column(String, default='')
     total: Mapped[int] = mapped_column(Integer, default=0)

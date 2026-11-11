@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 bp = Blueprint('gallery', __name__)
 
+# 批量删除单次上限：ids 会拼进 `IN (...)`，1MB body 可塞几万个 id，逼近 SQLite
+# 绑定参数上限（32766）并对每个 id 做磁盘操作；正常一屏操作远小于此（审计 P2-4）。
+_BATCH_MAX_IDS = 500
+
 # 缩略图代理磁盘缓存目录：路径由 config 的实例目录派生（单一来源；此前这里与 app.py
 # 各写一份，靠注释约定保持一致，PIXIV_INSTANCE_DIR 一旦重定向就会漏改）
 CACHE_DIR = os.path.join(_instance_dir, 'image_cache')
@@ -44,6 +48,21 @@ CACHE_DIR = os.path.join(_instance_dir, 'image_cache')
 
 class _ThumbRedirectRejected(requests.RequestException):
     """越界重定向未通过校验 —— 按"本次缩略图获取失败"收尾（失败冷却 + 502）。"""
+
+
+# 允许落盘/回放的图片类型白名单（审计 P2-1）。
+# 上游（图床错误页、越界重定向目标）可能返回 200 + text/html 或 image/svg+xml：
+# 旧实现把它们原样写入 `.meta` 并在 `/thumb` 回放，顶层直接打开该 URL 时就是
+# 同源 HTML/SVG（CSP 的 img-src 只管页面内嵌，不管顶层导航）。这里只认位图。
+_CACHEABLE_IMAGE_TYPES = frozenset({
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+})
+
+
+def _normalized_image_type(content_type: str | None) -> str:
+    """取 `Content-Type` 的主类型（去参数、小写）；缺失时按 jpeg 兼容旧缓存。"""
+    value = (content_type or '').split(';', 1)[0].strip().lower()
+    return value or 'image/jpeg'
 
 
 def _is_redirect_response(resp) -> bool:
@@ -125,12 +144,12 @@ def _follow_thumb_redirect(target: str):
     # Cookie 头发给任意主机（见 fetcher.build_credentialless_session 注释）。
     resp = _thumb_request(target, with_cookie=False)
     content_type = resp.headers.get('Content-Type', '')
-    if not content_type.lower().startswith('image/'):
+    if _normalized_image_type(content_type) not in _CACHEABLE_IMAGE_TYPES:
         resp.close()
         runtime.note_thumb_redirect_rejected(host)
-        logger.warning(f'/thumb 跨域重定向目标不是图片（Content-Type={content_type!r}），'
+        logger.warning(f'/thumb 跨域重定向目标不是位图（Content-Type={content_type!r}），'
                        f'拒绝落盘: {target}')
-        raise _ThumbRedirectRejected('重定向目标不是图片')
+        raise _ThumbRedirectRejected('重定向目标不是位图')
 
     if runtime.note_thumb_redirect_host(host, url=target, content_type=content_type):
         logger.warning(
@@ -169,6 +188,10 @@ def thumb_proxy(url_b64: str) -> Response:
             with open(meta_path) as f:
                 mimetype = f.read().strip()
         if not mimetype:
+            mimetype = mimetypes.guess_type(cache_path)[0] or 'image/jpeg'
+        elif _normalized_image_type(mimetype) not in _CACHEABLE_IMAGE_TYPES:
+            # 旧缓存可能写过 text/html / image/svg+xml：回放时按扩展名兜底，
+            # 绝不能把历史脏 meta 继续以危险类型送出去。
             mimetype = mimetypes.guess_type(cache_path)[0] or 'image/jpeg'
         runtime.note_thumb_served(cache_hit=True)
         return send_file(cache_path, mimetype=mimetype, max_age=86400 * 7)
@@ -209,6 +232,13 @@ def thumb_proxy(url_b64: str) -> Response:
                     logger.warning(f'/thumb 重定向目标再次重定向（{status}），拒绝递归跟随')
                     raise _ThumbRedirectRejected('重定向嵌套')
             resp.raise_for_status()
+            mimetype = resp.headers.get('Content-Type', 'image/jpeg')
+            if _normalized_image_type(mimetype) not in _CACHEABLE_IMAGE_TYPES:
+                # 200 + 非位图（错误页/HTML/SVG）：按取图失败处理，绝不写缓存。
+                # 必须留在本 try 内，才能走统一的失败冷却/502 分支（审计 P2-1）。
+                resp.close()
+                raise _ThumbRedirectRejected(
+                    f'上游返回非位图 Content-Type: {_normalized_image_type(mimetype)}')
         finally:
             _thumb_sem.release()
     except requests.RequestException as e:
@@ -362,6 +392,9 @@ def detail_page(pixiv_id: int) -> str:
         proxy_thumb=_proxy_thumb,
         fmt_num=_fmt_num,
         csrf_token=_get_csrf_token(),
+        # 跨作品翻页的页大小必须与图库同源：详情页按它把全局 pos 换算成页号，
+        # 写死会与图库的 ITEMS_PER_PAGE 分页错位（审计 P1-3）。
+        items_per_page=ITEMS_PER_PAGE,
     )
 
 
@@ -593,9 +626,13 @@ def batch_delete_gallery() -> Response:
     ids = body.get('ids', [])
     if not ids or not isinstance(ids, list):
         return jsonify({'error': '请提供作品ID列表'}), 400
+    if len(ids) > _BATCH_MAX_IDS:
+        return jsonify({'error': f'单次最多删除 {_BATCH_MAX_IDS} 个作品'}), 400
 
     with get_session() as db:
-        pixiv_ids = [int(pid) for pid in ids if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())]
+        pixiv_ids = list(dict.fromkeys(
+            int(pid) for pid in ids
+            if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())))
         illusts = db.query(Illust).filter(Illust.pixiv_id.in_(pixiv_ids)).all()
         handled = {i.pixiv_id for i in illusts}
         deleted_count = 0     # 确实删掉了文件的作品数（`deleted` 字段沿用该语义）

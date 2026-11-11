@@ -255,6 +255,34 @@ _SETTINGS_DEFAULTS = {
 }
 
 
+def _sanitize_settings(data: dict) -> dict:
+    """把 settings.json 的原始值收敛到当前允许范围。
+
+    为什么不在读取时直接信任文件：旧版本设置页允许保存 0/越界值，升级后
+    `config.py` 会在启动时忽略它们并回退默认，但设置页若仍显示 0，用户点一次
+    保存就会被新的边界校验 400 拒绝 —— 页面从此无法保存任何配置。这里按
+    `SETTINGS_BOUNDS` 清洗：非法数值回退默认，合法数值保留，非数值键原样透传
+    （密码/Cookie 等仍由调用方处理）。
+    """
+    result = dict(_SETTINGS_DEFAULTS)
+    for key, value in data.items():
+        bounds = config_module.SETTINGS_BOUNDS.get(key)
+        if bounds is not None:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            low, high = bounds
+            if number < low or (high is not None and number > high):
+                continue
+            result[key] = number
+        elif key == 'auto_follow_download':
+            result[key] = bool(value)
+        else:
+            result[key] = value
+    return result
+
+
 def _load_settings() -> dict:
     import app  # 延迟导入读取 app._SETTINGS_PATH：
     #             tests monkeypatch('app._SETTINGS_PATH')（test_prefetch_api.py
@@ -263,9 +291,7 @@ def _load_settings() -> dict:
         try:
             with open(app._SETTINGS_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            result = dict(_SETTINGS_DEFAULTS)
-            result.update(data)
-            return result
+            return _sanitize_settings(data)
         except Exception:
             logger.warning('设置文件读取失败，使用默认设置')
     return dict(_SETTINGS_DEFAULTS)
@@ -328,19 +354,40 @@ def api_settings_post() -> Response:
     body = _get_json_body()
     current = _load_settings()
 
-    # Cookie 字段特殊处理：写入适配层实际读取的那个文件，并立即同步进程内缓存
+    # 先只校验 Cookie 值，不落盘：后面的数值校验失败时不能留下"Cookie 已改、
+    # 设置没保存"的半成品状态（审计 P2-1）。
     cookie_val = body.pop('cookie', '').strip()
+    clean_val = ''
     if cookie_val:
         # 剔除换行/控制字符，防止向 cookies.txt 注入多行破坏鉴权
         clean_val = re.sub(r'[\r\n\t\x00-\x1f\x7f]', '', cookie_val).strip()
         if not clean_val:
             return jsonify({'error': 'Cookie 内容无效'}), 400
-        # 落点必须是 `pixiv_client.COOKIE_PATH` 读的那个文件（= config.COOKIE_PATH；
-        # Linux 上存在 /etc/pixiv-viewer/cookies.txt 时就是它）。此前硬编码项目根目录，
-        # 在那种部署里等于"写一个没人读的文件"：进程内靠直接赋值缓存显得生效，
-        # 重启后旧 Cookie 复辟；而且 get_pooled_session 的失效戳盯的是 COOKIE_PATH，
-        # 新 Cookie 连当期都不会对已缓存的连接池生效。路径不可写时明确失败
-        #（错误信息带路径），不再静默写到一个无害文件然后假装成功。
+
+    # 仅合并已知的配置键；全部校验通过后才产生任何磁盘副作用。
+    for key in _SETTINGS_DEFAULTS:
+        if key in body:
+            val = body[key]
+            if key in ('auto_follow_download',):
+                val = bool(val)
+            elif key in config_module.SETTINGS_BOUNDS:
+                # 数值键必须落在 config.SETTINGS_BOUNDS 区间内：设置页的
+                # `<input min/max>` 不会在 fetch 保存时生效，清空输入框还会把
+                # 空串变成 0。0 个下载线程 / 0 个详情线程 / 0 上限预取缓存
+                # 都会在保存后（或下次启动时）造成实际故障，见审计 P1-2。
+                try:
+                    val = int(val)
+                except (ValueError, TypeError):
+                    continue
+                low, high = config_module.SETTINGS_BOUNDS[key]
+                if val < low or (high is not None and val > high):
+                    limit = f'{low}~{high}' if high is not None else f'≥{low}'
+                    return jsonify({'error': f'{key} 取值需满足 {limit}'}), 400
+            current[key] = val
+
+    # 校验全部通过，再按"先 Cookie 后设置"的历史顺序落盘：
+    # Cookie 写失败时 settings.json 一个字节都不写（已有用例钉住）。
+    if clean_val:
         cookie_path = app.COOKIE_PATH
         try:
             # 原子写：读侧在其它线程读同一路径（--threads 8），先截断再写会让它读到
@@ -353,22 +400,6 @@ def api_settings_post() -> Response:
         pixiv_client.set_cookie_cache(clean_val, os.path.getmtime(cookie_path))
         logger.info('cookies.txt 已通过设置页更新: %s', cookie_path)
 
-    # 仅合并已知的配置键
-    for key in _SETTINGS_DEFAULTS:
-        if key in body:
-            val = body[key]
-            if key in ('auto_follow_download',):
-                val = bool(val)
-            elif key in ('download_max_workers', 'per_page', 'search_pages',
-                         'max_bookmarks_default', 'auto_follow_interval',
-                         'fetch_detail_workers', 'medium_image_size',
-                         'items_per_page', 'prefetch_interval',
-                         'prefetch_pages', 'prefetch_max_illusts'):
-                try:
-                    val = max(0, int(val))
-                except (ValueError, TypeError):
-                    continue
-            current[key] = val
     try:
         # 原子写（审计 S16）：直接 open('w') 在写盘失败/进程被杀时会留下截断的
         # settings.json，而读取侧遇到损坏只能整体回退默认 —— 用户那份配置全丢。

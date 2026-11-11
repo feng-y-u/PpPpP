@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import threading
 import time
@@ -11,6 +12,7 @@ from typing import Callable
 
 from flask import Blueprint, Response, jsonify, redirect, request, session, url_for
 
+from . import config as config_module
 from .runtime import _rate_limit_store
 
 bp = Blueprint('middleware', __name__)  # 不承载路由，仅用于挂 app 级钩子；无循环导入问题（不 import app）
@@ -58,12 +60,59 @@ def _check_rate_limit(ip: str, max_attempts: int, window: int) -> bool:
     return False
 
 
+def _direct_peer() -> str:
+    """直连对端地址（ProxyFix 改写前的 REMOTE_ADDR）。"""
+    orig = request.environ.get('werkzeug.proxy_fix.orig') or {}
+    return str(orig.get('REMOTE_ADDR') or request.environ.get('REMOTE_ADDR') or '')
+
+
+def _client_ip() -> str:
+    """限流/免认证守卫用的客户端地址：只对**显式受信**的反代信任 XFF 还原值。
+
+    ProxyFix 无条件信任 `X-Forwarded-For`：公网直连部署时，客户端每个请求换一个
+    XFF 就能换出一个新的 remote_addr，5 次/分钟的登录限流形同虚设（审计 P1-4）。
+    这里把"真实直连对端"作为信任边界：只有对端落在 `config.TRUSTED_PROXIES`
+    （默认仅 loopback）时才使用 ProxyFix 还原出的客户端地址；其他对端（公网、
+    Docker 网桥、普通内网）一律用对端本身，忽略它自带的 XFF。这样：
+      - 公网直连伪造 XFF 无效；
+      - Docker `-p` 的网桥来源不会被当成反代；
+      - 反代在别的私网地址时，必须显式把它的 CIDR 加进 TRUSTED_PROXIES。
+    """
+    peer = _direct_peer()
+    candidate = request.remote_addr or peer or 'unknown'
+    if not peer:
+        return candidate
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        # 非 IP 字面量（测试/异常 WSGI 环境）：用直连对端本身兜底，不看 XFF 还原值。
+        return peer or candidate
+    if any(addr in network for network in config_module.TRUSTED_PROXIES):
+        return candidate
+    return peer
+
+
+def _is_local_request() -> bool:
+    """当前请求是否来自免认证守卫认可的"本机"范围。
+
+    默认 `LOCAL_NETWORKS` 只有 loopback：Docker 网桥（172.17.x）和普通内网
+    （192.168/10.x）都不再自动放行，避免公网端口映射或反代漏配 XFF 时绕过守卫。
+    需要无密码访问内网时显式设 `LOCAL_NETWORKS`；反代场景还要同时配置
+    `TRUSTED_PROXIES`，否则 XFF 不会被采信。无法解析时按"非本地"处理（fail closed）。
+    """
+    try:
+        addr = ipaddress.ip_address(_client_ip())
+    except ValueError:
+        return False
+    return any(addr in network for network in config_module.LOCAL_NETWORKS)
+
+
 def _rate_limit(max_attempts: int = 5, window: int = 60) -> Callable:
     """装饰器：限制同一 IP 在 window 秒内最多 max_attempts 次请求。"""
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
-            ip = request.remote_addr or 'unknown'
+            ip = _client_ip()
             if _check_rate_limit(ip, max_attempts, window):
                 return jsonify({'error': '请求过于频繁，请稍后再试'}), 429
             return f(*args, **kwargs)
@@ -128,9 +177,34 @@ def _is_authed() -> bool:
 
 @bp.before_app_request
 def _require_login():
+    import app
+    path = request.path
+    # 先放行显式豁免路径（/login、/csrf-token、/favicon、/static）：静态资源
+    # 与登录页必须能在未认证/公网未放行时加载，否则登录页和 403 页会连样式都拿不到。
+    if path in _AUTH_EXEMPT_PATHS or any(
+        path == p or path.startswith(p + '/') for p in _AUTH_EXEMPT_PREFIXES
+    ):
+        return None
+    # 免认证只对"本机/可信反代还原后的本机"成立：ACCESS_PASSWORD 留空是单人本机
+    # 部署的既定用法，但直接挂公网时设置页（可写 cookies.txt）、删除接口、全部
+    # API 都会裸奔。需要显式接受风险时设 ALLOW_UNAUTHENTICATED_PUBLIC=1（审计 P1-5）。
+    if (not app.ACCESS_PASSWORD
+            and not app.ALLOW_UNAUTHENTICATED_PUBLIC
+            and not _is_local_request()):
+        if path.startswith('/api/') or path == '/search' or request.method != 'GET':
+            return jsonify({
+                'error': '未设置访问密码，已拒绝来自非本机/LOCAL_NETWORKS 的访问',
+                'error_code': 'PUBLIC_ACCESS_DENIED',
+            }), 403
+        return Response(
+            '<!doctype html><meta charset="utf-8">'
+            '<h1>403 Forbidden</h1>'
+            '<p>本服务未设置访问密码，只允许本机或 LOCAL_NETWORKS 配置的网段访问。'
+            '请设置 ACCESS_PASSWORD 后重试。</p>',
+            status=403, mimetype='text/html')
     if _is_authed():
         return None
-    path = request.path
+    # 免认证路径已在函数开头处理；到这里说明需要登录。
     # 前缀豁免必须以 '/' 为边界：裸 startswith('/static') 会让 '/static../.git/config'
     # 这类路径也跳过登录墙（2026-09-21 在真实部署的 nginx 日志里看到扫描器正是这么打的：
     # 该请求绕过认证墙后落到 Flask 静态路由、因无匹配文件返回 404，故不可利用，但匹配范围

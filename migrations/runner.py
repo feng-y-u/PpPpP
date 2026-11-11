@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path

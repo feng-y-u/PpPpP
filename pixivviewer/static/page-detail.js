@@ -131,7 +131,14 @@ document.addEventListener('keydown', e => {
 // 顺序跟随图库当前视图（排序/标签筛选）。序列来源：图库跳转时写入的
 // sessionStorage（pv_detail_seq）；新标签页直接粘贴 URL 时按 URL 参数现拉
 // /api/gallery 定位。两者都失败则不渲染翻页 UI。
-const PAGE_SIZE = 50;
+// 页大小必须与图库同源：图库把全局 pos 按 ITEMS_PER_PAGE 换算，详情页若写死
+// 50，会在"图库第 2 页起"跳错作品或直接失效（审计 P1-3）。读不到 meta 时保留
+// 50 作为自包含兜底（旧模板/单文件调试场景）。
+const PAGE_SIZE = (() => {
+  const n = parseInt(
+    document.querySelector('meta[name="items-per-page"]')?.getAttribute('content') || '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 50;
+})();
 const DETAIL_SEQ_KEY = 'pv_detail_seq';
 const navCtx = (() => {
   const q = new URLSearchParams(location.search);

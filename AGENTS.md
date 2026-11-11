@@ -2,9 +2,9 @@
 
 Flask Web 应用，通过 Pixiv 内部 Ajax API（非官方）搜索/浏览/下载 Pixiv 插画。单人自部署服务。
 
-**README.md 面向使用者（安装 / 配置 / 部署），本文件是工程入口文档**（命令、架构、约定、测试契约），改代码前先读这一份。设计工作流见文末「设计任务（opendesign）」。
+**README.md 面向使用者（安装 / 配置 / 部署），本文件是工程入口文档**（命令、架构、约定、测试契约），改代码前先读这一份。发布质量门槛、安全边界与已知技术债见 `QUALITY_BASELINE.md`。设计工作流见文末「设计任务（opendesign）」。
 
-**技术栈**：Python（开发/测试实际运行 3.13，语法下限 3.9+）/ Flask 3.1 / SQLAlchemy 2.0 / SQLite(WAL) / Bootstrap 5.3 / 原生 ES2020 JS（无构建步骤）/ requests / gunicorn / pytest。无 linter、无类型检查、无打包配置。
+**技术栈**：Python（3.9.25 / 3.12.14 / 3.13.13 实测；语法下限 3.9+）/ Flask 3.1 / SQLAlchemy 2.0 / SQLite(WAL) / Bootstrap 5.3 / 原生 ES2020 JS（无构建步骤）/ requests / gunicorn / pytest。无 linter、无类型检查、无打包配置。
 
 > 引用位置时用**符号名**而非行号（行号随重构腐化）。需要行号时自行 grep。
 
@@ -22,7 +22,7 @@ pip install -r requirements-lock.txt
 # 开发
 flask run --debug
 
-# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 462 用例约 19s，**当前 0 failed**，见文末「测试」）
+# 默认测试（离线；不读也不需要真实 Cookie。完整一轮 484 用例约 20s，**当前 0 failed**，见文末「测试」）
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 
 # 跑单个文件 / 单条用例 / 按关键字（run_tests.ps1 是 pytest 透传包装，pytest 参数原样可用）
@@ -139,7 +139,7 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 ### 认证
 
 - **Cookie 认证**：手动创建 `cookies.txt`，存放 `PHPSESSID=xxxxx` 或纯 token。Linux 上优先读 `/etc/pixiv-viewer/cookies.txt`。过期会静默返回空结果。**设置页写的就是 `config.COOKIE_PATH`（经 `app.COOKIE_PATH` 再导出，与适配层 `pixiv_client.COOKIE_PATH` 读的同一个值）**：两处必须同源 —— 曾经路由自己按 `__file__` 推项目根，于是存在 `/etc` 文件的部署里"写了一个没人读的文件"，重启后旧 Cookie 复辟、连接池的 mtime 失效戳也盯错了文件。该路径不可写时设置页返回 500 并给出实际路径（不再假装成功）；部署时若把 Cookie 放在 `/etc/pixiv-viewer/`，要注意写入是**同目录 tmp + 原子替换**（`helpers._atomic_write_text`）：服务进程需要**目录可写**（创建 `cookies.txt.tmp` 并 rename），只给文件写权限会 500。为什么必须原子：读侧 `pixiv_client._load_cookie()` 在其它线程读同一路径，`open(...,'w')` 先截断再写，读到空串时会把**空值连同 mtime 一起缓存住**，那条线程/连接池就一直用空 Cookie（症状："设置页保存成功但搜索仍 401，重启才恢复"，旧实现已被并发用例复现）。
-- **全局访问密码**：`ACCESS_PASSWORD` 非空时启用全站登录墙 —— `before_app_request` 拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 免认证**。`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒。登录态存 session（`authed`），7 天有效。
+- **全局访问密码**：`ACCESS_PASSWORD` 非空时启用全站登录墙 —— `before_app_request` 拦截未认证请求，页面 302 到 `/login`，API/POST 返回 401。**留空 = 仅 loopback（或 `LOCAL_NETWORKS` 显式加入的网段）免认证**；Docker 网桥、普通内网默认都不再自动放行，其他来源会被 403（审计 P1-5/P2-3）。确需无密码公网访问时设 `ALLOW_UNAUTHENTICATED_PUBLIC=true`。`POST /login` 限流 5 次/分钟 + 失败延迟 1 秒；限流键只对 `TRUSTED_PROXIES`（默认 loopback）采信 XFF，公网客户端伪造 XFF 无效。登录态存 session（`authed`），7 天有效。反代部署在非 loopback 地址时，必须把它的 CIDR 加入 `TRUSTED_PROXIES`，否则 XFF 不被采信。
 - **`COOKIE_SECURE` 默认 true**：本地 HTTP 调试必须设 `COOKIE_SECURE=false`（环境变量或 `.env`），否则登录态不回传。
 - **旧 `SETTINGS_PASSWORD` 流程仍保留**：已全局登录则直通设置页，否则走设置解锁页。
 - `_AUTH_EXEMPT_PATHS = {'/login', '/favicon.ico', '/csrf-token'}`，`/static` 前缀豁免。
@@ -154,7 +154,7 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 - **已筛出的预览作品可以立刻点开看**（`runtime.find_running_preview`）：`fetcher._process_items` 在每条详情到手时就发布 `result` 事件，而落库是整页一次的 `safe_commit`（在 `search_by_*` 里）—— 中间那些行只活在任务快照里，按 pid 查库的接口一律 404。所以 `/detail/<pid>` 查库未命中时会回退到**运行中**任务的内存快照（返回 `dict` 副本，绝不污染任务快照），模板据此渲染提示条并 **disabled 下载按钮**。三条硬边界：① 只认 `running` —— `done`/`partial` 的行已提交（查库即命中），`error`/`cancelled` 的行已回滚（兜底会渲染出不存在的结果）；② 兜底**不是**"已入库"的证明，`/download/<pid>` 与 `/api/image` 仍只认库；③ 同一 pid 有库行时**以库行为准**。
 - **提交新搜索会取消所有在途搜索任务**（`_submit_search_task` 置位旧任务的 `cancel_event`，单人应用同时只该有一个搜索在跑，旧任务继续拉详情只会烧令牌桶拖慢新搜索）。fetcher 侧取消机制：`SearchCancelledError` + `_cancel_begin/_cancel_end/_cancelled`（与详情预算同款 `threading.local`，预取/后台补全线程不受影响），检查点在 `paginated_search` 翻页前后与 `_fetch_details_parallel` 每个 worker 发请求前；**在途请求照常处理完并入库**（下次搜索命中 `existing_map` 免重拉），未发起的直接跳过。任务终态：`done` / `error` / `cancelled`（cancelled 返回 200）。前端用搜索代数（`searchGeneration`）让旧任务的轮询静默失效。
 - **所有 Pixiv 图片请求需 `Referer: https://www.pixiv.net/`**，否则 403。所有 Pixiv 请求**必须经 `pixiv_client.build_pixiv_session()`**（`fetcher` 仍再导出同名函数，老调用方无需改）构造 session，禁止裸建 `requests.Session()`。
-- **Pixiv 接口只认 `pixiv_client.py` 这一处**：Ajax 路径、查询参数名、`error`/`message`/`body` 信封、payload 字段名（`illustTitle`/`userId`/`updateDate`/`metaPages`/`isLastPage`…）全部只在适配层出现；业务层（`fetcher`）只用规范字段（`bookmark_count`/`original_urls`/`thumb_url`…）。**改 Pixiv 接口 → 只改 `pixiv_client`**；路由/后台/helpers 一律不拼 URL、不认响应字段。新增/变更字段时先看 `tests/test_pixiv_contract.py`（脱敏样本 + 离线契约测试，样本在 `tests/fixtures/pixiv/`，用 `scripts/pixiv_capture.py` 刷新）。⚠️ 适配层的有状态符号（`_cookie_value`/`_cookie_mtime`/`_total_limiter`/`_detail_error_samples`）**只在 `pixiv_client` 命名空间**，测试补丁要打在它身上 —— 打在 `fetcher` 上会静默失效。
+- **Pixiv 接口只认 `pixiv_client.py` 这一处**：Ajax 路径、查询参数名、`error`/`message`/`body` 信封、payload 字段名（`illustTitle`/`userId`/`updateDate`/`metaPages`/`isLastPage`…）全部只在适配层出现；业务层（`fetcher`）只用规范字段（`bookmark_count`/`original_urls`/`thumb_url`…）。**改 Pixiv 接口 → 只改 `pixiv_client`**；路由/后台/helpers 一律不拼 URL、不认响应字段。⚠️ 列表 payload 会混入广告容器 `{"isAdContainer": true}`（无 `id`），`parse_search_items` / `parse_discovery_items` / `parse_follow_latest` 必须过滤，否则 `item_pixiv_id` 抛 `KeyError` 会让整页搜索变 0 条（2026-11-11 真实联调发现）。新增/变更字段时先看 `tests/test_pixiv_contract.py`（脱敏样本 + 离线契约测试，样本在 `tests/fixtures/pixiv/`，用 `scripts/pixiv_capture.py` 刷新）。⚠️ 适配层的有状态符号（`_cookie_value`/`_cookie_mtime`/`_total_limiter`/`_detail_error_samples`）**只在 `pixiv_client` 命名空间**，测试补丁要打在它身上 —— 打在 `fetcher` 上会静默失效。
 - **缩略图代理 `/thumb/<base64_url>`**：入口仅允许 `https://i.pximg.net/` 白名单，磁盘缓存 7 天 + 失败 URL 冷却，防刷新时打爆图床。**重定向不自动跟随**（`allow_redirects=False`）：3xx 时按凭据分级跟随**一次** —— 目标在 `config.IMAGE_HOST_ALLOWLIST` 内用带凭据连接池；白名单外的公网 https 用无凭据连接池（要求 `Content-Type: image/*`）并记入发现表（`GET/DELETE /api/thumb/redirect-hosts`，落盘 `instance/thumb_redirect_hosts.json`，`THUMB_REDIRECT_DISCOVERY=false` 可关闭跨域跟随）。非法目标（非 https / 内网 / 云元数据 / userinfo / 非 443）与嵌套重定向、缺 `Location` 一律 502 且**不发第二次请求**。发现表**不会**自动变成白名单（白名单只决定"是否携带凭据"）—— 确认是官方 CDN 后手工加进 `config.IMAGE_HOST_ALLOWLIST` 并重启。
 - **`/thumb` 取图统计 `/api/thumb/stats`**（纯观测）：按**原因**（`http_404`/`http_403`/`http_4xx`/`http_5xx`/`timeout`/`conn_error`/`cooldown`/`sem_timeout`/`redirect_rejected`）与**主机**聚合失败计数，外加 `served`/`cache_hits` 与最近 20 条带 URL 的样本。它存在的意义就是"很多图加载不出来"这类问题：2026-09-30 的中图 404 事故当时只能靠写探针 + 逐文件比对 `image_cache` 才定位，而 `http_404` 样本会一眼指向"我们拼出来的地址在图床上不存在"。计数在进程内存里（重启清零），容量有界（原因是固定枚举、主机数封顶、样本用 `deque(maxlen=20)`）。
 - **热点路径必须复用连接池**：`/thumb` 与 `_fetch_details_parallel` 走 `pixiv_client.get_pooled_session()`（线程内复用 Session），**不要在这些循环里调 `build_pixiv_session()`**。原因见文末「连接复用」。
@@ -189,7 +189,7 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 - **上传限制 1MB**（`app.config['MAX_CONTENT_LENGTH']`）。
 - **安全头**：CSP（`script-src 'self'`，`style-src` 仍需 `unsafe-inline`，`img-src 'self' data:`）、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
 - **Werkzeug 请求日志被设为 WARNING** 级别，防 Cookie 泄露到日志。
-- 反代后经 `ProxyFix(x_for=1, x_proto=1)` 还原真实客户端 IP（限流与 open-dir 本机判断依赖它）。
+- 反代后经 `ProxyFix(x_for=1, x_proto=1)` 还原真实客户端 IP；但限流/免认证守卫只对 `TRUSTED_PROXIES`（默认 loopback）采信 XFF，其他对端一律用直连地址（见 `middleware._client_ip`）。
 
 ### 下载
 
@@ -224,7 +224,7 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 462 条 = 460 passed / 2 skipped / 0 failed**，约 18s（2026-11-10 首页随机推荐落地后复核；更早的重排过程见下条）。
+- **当前实测基线：收集 484 条 = 482 passed / 2 skipped / 0 failed**，约 20s（2026-11-11 第二轮：新增 Python 3.9 兼容、设置部分写入/历史非法配置、代理/XFF 信任边界、静态/登录/CSRF 豁免、SVG 拒绝、page-detail DOM/JS、真实 fetch_following+worker 等 7 条高风险用例）。
 - **粒度约定：一个用例 = 一个不变式**。同一不变式的多个输入变体（CSRF 端点矩阵、非法重定向目标矩阵、字段漂移清单、终态枚举、限流状态码矩阵、扩展名矩阵…）写成**一条用例内的循环 / 顺序分段 + 每例断言消息**，不要拆成多条用例，也不要 `parametrize`。判断标准：拆开之后会不会出现"两条用例的前置准备一模一样、只有输入与期望值不同"；会，就合成一条并在循环里带上 `f'{case} …'` 的失败消息。反过来，**不同不变式不要合并** —— `done` 与 `cancelled` 都"不是预览来源"，但前者靠查库命中、后者靠事务回滚；迁移测试不许跨版本合（否则"哪一版坏了"被掩盖）；同一现象的不同触发路径（排队中取消 vs 下载中取消、单条删除 vs 批量删除）也不合。
   **2026-09-30 全量重排**：710 → **431 条（-39%）**，逐文件重排。验收口径是**断言语义与执行次数不降**，不是断言行数：有三处（`test_app.py`、`test_auth.py`、`test_tls_config.py`）`assert` 行数下降，减掉的全部是"同一谓词在另一档输入上重复出现"的行 —— 按执行次数算只多不少（例：密钥校验矩阵从"5 条用例各断言部分属性"变成"4 档输入各断言全部 5 条属性"）。重排时**只允许改 `tests/`**，且必须保留 `docstring` 里"为什么钉这条"的事故叙事。
   重排后做的变异验证（改了立即还原）覆盖：中图扩展名（只坏 `webp` 一档 → 循环仍红）、预取容量三层**层序**（反转 tier → 红，见下条）、预取 CSRF 矩阵（去掉单端点保护 → 红）、`PIXIV_TEST_TMP` 分支、缓存页 R18 过滤。

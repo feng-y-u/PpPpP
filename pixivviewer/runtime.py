@@ -1,5 +1,7 @@
 # ── 进程内存状态（-w 1 单进程语义，勿多 worker 部署）──
 # 所有后台任务与内存状态都依赖单进程常驻，这是单用户自用场景的有意设计。
+from __future__ import annotations
+
 import json
 import logging
 import os

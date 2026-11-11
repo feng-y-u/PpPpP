@@ -670,12 +670,13 @@ def _fetch_original_urls(pixiv_id: int) -> list[str]:
     经**适配层**而不是 `fetcher`：本模块是叶子工具层，不该反向依赖业务层
     （原图地址的三条解析路径也在适配层）。地址合法性不在这里判定 —— 取回后仍由
     `check_image_url` + `config.IMAGE_HOST_ALLOWLIST` 分级决定要不要发请求。
+
+    连接必须复用线程内连接池（`get_pooled_session`）：详情页/下载入口/自动关注
+    都会调它，每次新建 Session 等于每次重做 TCP+TLS 握手（审计 P2-3）。这里
+    **不** close —— 关闭就把复用池销毁了，那正是旧实现的问题。
     """
-    session = pixiv_client.build_pixiv_session()
-    try:
-        return pixiv_client.fetch_original_urls(session, pixiv_id)
-    finally:
-        session.close()
+    session = pixiv_client.get_pooled_session()
+    return pixiv_client.fetch_original_urls(session, pixiv_id)
 
 
 def _fmt_num(n: int | str) -> str:

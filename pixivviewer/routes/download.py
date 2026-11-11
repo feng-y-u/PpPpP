@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 bp = Blueprint('download', __name__)
 
+# 批量下载单次上限（审计 P2-4）：ids 会拼进 `IN (...)`，且每个 id 都可能触发
+# 一次详情/入队；正常一屏操作远小于此。
+_BATCH_MAX_IDS = 500
+
 
 @bp.route('/download/<int:pixiv_id>', methods=['POST'])
 @_csrf_required
@@ -100,10 +104,14 @@ def batch_download() -> Response:
     pixiv_ids = body.get('ids', [])
     if not pixiv_ids or not isinstance(pixiv_ids, list):
         return jsonify({'error': '请提供作品ID列表'}), 400
+    if len(pixiv_ids) > _BATCH_MAX_IDS:
+        return jsonify({'error': f'单次最多下载 {_BATCH_MAX_IDS} 个作品'}), 400
 
     accepted, skipped = 0, 0
     with get_session() as db:
-        ids = [int(pid) for pid in pixiv_ids if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())]
+        ids = list(dict.fromkeys(
+            int(pid) for pid in pixiv_ids
+            if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())))
         existing_list = db.query(Illust).filter(Illust.pixiv_id.in_(ids)).all()
         existing_map = {i.pixiv_id: i for i in existing_list}
 

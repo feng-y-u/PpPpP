@@ -315,19 +315,38 @@ def parse_illust_detail(body: dict) -> dict:
     }
 
 
+def _is_illust_entry(item: Any) -> bool:
+    """列表条目是否是一条真正的作品（而不是广告位/占位容器）。
+
+    真实联调（2026-11-11）发现 Pixiv 搜索 `data` 里会混入
+    `{"isAdContainer": true}`：它没有 `id`，`item_pixiv_id` 抛 `KeyError`
+    会让整页搜索失败（`paginated_search` 把整页判为失败 → 0 条结果）。
+    """
+    return (isinstance(item, dict)
+            and bool(item.get('id'))
+            and not item.get('isAdContainer'))
+
+
+def parse_search_items(data: Any) -> list[dict]:
+    """搜索列表 body.illust.data → 只保留作品条目（剔除广告容器）。"""
+    return [item for item in (data or []) if _is_illust_entry(item)]
+
+
 def parse_discovery_items(body: dict) -> list[dict]:
     """发现页 body → 作品条目列表。
 
     `thumbnails.illust` 是新形态，`illusts` 是旧形态；两者都还要按 `type` 过滤掉
-    非插画（漫画/小说）条目。
+    非插画（漫画/小说）条目，并剔除广告容器。
     """
     thumbnails = body.get('thumbnails', {}).get('illust', body.get('illusts', []))
-    return [t for t in thumbnails if not t.get('type') or t.get('type') == 'illust']
+    return [t for t in thumbnails
+            if _is_illust_entry(t) and (not t.get('type') or t.get('type') == 'illust')]
 
 
 def parse_follow_latest(body: dict) -> tuple[list[dict], bool]:
     """关注最新 body → (条目列表, 是否还有下一页)。"""
-    items = body.get('thumbnails', {}).get('illust', [])
+    items = [t for t in (body.get('thumbnails', {}).get('illust') or [])
+             if _is_illust_entry(t)]
     has_next = not body.get('page', {}).get('isLastPage', True)
     return items, has_next
 
@@ -1007,7 +1026,7 @@ def fetch_search_illusts(session: requests.Session, query: str, *,
         return [], 0
 
     illust = (data.get('body', {}) or {}).get('illust', {}) or {}
-    return list(illust.get('data', []) or []), illust.get('total', 0)
+    return parse_search_items(illust.get('data', []) or []), illust.get('total', 0)
 
 
 def fetch_discovery_artworks(session: requests.Session, *,
