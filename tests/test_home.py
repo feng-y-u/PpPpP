@@ -351,6 +351,25 @@ class TestHomePages:
         assert 'card-meta-title' in js and 'card-meta-artist' in js, \
             '信息牌只放名称与作者'
 
+    def test_home_cards_do_not_promote_every_card_to_compositor_layer(self, client):
+        """`will-change: transform` 不能常驻在每张卡片上。
+
+        首页无限加载后卡片数量很大；每张 `.photo-card` 都声明 will-change 会让
+        浏览器为每张卡建立合成层，GPU 内存和滚动合成成本随卡片数线性增长。
+        只允许在 hover/focus 时临时提升，不能全局常驻。
+        """
+        html = client.get('/').get_data(as_text=True)
+        card_rule = re.search(r'\.photo-card\s*\{(.*?)\}', html, re.S)
+        assert card_rule, '找不到 .photo-card 样式块'
+        assert 'will-change' not in card_rule.group(1), \
+            '.photo-card 常驻 will-change 会让每张卡片各占一个合成层'
+
+        hover_rule = re.search(
+            r'\.photo-card:hover,\s*\.photo-card:focus-visible\s*\{(.*?)\}', html, re.S)
+        assert hover_rule, '找不到 .photo-card hover/focus 样式块'
+        assert 'will-change: transform' in hover_rule.group(1), \
+            '只允许 hover/focus 时临时提升合成层'
+
     def test_home_masonry_uses_js_columns_not_css_multicol(self, client):
         """首页瀑布流必须是 JS 分列，不能退回 CSS 多列（`column-count`）。
 

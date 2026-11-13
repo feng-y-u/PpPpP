@@ -505,7 +505,7 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
 
 
 def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOKMARKS,
-                      exclude: list[int] | None = None) -> tuple[list[dict], int]:
+                      exclude: list[int] | None = None) -> tuple[list[dict], bool]:
     """首页第二屏起：从预取缓存里随机抽「收藏数 > 阈值」的作品。
 
     与 `query_home_feed` 的差别只有三处，其余过滤（R18 / 屏蔽标签 / 有原图）完全一致：
@@ -516,8 +516,8 @@ def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOK
         不同，offset 会跳号），跨屏去重靠 `exclude` —— 前端把已展示的 pid 带回来，
         第一屏的热门大概率也在池子里，不排除必然重复。
 
-    Returns: `(results, pool_total)`。`pool_total` 是排除 `exclude` 后的候选总数，
-    路由用它算 `has_more`，避免"恰好抽满一屏"时前端还要多打一次空请求。
+    Returns: `(results, has_more)`。`has_more` 用多取一条判断，不再每次做
+    全量 `COUNT(*)` —— 随机池越大，COUNT 与 ORDER BY RANDOM 的两遍扫描越贵。
     """
     from .models import BlockedTag, Illust, get_session
 
@@ -548,30 +548,30 @@ def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOK
         fallback_clause = ' AND '.join(wheres)
         fallback_params = {k: v for k, v in params.items() if k in ('min_bookmarks', 'exclude_ids')}
 
-        def _count(wc: str, p: dict) -> int:
-            return db.execute(text(f'SELECT COUNT(*) FROM illusts WHERE {wc}'), p).scalar() or 0
-
         def _ids(wc: str, p: dict) -> list[int]:
+            # 多取一条用于判断 has_more；比 COUNT(*) 少扫一遍全池。
             return db.execute(
-                text(f'SELECT illusts.id FROM illusts WHERE {wc} ORDER BY RANDOM() LIMIT :lim'),
-                {**p, 'lim': limit},
+                text(f'SELECT illusts.id FROM illusts WHERE {wc} '
+                     'ORDER BY RANDOM() LIMIT :lim'),
+                {**p, 'lim': limit + 1},
             ).scalars().all()
 
         try:
-            total = _count(where_clause, params)
             pk_ids = _ids(where_clause, params)
         except OperationalError:
             logger.warning('首页随机推荐因 tags 数据异常降级（跳过标签过滤）')
-            total = _count(fallback_clause, fallback_params)
             pk_ids = _ids(fallback_clause, fallback_params)
 
+        has_more = len(pk_ids) > limit
+        if has_more:
+            pk_ids = pk_ids[:limit]
         if not pk_ids:
-            return [], total
+            return [], False
 
         illusts = db.query(Illust).filter(Illust.id.in_(pk_ids)).all()
         id_order = {pk: i for i, pk in enumerate(pk_ids)}
         illusts.sort(key=lambda x: id_order.get(x.id, 0))
-        return [i.to_dict() for i in illusts], total
+        return [i.to_dict() for i in illusts], has_more
 
 
 # ── URL/展示工具 ──

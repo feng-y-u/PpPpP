@@ -192,20 +192,47 @@ async function addBlockedTag(tag) {
 
 // 图片懒加载（IntersectionObserver）：data-src 占位 → 进入视口才加载。
 // 搜索页/图库/缓存页共用；渲染完卡片后调用一次即可。
-function lazyLoad() {
-  const observer = new IntersectionObserver((entries) => {
+//
+// 只能复用一个 observer：旧实现每次 lazyLoad() 都 new 一个并重新 observe 所有
+// 未加载图片，首页无限加载时 observer 会越积越多，同一张图被多个 observer
+// 重复回调（审计：首页加载几十批后滚动卡顿）。resetLazyLoad() 在清空列表时
+// 断开旧 observer，避免它继续持有已移除的图片节点。
+let _lazyObserver = null;
+
+function _getLazyObserver() {
+  if (_lazyObserver) return _lazyObserver;
+  _lazyObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        const img = entry.target;
-        if (img.dataset.src) {
-          img.src = img.dataset.src;
-          img.removeAttribute('data-src');
-        }
-        observer.unobserve(img);
+      if (!entry.isIntersecting) return;
+      const img = entry.target;
+      if (img.dataset.src) {
+        img.src = img.dataset.src;
+        img.removeAttribute('data-src');
       }
+      _lazyObserver.unobserve(img);
     });
   }, { rootMargin: '200px' });
-  $$('img[data-src]').forEach(img => observer.observe(img));
+  return _lazyObserver;
+}
+
+function lazyLoad() {
+  const observer = _getLazyObserver();
+  $$('img[data-src]').forEach(img => {
+    if (img.dataset.lazyObserved === '1') return;
+    img.dataset.lazyObserved = '1';
+    observer.observe(img);
+  });
+}
+
+function resetLazyLoad() {
+  if (_lazyObserver) {
+    _lazyObserver.disconnect();
+    _lazyObserver = null;
+  }
+  // 如果节点仍在 DOM 里（例如调用方以后复用列表），下一次 lazyLoad 要能重新 observe。
+  $$('img[data-lazy-observed="1"]').forEach(img => {
+    delete img.dataset.lazyObserved;
+  });
 }
 
 // 分帧渲染：把 items 按 chunks 分批用 requestAnimationFrame 渲染，

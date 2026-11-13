@@ -95,7 +95,7 @@ def api_home_more() -> Response:
     上会撞反代默认 8KB 的请求头上限（nginx `large_client_header_buffers`）。
 
     body: `{"exclude": [已展示的 pixiv_id...], "limit": 每屏条数}`。
-    `has_more` 由排除后的候选总数算出，前端据此决定继续观察还是收尾。
+    `has_more` 由"多取一条"算出，前端据此决定继续观察还是收尾。
     """
     body = request.get_json(silent=True)
     body = body if isinstance(body, dict) else {}
@@ -115,9 +115,9 @@ def api_home_more() -> Response:
             except (TypeError, ValueError):
                 continue    # 单个坏 id 忽略，不影响其余去重
 
-    results, pool_total = query_home_random(limit, HOME_RANDOM_MIN_BOOKMARKS, exclude)
+    results, has_more = query_home_random(limit, HOME_RANDOM_MIN_BOOKMARKS, exclude)
     return jsonify({
         'results': _attach_medium(results),
         'min_bookmarks': HOME_RANDOM_MIN_BOOKMARKS,
-        'has_more': pool_total > len(results),
+        'has_more': has_more,
     })

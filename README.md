@@ -121,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 pytest -q
 ```
 
-当前基线：**482 passed / 2 skipped / 0 failed**（484 collected），约 20s。测试完全离线，不需要真实 Cookie。Python 3.9.25 完成 import/启动/关键测试，3.12.14 与 3.13.13 完成全量测试；发布质量门槛与已知技术债见 [QUALITY_BASELINE.md](QUALITY_BASELINE.md)。
+当前基线：**484 passed / 2 skipped / 0 failed**（486 collected），约 20s。测试完全离线，不需要真实 Cookie。Python 3.9.25 完成 import/启动/关键测试，3.12.14 与 3.13.13 完成全量测试；发布质量门槛与已知技术债见 [QUALITY_BASELINE.md](QUALITY_BASELINE.md)。
 
 更多工程约定（模块依赖、测试补丁 seam、性能与并发注意事项）见 [AGENTS.md](AGENTS.md)、[docs/architecture.md](docs/architecture.md)；发布质量基线见 [QUALITY_BASELINE.md](QUALITY_BASELINE.md)；运维手册（备份恢复、TLS、公网清单）见 [docs/maintenance.md](docs/maintenance.md)。
 

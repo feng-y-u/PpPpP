@@ -44,7 +44,7 @@ function renderHomeCard(r) {
   item.innerHTML = `
     <div class="photo-card" tabindex="0" data-pixiv-id="${r.pixiv_id}">
       <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23f2e8ea'%3E%3C/svg%3E"
-           data-src="${escAttr(imgSrc)}" loading="lazy" class="img-fade" alt="">
+           data-src="${escAttr(imgSrc)}" loading="lazy" decoding="async" class="img-fade" alt="">
       <div class="card-meta">
         <div class="card-meta-title">${escHtml(r.title || '无题')}</div>
         <div class="card-meta-artist">${escHtml(r.user_name || '')}</div>
@@ -249,6 +249,7 @@ async function loadHome(windowMode) {
 
   loading.style.display = 'block';
   grid.innerHTML = '';
+  resetLazyLoad();
   hotNodes = [];
   moreNodes = [];
   bandHot = null;
