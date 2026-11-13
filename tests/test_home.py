@@ -57,6 +57,28 @@ def _clear_home_cache():
 
 
 class TestHomeQuery:
+    def test_excludes_downloaded_from_first_screen(self, clean_db):
+        """已下载的作品不再出现在首页第一屏。
+
+        `download_status='done'` 是主信号；历史/半状态行可能只有 local_paths，
+        也要排除，避免"下载过的图又回到首页"。
+        """
+        keep = _illust(clean_db, 4801, bookmarks=100)
+        done = _illust(clean_db, 4802, bookmarks=9999)
+        done.download_status = 'done'
+        done.local_paths_list = ['/home/azure/pixiv-viewer/downloads/4802/1.jpg']
+        legacy = _illust(clean_db, 4803, bookmarks=8888)
+        legacy.local_paths_list = ['/home/azure/pixiv-viewer/downloads/4803/1.jpg']
+        clean_db.commit()
+
+        results, _ = helpers.query_home_feed(24, '48')
+        ids = {r['pixiv_id'] for r in results}
+
+        assert 4801 in ids
+        assert 4802 not in ids, 'download_status=done 的作品不得出现在首页'
+        assert 4803 not in ids, 'local_paths 非空的历史下载行也不得出现'
+        assert keep.pixiv_id == 4801
+
     def test_orders_by_bookmarks_and_skips_unfilled(self, clean_db):
         """按收藏数降序；收藏数为 0（未补全）与无发布时间的行不参与。
 
@@ -221,6 +243,23 @@ class TestHomeRandom:
         return client.post('/api/home/more',
                            json={'exclude': exclude or [], 'limit': limit},
                            headers={'X-CSRF-Token': self._token(client)})
+
+    def test_pool_excludes_downloaded_works(self, client, clean_db):
+        """随机池同样不返回已下载作品；否则第二屏会把刚下载的图又推回来。"""
+        keep = _illust(clean_db, 5201, bookmarks=600, prefetch=True)
+        done = _illust(clean_db, 5202, bookmarks=9000, prefetch=True)
+        done.download_status = 'done'
+        done.local_paths_list = ['/home/azure/pixiv-viewer/downloads/5202/1.jpg']
+        legacy = _illust(clean_db, 5203, bookmarks=8000, prefetch=True)
+        legacy.local_paths_list = ['/home/azure/pixiv-viewer/downloads/5203/1.jpg']
+        clean_db.commit()
+
+        data = self._more(client).get_json()
+        ids = {r['pixiv_id'] for r in data['results']}
+
+        assert ids == {5201}
+        assert keep.pixiv_id == 5201
+        assert data['has_more'] is False, '排除已下载后只剩 1 条，不应再声称还有更多'
 
     def test_pool_is_prefetch_with_strict_bookmark_threshold(self, client, clean_db):
         """池子只认：预取来源 + 收藏数**严格大于** 500 + 带原图地址。

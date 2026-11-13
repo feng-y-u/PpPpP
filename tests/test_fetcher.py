@@ -1009,6 +1009,31 @@ class TestBookmarkStaleness:
         mock_fill.assert_called_once_with([8002])
 
     @patch('pixivviewer.fetcher._fetch_details_parallel')
+    def test_stale_record_uses_list_bookmark_count_without_detail(self, mock_fetch, clean_db):
+        """非 defer 路径也能用列表 bookmarkCount 更新已有记录，不再为刷新收藏数拉详情。
+
+        列表接口已经返回收藏数时，为一条老记录再发详情请求是纯浪费；新记录仍走
+        详情补原图，只有"列表没有计数"（作者搜索）才回退到详情。
+        """
+        self._old_illust(clean_db, 7003, 500, days_ago=8)
+
+        results = fetcher._process_items(
+            clean_db, [_item(7003, 800)],
+            id_extractor=lambda item: int(item['id']),
+            illust_factory=fetcher._illust_from_item,
+            blocked=set(),
+            min_bookmarks=600,
+            defer_details=False,
+        )
+
+        assert len(results) == 1
+        assert results[0]['bookmark_count'] == 800
+        row = clean_db.query(Illust).filter(Illust.pixiv_id == 7003).first()
+        assert row.bookmark_count == 800
+        assert row.bookmark_updated_at is not None
+        mock_fetch.assert_not_called()
+
+    @patch('pixivviewer.fetcher._fetch_details_parallel')
     def test_stale_record_sync_refetch_and_timestamp_update(self, mock_fetch, clean_db):
         """min>0：收藏数过期的记录同步拉详情刷新，并更新时间戳。"""
         self._old_illust(clean_db, 7002, 500, days_ago=8)

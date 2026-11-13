@@ -397,6 +397,14 @@ HOME_FALLBACK_HOURS = 168       # 不足一批时放宽到的小时数（7 天�
 HOME_RANDOM_MIN_BOOKMARKS = 500
 
 
+# 首页两类查询共用：已下载的作品不再出现在首页。
+# `download_status='done'` 是主信号；local_paths 非空兜住历史/半状态数据。
+_HOME_NOT_DOWNLOADED_SQL = (
+    "NOT (COALESCE(illusts.download_status, '') = 'done' "
+    "OR COALESCE(illusts.local_paths, '') NOT IN ('', '[]'))"
+)
+
+
 def _home_tag_conditions(blocked: list[str]) -> tuple[list[str], dict]:
     """首页两类查询共用的标签过滤：R18 固定隐藏 + 全局屏蔽标签。
 
@@ -439,7 +447,7 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
     window: 'auto' —— 48 小时内不足 `limit` 件时放宽到 7 天；
             '48'   —— 禁止放宽（页面上"仍只看 48 小时"走这条）。
 
-    只统计 `bookmark_count > 0` **且带原图地址**的行：
+    只统计 `bookmark_count > 0` **且带原图地址**、**未下载**的行：
       - 收藏数为 0 有两种含义（真没人收藏 / 详情从未补全），无法区分，而后者会让
         新入库作品全部沉底甚至占满一页；
       - 首页要的是中图，中图地址由原图地址拼出来 —— 没有原图地址的行只能退回 250px
@@ -467,6 +475,7 @@ def query_home_feed(limit: int = 24, window: str = 'auto') -> tuple[list[dict], 
             'illusts.bookmark_count > 0',
             # 中图地址从原图地址拼出来；没有原图的行走不了中图（见 docstring）
             "COALESCE(illusts.original_urls, '') NOT IN ('', '[]')",
+            _HOME_NOT_DOWNLOADED_SQL,
         ]
 
         def _fetch(hours: int) -> list[int]:
@@ -512,6 +521,7 @@ def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOK
       - 只要 `prefetch_source = 1` 的缓存作品，且**不限时间窗** —— 随机推荐的作用是
         把缓存里的好作品翻出来，再套 48 小时窗口池子会立刻抽空；
       - `bookmark_count > min_bookmarks`（严格大于，500 本身不进池）；
+      - 已下载的作品排除（download_status='done' 或 local_paths 非空）。
       - `ORDER BY RANDOM()`：每次请求重新洗牌。随机序不能用 offset 分页（每次顺序都
         不同，offset 会跳号），跨屏去重靠 `exclude` —— 前端把已展示的 pid 带回来，
         第一屏的热门大概率也在池子里，不排除必然重复。
@@ -537,6 +547,7 @@ def query_home_random(limit: int = 24, min_bookmarks: int = HOME_RANDOM_MIN_BOOK
             'illusts.bookmark_count > :min_bookmarks',
             # 中图地址从原图地址拼出来，没有原图只能退回 250px 缩略图（与首页同一承诺）
             "COALESCE(illusts.original_urls, '') NOT IN ('', '[]')",
+            _HOME_NOT_DOWNLOADED_SQL,
         ]
         params: dict = {'min_bookmarks': min_bookmarks, **tag_params}
         if excl:

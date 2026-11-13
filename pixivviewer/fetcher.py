@@ -779,14 +779,15 @@ def _process_items(db: Any, items: list[Any], id_extractor: Callable[[Any], int]
             stale = _is_bookmark_stale(existing)
             # bookmark_count 未补全（0）或收藏数过期：优先用列表接口自带的 bookmarkCount 修正
             if existing.bookmark_count == 0 or stale:
-                # defer 路径：API 返回数据自带 bookmarkCount，直接更新跳过补全
-                # （字段名归适配层：`item_bookmark_count` 认的就是 Pixiv 的 bookmarkCount）
+                # 列表接口返回数据自带 bookmarkCount，优先用它直接更新；这只省掉
+                # "已有记录"的详情请求，新记录仍要详情补原图。defer 不是前提：
+                # 标签搜索/批量下载同样拿得到列表计数，没必要为此再发一轮详情。
                 item_bm = item_bookmark_count(item) if isinstance(item, dict) else 0
-                if defer_details and item_bm > 0:
+                if item_bm > 0:
                     existing.bookmark_count = item_bm
                     existing.bookmark_updated_at = now_utc
                 elif min_bookmarks > 0:
-                    # 用户设了最低收藏但条目无收藏数 → 同步重新拉详情判断
+                    # 条目没有收藏数（如作者搜索只返回 id）→ 同步重新拉详情判断
                     to_refetch.append(pixiv_id)
                     continue
             if not _rejected(existing.tags_list, existing.bookmark_count,
