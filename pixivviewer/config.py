@@ -108,6 +108,12 @@ PREFETCH_MAX_ILLUSTS = 10000    # 预取来源作品最大数量
 # 预取"最终收藏数"刷新失败退避（秒）：失败后该时长内不再尝试该作品，
 # 防止永久失败的死作品每轮占满 100 个名额（head-of-line blocking）。
 PREFETCH_REFRESH_BACKOFF = 86400
+# 收藏数分级刷新间隔（秒）：首页候选（能进第一屏/随机池）2 天，普通缓存 7 天，
+# 上传超过 30 天的老作品 30 天。2 天取需求“1～3 天”的中间值，兼顾新鲜度与请求量。
+PREFETCH_REFRESH_HOME = 2 * 86400
+PREFETCH_REFRESH_NORMAL = 7 * 86400
+PREFETCH_REFRESH_OLD = 30 * 86400
+PREFETCH_REFRESH_OLD_AGE = 30 * 86400
 # 刷新失败强制完成阈值（秒）：连续失败超过该时长仍未成功 → 视为处理完毕，
 # 退出刷新队列交由容量清理按低收藏优先淘汰（防"未刷新"积压顶破容量上限）。
 PREFETCH_REFRESH_FORCE_DONE = 14 * 86400

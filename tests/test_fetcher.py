@@ -2294,7 +2294,7 @@ class TestRefreshPathMapsGateRefusalToGlobalFailure:
     def test_open_gate_aborts_refresh_without_per_work_backoff(self, clean_db, monkeypatch):
         import app
         from pixivviewer import background
-        old = datetime.now(timezone.utc) - timedelta(days=2)
+        old = datetime.now(timezone.utc) - timedelta(days=8)
         for pid in (61, 62, 63):
             clean_db.add(Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,
                                 bookmark_count=0, created_at=old))

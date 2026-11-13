@@ -123,7 +123,7 @@ async function loadPrefetchStatus() {
   try {
     const r = await fetch('/api/prefetch/status');
     const s = await r.json();
-    const parts = [`未完成刷新 ${s.pending_refresh ?? 0} 条`,
+    const parts = [`未首次刷新 ${s.pending_refresh ?? 0} 条`,
                    `退避中 ${s.failed_backoff ?? 0} 条`];
     const rs = s.refresh;
     if (rs && rs.at) {

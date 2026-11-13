@@ -9,6 +9,7 @@ import json
 import threading
 
 from flask import Blueprint, Response, jsonify, request
+from sqlalchemy import and_, func, or_
 
 from ..background import (_collect_other_tag_pids, _find_alias_group,
                         _search_cache_guard, get_background_health)
@@ -237,16 +238,22 @@ def prefetch_tags_delete(tag: str) -> Response:
 def prefetch_status_get() -> Response:
     """预取状态 + 最终收藏数刷新的健康指标（供设置页与运维观察）。
 
-    pending_refresh：尚未完成最终刷新的预取作品数（这批被容量清理豁免，
+    pending_refresh：尚未完成首次刷新的预取作品数（这批被容量清理豁免，
     长期积压说明刷新吞吐跟不上入库）；failed_backoff：带失败退避标记的数量。
     alive/stale/last_error（审计 S12）：线程存活、"很久没跑完一轮"与最近一轮的
     错误 —— 预取线程静默死掉时，光看 running/last_check 得靠人自己解读。
     """
     health = get_background_health()
+    local_paths = func.coalesce(Illust.local_paths, '')
+    not_downloaded = ~or_(
+        func.coalesce(Illust.download_status, '').in_(('done', 'downloading')),
+        and_(local_paths != '', local_paths != '[]'),
+    )
     with get_session() as db:
         pending = db.query(Illust).filter(
             Illust.prefetch_source == 1,
             Illust.prefetch_refresh_at.is_(None),
+            not_downloaded,
         ).count()
         failed = db.query(Illust).filter(
             Illust.prefetch_source == 1,

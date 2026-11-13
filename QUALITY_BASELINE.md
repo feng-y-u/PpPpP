@@ -9,7 +9,7 @@
 - 变更记录：
   - 2026-11-11 第一轮：审计修复 P1-1～P1-5、P2-1/P2-3/P2-4，并修复真实联调发现的搜索广告容器问题
   - 2026-11-11 第二轮：Python 3.9 兼容、设置原子校验、历史非法配置清洗、代理/XFF 信任边界、静态/登录/CSRF 豁免顺序，补齐 7 条高风险测试
-  - 2026-11-13 第三轮：修复首页无限加载卡顿（lazyLoad observer 复用/reset、卡片合成层、图片异步解码），并让首页第一屏与随机池排除已下载作品
+  - 2026-11-13 第三轮：修复首页无限加载卡顿（lazyLoad observer 复用/reset、卡片合成层、图片异步解码），首页第一屏与随机池排除已下载作品，并实现首页候选/普通/老作品 2/7/30 天分级收藏数刷新
 
 ---
 
@@ -18,7 +18,7 @@
 | 项 | 结论 |
 |---|---|
 | 声明/实际支持 | **3.9+** |
-| 开发/测试实测 | 3.9.25（真实 import + HTTP 启动 + 38 条关键测试）、3.12.14（性能修复前全量 482 passed / 2 skipped）、3.13.13（当前全量 487 passed / 2 skipped） |
+| 开发/测试实测 | 3.9.25（真实 import + HTTP 启动 + 38 条关键测试）、3.12.14（性能修复前全量 482 passed / 2 skipped）、3.13.13（当前全量 488 passed / 2 skipped） |
 | 生产目标环境 | Linux Python **3.12.3** 属于支持范围；同一 minor 已在 3.12.14 全量验证，建议在目标机再跑一次 §4.1 |
 | 3.9 兼容处理 | `config.py`/`runtime.py`/`migrations/runner.py` 补 `from __future__ import annotations`；ORM 的 `Mapped[datetime \| None]` 改为 `Mapped[Optional[datetime]]`（SQLAlchemy 在 3.9 会求值注解） |
 | 依赖锁定 | `requirements-lock.txt` 使用 3.9 可安装的精确版本：click 8.1.8、greenlet 3.2.4、gunicorn 23.0.0、pytest 8.4.2、requests 2.32.5、urllib3 2.6.3；`exceptiongroup`/`tomli` 仅在 Python <3.11 安装 |
@@ -86,7 +86,7 @@
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 ```
 
-**当前基线（Python 3.13.13）：489 collected = 487 passed / 2 skipped / 0 failed，约 20s。**
+**当前基线（Python 3.13.13）：490 collected = 488 passed / 2 skipped / 0 failed，约 20s。**
 2 条 skip 是 Windows 上 POSIX `chmod` 语义不可用，不是失败；Linux（含 fuyan 的 3.12.3）上这两条会实际执行，结果数会不同。
 
 Python 3.9.25 真实环境已单独验证：
@@ -126,7 +126,7 @@ Python 3.9.25 真实环境已单独验证：
 
 2026-11-11 实测记录：搜索 24 条、详情 200、`/thumb` 200 `image/jpeg` 303099 bytes；真实适配层搜索 60 条、原图 200 `image/png`。
 
-> `pytest -m integration` 目前 **0 条用例、489 deselected**；在补上真正的 `@pytest.mark.integration` 用例之前，不得把该命令当成发布门槛。
+> `pytest -m integration` 目前 **0 条用例、490 deselected**；在补上真正的 `@pytest.mark.integration` 用例之前，不得把该命令当成发布门槛。
 
 ---
 
@@ -170,7 +170,7 @@ Python 3.9.25 真实环境已单独验证：
 
 ### 6.2 测试
 
-- [ ] 全量 `run_tests.ps1 -q`：**0 failed**（当前 487 passed / 2 skipped）。
+- [ ] 全量 `run_tests.ps1 -q`：**0 failed**（当前 488 passed / 2 skipped）。
 - [ ] 改动模块的定向用例通过。
 - [ ] 3.9 环境 import + 启动 + 关键测试通过；不要把 3.13 全量结果冒充成 3.9。
 - [ ] 真实链路冒烟通过（见 §4.3），且使用临时实例目录。
@@ -207,5 +207,5 @@ Python 3.9.25 真实环境已单独验证：
 
 - 2026-11-11 第一轮：P1-1 自动关注新增计数/自动下载、P1-2 设置 0 值边界、P1-3 详情页页大小、P1-4 XFF 伪造限流、P1-5 无密码公网守卫、P2-1 `/thumb` Content-Type、P2-3 原图连接池、P2-4 批量上限；真实联调修复搜索广告容器。
 - 2026-11-11 第二轮：Python 3.9 兼容（future import + ORM Optional + 依赖锁）、设置先校验后落盘、历史非法配置清洗、`TRUSTED_PROXIES`/`LOCAL_NETWORKS` 信任边界、静态/登录/CSRF 豁免顺序、SVG 重定向拒绝、page-detail DOM/JS 测试、真实 `fetch_following` + worker 集成、worker 轮询去重。
-- 回归用例：第一轮新增 13 条，第二轮新增 7 条，本轮新增 5 条（lazyLoad observer 复用、首页卡片合成层、首页排除已下载第一屏/随机池、列表 bookmarkCount 刷新）；全量基线 477 → 489 collected（487 passed / 2 skipped）。
+- 回归用例：第一轮新增 13 条，第二轮新增 7 条，本轮新增 6 条（lazyLoad observer 复用、首页卡片合成层、首页排除已下载第一屏/随机池、列表 bookmarkCount 刷新、分级刷新优先级/间隔）；全量基线 477 → 490 collected（488 passed / 2 skipped）。
 - 完整审计背景见 `docs/risk-audit-report.md`；本轮修复的设计记录见 `docs/superpowers/`（如已归档）。

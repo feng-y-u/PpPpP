@@ -12,14 +12,16 @@ from . import fetcher
 from . import helpers
 from . import pixiv_client
 from . import runtime
-from sqlalchemy import or_, text, update
+from sqlalchemy import and_, case, func, or_, text, update
 
 from . import backups
 from . import config
 from .config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
                     PREFETCH_EVICT_UNREFRESHED_AFTER,
                     PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
-                    PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE)
+                    PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE,
+                    PREFETCH_REFRESH_HOME, PREFETCH_REFRESH_NORMAL,
+                    PREFETCH_REFRESH_OLD, PREFETCH_REFRESH_OLD_AGE)
 from .fetcher import build_credentialless_session, build_pixiv_session, fetch_following
 from .helpers import _get_download_dir, _extract_ext, check_image_url
 from .models import (get_session, Illust, SearchCache,
@@ -459,37 +461,80 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
     """
     import app  # 延迟导入读取 app.build_pixiv_session：tests monkeypatch('app.build_pixiv_session')
     now = datetime.now(timezone.utc)
-    deadline = now - timedelta(days=1)
+    now_db = now.replace(tzinfo=None)
+    jst_now = (now + timedelta(hours=9)).replace(tzinfo=None)
     backoff_before = now - timedelta(seconds=PREFETCH_REFRESH_BACKOFF)
     force_done_before = now - timedelta(seconds=PREFETCH_REFRESH_FORCE_DONE)
 
+    # 三档的共同排除：已下载/下载中的作品不再刷新收藏数（首页本身也不再展示它们）。
+    # 注意 download_status 可能为 NULL，必须 coalesce，否则 `NOT (...)` 会得到 NULL。
+    local_paths_sql = func.coalesce(Illust.local_paths, '')
+    not_downloaded = ~or_(
+        func.coalesce(Illust.download_status, '').in_(('done', 'downloading')),
+        and_(local_paths_sql != '', local_paths_sql != '[]'),
+    )
+
+    # 首页候选：能进第一屏（7 天内 + 收藏数 >0 + 有原图）或随机池（收藏数 >500）。
+    home_candidate = and_(
+        Illust.bookmark_count > 0,
+        func.coalesce(Illust.original_urls, '').notin_(('', '[]')),
+        or_(
+            and_(Illust.upload_date.isnot(None),
+                 Illust.upload_date >= jst_now - timedelta(hours=helpers.HOME_FALLBACK_HOURS)),
+            Illust.bookmark_count > helpers.HOME_RANDOM_MIN_BOOKMARKS,
+        ),
+    )
+    # 老作品：上传超过 30 天；没有 upload_date 时退回入库时间判断。
+    old_candidate = and_(
+        ~home_candidate,
+        or_(
+            and_(Illust.upload_date.isnot(None),
+                 Illust.upload_date < jst_now - timedelta(seconds=PREFETCH_REFRESH_OLD_AGE)),
+            and_(Illust.upload_date.is_(None),
+                 Illust.created_at < now_db - timedelta(seconds=PREFETCH_REFRESH_OLD_AGE)),
+        ),
+    )
+    # 最后已知收藏数时间：列表回填也会更新 bookmark_updated_at，所以刚回填过的
+    # 作品不会因为 prefetch_refresh_at 为空而被重复拉详情。
+    last_bookmark_at = func.coalesce(
+        Illust.bookmark_updated_at, Illust.prefetch_refresh_at,
+        Illust.created_at, datetime(1970, 1, 1),
+    )
+    tier = case((home_candidate, 1), (old_candidate, 3), else_=2)
+    due_cutoff = case(
+        (home_candidate, now_db - timedelta(seconds=PREFETCH_REFRESH_HOME)),
+        (old_candidate, now_db - timedelta(seconds=PREFETCH_REFRESH_OLD)),
+        else_=now_db - timedelta(seconds=PREFETCH_REFRESH_NORMAL),
+    )
+
     pids: list[int] = []
     with get_session() as db:
-        # 长期失败兜底先行：失败超过阈值仍未成功 → 强制标记完成、退出刷新队列
-        #（先处理再查候选，否则本轮还会把 aged 行选进候选白跑一次详情请求）
+        # 长期失败兜底先行：失败超过阈值仍未成功 → 推迟到下一档刷新周期，
+        # 避免死作品每轮占满名额。已下载/下载中的作品不参与。
         aged = db.query(Illust).filter(
             Illust.prefetch_source == 1,
-            Illust.prefetch_refresh_at.is_(None),
+            not_downloaded,
             Illust.refresh_failed_at.isnot(None),
             Illust.refresh_failed_at < force_done_before,
         ).order_by(Illust.created_at.asc()).limit(max_items).all()
         for illust in aged:
+            illust.bookmark_updated_at = now
             illust.prefetch_refresh_at = now
             illust.refresh_failed_at = None
             stats['force_done'] += 1
             logger.info(
                 f'[prefetch] 刷新失败超过 {PREFETCH_REFRESH_FORCE_DONE // 86400} 天，'
-                f'强制标记完成 {illust.pixiv_id}')
+                f'推迟到下一刷新周期 {illust.pixiv_id}')
         if aged:
             safe_commit(db)
 
         candidates = db.query(Illust).filter(
             Illust.prefetch_source == 1,
-            Illust.prefetch_refresh_at.is_(None),
-            Illust.created_at < deadline,
+            not_downloaded,
             or_(Illust.refresh_failed_at.is_(None),
                 Illust.refresh_failed_at < backoff_before),
-        ).order_by(Illust.created_at.asc()).limit(max_items).all()
+            last_bookmark_at <= due_cutoff,
+        ).order_by(tier.asc(), last_bookmark_at.asc()).limit(max_items).all()
         if candidates:
             pids = [c.pixiv_id for c in candidates]
         if not candidates:
@@ -523,7 +568,11 @@ def _refresh_bookmarks_pass(max_items: int, stats: dict) -> None:
                 now = datetime.now(timezone.utc)
                 with get_session() as db:
                     illust = db.query(Illust).filter(Illust.pixiv_id == pid).first()
-                    if not illust or illust.prefetch_refresh_at is not None:
+                    if not illust:
+                        continue
+                    # 候选查询后用户可能刚点了下载：已下载/下载中的作品不参与刷新。
+                    if illust.download_status in ('done', 'downloading') \
+                            or illust.local_paths_list:
                         continue
                     # 排队中（worker 还没把状态写成 downloading）同样受保护：否则
                     # "queued → 首个 commit"窗口内被删行，下载会静默消失。
@@ -615,9 +664,11 @@ def reset_prefetch_refresh(tag: str | None = None, pixiv_id: int | None = None) 
         else:
             return 0
         result = db.execute(text(
-            'UPDATE illusts SET prefetch_refresh_at = NULL, refresh_failed_at = NULL '
+            'UPDATE illusts SET prefetch_refresh_at = NULL, refresh_failed_at = NULL, '
+            'bookmark_updated_at = NULL '
             f'WHERE prefetch_source = 1 AND {where} '
-            'AND (prefetch_refresh_at IS NOT NULL OR refresh_failed_at IS NOT NULL)'
+            'AND (prefetch_refresh_at IS NOT NULL OR refresh_failed_at IS NOT NULL '
+            'OR bookmark_updated_at IS NOT NULL)'
         ), params)
         count = result.rowcount or 0
         if count:

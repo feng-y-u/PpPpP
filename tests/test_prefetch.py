@@ -632,9 +632,9 @@ class TestPrefetchThreadLiveness:
 
 
 class TestPrefetchRefreshBookmarks:
-    """最终收藏数刷新：满 1 天刷新一次，<10 删除，保护已下载/用户点过下载的。"""
+    """收藏数分级刷新：首页候选 2 天、普通缓存 7 天、老作品 30 天，<10 删除，已下载不刷新。"""
 
-    def _old_illust(self, clean_db, pid, days=2, **kw):
+    def _old_illust(self, clean_db, pid, days=8, **kw):
         from pixivviewer import models
         old = datetime.now(timezone.utc) - timedelta(days=days)
         illust = Illust(pixiv_id=pid, title=f'p{pid}', prefetch_source=1,
@@ -667,9 +667,9 @@ class TestPrefetchRefreshBookmarks:
         return calls
 
     def test_refresh_updates_bookmark_once(self, clean_db, monkeypatch):
-        """满 1 天才入选：拉一次详情写回最终收藏数，且只刷这一次。
+        """普通缓存满 7 天才入选：拉一次详情写回收藏数，刚刷新过的作品不再入选。
 
-        "该刷的"与"今天刚入库、还没满一天不该刷的"是同一入口的两种输入，故合为一条：
+        "该刷的"与"今天刚入库、还没到 7 天不该刷的"是同一入口的两种输入，故合为一条：
         后者必须既不发请求、也不动任何标记。
         """
         self._old_illust(clean_db, 5001)
@@ -692,17 +692,53 @@ class TestPrefetchRefreshBookmarks:
         app._prefetch_refresh_bookmarks()
         assert calls == [5001]
 
-    def test_refresh_deletes_low_bookmark(self, clean_db, monkeypatch):
-        """最终收藏数 < 10：未受保护的当场删除并摘除缓存引用；受保护的原地更新、保留。
+    def test_refresh_prioritizes_home_then_normal_then_old(self, clean_db, monkeypatch):
+        """分级刷新：首页候选 2 天、普通缓存 7 天、老作品 30 天，且优先级按档递减。
 
-        同一分支"受保护与否"的两种输入，断言同构，故合为一条。
+        同一个入口的三种输入，断言顺序与“刚刷新过的档位不再入选”两件事：
+        首页候选 3 天前更新仍该刷；普通/老作品 3 天前更新不该刷。
         """
+        now_utc = datetime.now(timezone.utc)
+        jst_now = (now_utc + timedelta(hours=9)).replace(tzinfo=None)
+
+        home = Illust(pixiv_id=7001, title='home', prefetch_source=1,
+                      bookmark_count=600, created_at=now_utc - timedelta(days=10))
+        home.original_urls_list = ['https://i.pximg.net/7001_p0.jpg']
+        home.upload_date = jst_now - timedelta(days=1)
+        normal = Illust(pixiv_id=7002, title='normal', prefetch_source=1,
+                        bookmark_count=100, created_at=now_utc - timedelta(days=10))
+        normal.upload_date = jst_now - timedelta(days=10)
+        old = Illust(pixiv_id=7003, title='old', prefetch_source=1,
+                     bookmark_count=100, created_at=now_utc - timedelta(days=40))
+        old.upload_date = jst_now - timedelta(days=40)
+        clean_db.add_all([home, normal, old])
+        safe_commit(clean_db)
+
+        calls = self._mock_detail(monkeypatch, 200)
+        app._prefetch_refresh_bookmarks()
+
+        assert calls == [7001, 7002, 7003], '应按首页 → 普通 → 老作品排序'
+
+        # 刚刷新过：三档都未到期，不再请求。
+        app._prefetch_refresh_bookmarks()
+        assert calls == [7001, 7002, 7003]
+
+        # 把最后更新时间拨回 3 天前：只有首页候选（2 天档）再次到期。
+        for row in (home, normal, old):
+            row.bookmark_updated_at = now_utc - timedelta(days=3)
+        safe_commit(clean_db)
+
+        app._prefetch_refresh_bookmarks()
+        assert calls == [7001, 7002, 7003, 7001], '只有首页候选应在 3 天后重刷'
+
+    def test_refresh_deletes_low_bookmark(self, clean_db, monkeypatch):
+        """最终收藏数 < 10：未受保护的当场删除并摘除缓存引用；已下载作品不刷新。"""
         self._old_illust(clean_db, 5002)
         self._old_illust(clean_db, 5003, download_status='done')
         clean_db.add(SearchCache(tag='t', illust_ids='[5002]', status='done'))
         clean_db.add(SearchCache(tag='t_keep', illust_ids='[5003]', status='done'))
         safe_commit(clean_db)
-        self._mock_detail(monkeypatch, 3)
+        calls = self._mock_detail(monkeypatch, 3)
 
         app._prefetch_refresh_bookmarks()
 
@@ -711,8 +747,9 @@ class TestPrefetchRefreshBookmarks:
         assert json.loads(sc.illust_ids) == []
         kept = clean_db.query(Illust).filter(Illust.pixiv_id == 5003).first()
         assert kept is not None, '已下载保护，不删'
-        assert kept.bookmark_count == 3
-        assert kept.prefetch_refresh_at is not None
+        assert kept.bookmark_count == 0, '已下载作品不得参与收藏数刷新'
+        assert kept.prefetch_refresh_at is None
+        assert calls == [5002], '已下载作品不应发起详情请求'
 
     def test_refresh_pass_keeps_queued_download(self, clean_db, monkeypatch):
         """排队中的作品即使详情已永久失效（DEAD_DETAIL）也不能被刷新清理删掉。
@@ -850,23 +887,20 @@ class TestPrefetchRefreshBookmarks:
         assert background._is_user_owned(clean_db, 5013) is False
 
     def test_refresh_keeps_dead_protected(self, clean_db, monkeypatch):
-        """永久失败但受保护（已下载 / 用户点过下载）→ 保留行、标记刷新完成退出队列。
-
-        两条保护渠道共用同一条守卫，只有"保护从哪来"不同，故合为一条。
-        """
+        """永久失败但受保护（用户点过下载）→ 保留行、标记完成；已下载作品不参与刷新。"""
         from pixivviewer.models import DownloadLog
         self._old_illust(clean_db, 5009, download_status='done')
         self._old_illust(clean_db, 5012)
         clean_db.add(DownloadLog(pixiv_id=5012, action='failed', message='下载失败'))
         safe_commit(clean_db)
-        self._mock_dead_detail(monkeypatch)
+        calls = self._mock_dead_detail(monkeypatch)
 
         app._prefetch_refresh_bookmarks()
 
         downloaded = clean_db.query(Illust).filter(Illust.pixiv_id == 5009).first()
         assert downloaded is not None
-        assert downloaded.prefetch_refresh_at is not None
-        assert downloaded.refresh_failed_at is None
+        assert downloaded.prefetch_refresh_at is None, '已下载作品不参与收藏数刷新'
+        assert 5009 not in calls
         logged = clean_db.query(Illust).filter(Illust.pixiv_id == 5012).first()
         assert logged is not None
         assert logged.prefetch_refresh_at is not None
@@ -994,7 +1028,7 @@ class TestPrefetchRefreshBookmarks:
         self._old_illust(clean_db, 5061)                          # 低收藏 → 删除
         self._old_illust(clean_db, 5062)                          # 暂时性失败
         self._old_illust(clean_db, 5063)                          # 永久失败 → 删除
-        self._old_illust(clean_db, 5064, download_status='done')  # 永久失败但已下载 → 保留
+        self._old_illust(clean_db, 5064, download_status='done')  # 已下载 → 不参与
         safe_commit(clean_db)
 
         class _FakeSession:
@@ -1002,7 +1036,7 @@ class TestPrefetchRefreshBookmarks:
                 pass
 
         seq = [{'bookmark_count': 100}, {'bookmark_count': 3}, None,
-               fetcher.DEAD_DETAIL, fetcher.DEAD_DETAIL]
+               fetcher.DEAD_DETAIL]
         calls = []
 
         def _fake(s, pid, limiter=None, return_dead=False):
@@ -1015,15 +1049,16 @@ class TestPrefetchRefreshBookmarks:
         app._prefetch_refresh_bookmarks()
 
         stats = app._prefetch_state['refresh_stats']
-        assert stats['processed'] == 5
+        assert stats['processed'] == 4
         assert stats['ok'] == 2            # 5060 + 5061（5061 随后按低收藏删除）
         assert stats['deleted_low'] == 1
         assert stats['deleted_dead'] == 1
-        assert stats['kept_dead'] == 1
+        assert stats['kept_dead'] == 0
         assert stats['failed_transient'] == 1
         assert stats['failed_global'] == 0
         assert stats['aborted'] == ''
         assert stats['at'] is not None
+        assert 5064 not in calls, '已下载作品不参与收藏数刷新'
 
         # 认证失效：中止原因也要如实写进统计（否则设置页只说"这轮没刷完"）
         _wipe_illusts_and_tags(clean_db)

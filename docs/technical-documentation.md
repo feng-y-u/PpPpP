@@ -174,7 +174,7 @@ E:\pixiv\
 │   ├── sandbox_pytest_shim.py     # DSH 沙箱专用插件：剥 os.mkdir 的 mode（0o700 → ACL 问题）
 │   ├── pixiv-cleanup.sh           # 仅清理已下载原图（30 天前 + 收藏 <100），realpath 越界保护
 │   └── _inspect_db.py             # 巡检：打印表名与硬编码表名行数（表名清单已同步 v5 删表）
-├── tests/                         # conftest + 测试文件（当前 487 passed / 2 skipped，约 20s；见 AGENTS.md「测试」与 QUALITY_BASELINE.md）
+├── tests/                         # conftest + 测试文件（当前 488 passed / 2 skipped，约 20s；见 AGENTS.md「测试」与 QUALITY_BASELINE.md）
 ├── docs/
 │   ├── architecture.md            # 模块地图 + -w 1 语义 + app 命名空间测试补丁契约（改动前必读）
 │   ├── maintenance.md             # 运维手册（存储分类 / 备份回退 / gunicorn 部署 / 清理脚本）
