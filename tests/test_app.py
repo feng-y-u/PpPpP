@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import zipfile
+from html.parser import HTMLParser
 from unittest.mock import patch
 
 import pytest
@@ -1397,6 +1398,74 @@ class TestGalleryPageSize:
         assert len(data['data']) == 3, f'默认页大小应为设置值 3，实际 {len(data["data"])}'
         assert data['total'] == 6
         assert data['has_more'] is True
+
+
+class _AncestryProbe(HTMLParser):
+    """记录某个 id 元素出现时的祖先链（tag, class）。模板良构，够用。"""
+
+    _VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+             'link', 'meta', 'source', 'track', 'wbr'}
+
+    def __init__(self, target_id):
+        super().__init__(convert_charrefs=True)
+        self.target_id = target_id
+        self.stack = []
+        self.ancestors = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if self.ancestors is None and attrs.get('id') == self.target_id:
+            self.ancestors = list(self.stack)
+        if tag in self._VOID:
+            return
+        self.stack.append((tag, attrs.get('class', '')))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                return
+
+
+class TestGalleryDeleteModalStacking:
+    """删除确认弹窗不能被 `.full-page` 的入场动画困住（2026-11-14 用户反馈）。
+
+    症状：点图库卡片的「删除」→ 整屏变灰、看不到弹窗，只能刷新页面。
+    两个原因叠加才致命：
+    ① 弹窗当时写在 `.full-page` 内部，而 `.full-page` 的 `pageFadeIn` 用了 `both`
+       保留动画结束态 —— 末帧虽写 `transform: none`，Chrome 仍算成单位矩阵，
+       `.full-page` 因此永久是「包含块 + 层叠上下文」（实测 transform 为
+       `matrix(1, 0, 0, 1, 0, 0)`，动画早在 0.4s 前就结束了）；
+    ② 于是弹窗的 `position: fixed` 变成相对文档：滚动 320px 后 dialog 的 y = -234
+       （视口外），而 Bootstrap 追加到 body 的 `.modal-backdrop` 反而盖在整个
+       `.full-page` 之上 —— 用户只看到灰屏。同一坑还波及批量浮条与 toast。
+    这里分别钉住修复的两半：弹窗挂 body 直接子级、动画不保留结束态。
+    """
+
+    def test_delete_modal_is_not_inside_animated_wrapper(self, client):
+        """Bootstrap 弹窗必须挂在 body 直接子级（backdrop 追加在 body 上）。"""
+        html = client.get('/gallery').get_data(as_text=True)
+        probe = _AncestryProbe('deleteModal')
+        probe.feed(html)
+
+        assert probe.ancestors is not None, '图库页里找不到 #deleteModal'
+        tags = [t for t, _ in probe.ancestors]
+        classes = ' '.join(c for _, c in probe.ancestors if c)
+        assert tags == ['html', 'body'], f'弹窗的祖先链应只有 html > body，实际 {tags}'
+        assert 'full-page' not in classes, '弹窗不能放在 .full-page（动画会把它变成包含块）'
+
+    def test_full_page_animation_does_not_pin_transform(self):
+        """`.full-page` 的入场动画不得保留结束态：残留 transform 会困住内部 fixed 元素。"""
+        raw = pathlib.Path('pixivviewer/static/style.css').read_text(encoding='utf-8')
+        css = re.sub(r'/\*.*?\*/', '', raw, flags=re.S)      # 注释里会提到 both/forwards
+        block = re.search(r'\.full-page\s*\{([^}]*)\}', css)
+        assert block, 'style.css 里找不到 .full-page 规则'
+        rule = block.group(1)
+        assert 'animation' in rule, '.full-page 应保留入场动画（只是不保留结束态）'
+        for pinned in ('both', 'forwards'):
+            assert pinned not in rule, (
+                f'.full-page 动画不能用 {pinned}：结束态的 transform 会让它成为包含块，'
+                '内部 position:fixed 的弹窗/toast/批量浮条会改成相对文档定位')
 
 
 class TestDownloadFileZip:

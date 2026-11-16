@@ -230,7 +230,11 @@
     <div id="paginationStatus" style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;"></div>
   </div>
 </div>
+</div>
 
+<!-- 以下三个 fixed 元素（批量浮条 / toast / 删除确认弹窗）必须留在 .full-page 外面：
+     .full-page 挂了入场动画，一旦动画的 transform 残留，它们就会被当成相对文档定位。
+     Bootstrap 弹窗本身也约定挂在 body 下，backdrop 才盖不住它。 -->
 <!-- Batch Float Bar -->
 <div id="batchFloatBar" class="batch-float-bar hidden">
   <span id="batchFloatCount"></span>
@@ -267,8 +271,6 @@
 <script src="/static/vendor/bootstrap-5.3.3/bootstrap.bundle.min.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/page-gallery.js"></script>
-
-</div>
 
 <footer class="site-footer">
   <a href="https://github.com/feng-y-u/PpPpP" target="_blank" style="color:inherit;text-decoration:none;">github.com/feng-y-u/PpPpP</a>

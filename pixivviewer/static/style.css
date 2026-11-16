@@ -604,7 +604,11 @@ img.img-failed { background: var(--ice-2); object-fit: cover; opacity: .45; }
   min-height: calc(100vh - 58px);
   display: flex;
   flex-direction: column;
-  animation: pageFadeIn .4s var(--ease-soft) both;
+  /* 入场动画不能保留结束态（both / forwards）：`pageFadeIn` 的 transform 会被
+     填充住，`.full-page` 就此变成「包含块 + 层叠上下文」—— 里面任何
+     position:fixed 元素都改成相对文档定位，还会被 body 上的 .modal-backdrop 盖住。
+     图库「删除 → 整屏变灰却没有弹窗」就是这个：滚动 320px 后弹窗 y=-234，在视口外。 */
+  animation: pageFadeIn .4s var(--ease-soft) backwards;
 }
 .full-page > .container { flex: 1; }
 
