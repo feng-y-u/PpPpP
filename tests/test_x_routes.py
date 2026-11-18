@@ -29,9 +29,10 @@ def _token(client):
     return client.get('/csrf-token').get_json()['token']
 
 
-def _add_work(session, tweet_id, tag='#tag', dup_status=None, media_count=1):
+def _add_work(session, tweet_id, tag='#tag', dup_status=None, media_count=1, saved_status=None):
     work = XWork(tweet_id=tweet_id, tag=tag, author_name='A', author_screen_name='a',
-                 text='t', media_count=media_count, dup_status=dup_status)
+                 text='t', media_count=media_count, dup_status=dup_status,
+                 saved_status=saved_status)
     work.media_list = [{'url': f'https://pbs.twimg.com/media/{tweet_id}.jpg?name=orig',
                         'w': 100, 'h': 100}]
     session.add(work)
@@ -159,6 +160,18 @@ class TestXWorkActions:
         assert resp.status_code == 202
         assert submitted and submitted[0][1] == (work.id,)
 
+    def test_download_rejected_while_in_flight(self, client, clean_db, monkeypatch):
+        """queued/downloading 期间重复提交必须 409 —— 放行就是两个线程写同一批文件。"""
+        token = _token(client)
+        for i, status in enumerate(('queued', 'downloading')):
+            work = _add_work(clean_db, f'180000000000000041{i}', saved_status=status)
+            resp = client.post(f'/api/x/works/{work.id}/download',
+                               headers={'X-CSRF-Token': token})
+            assert resp.status_code == 409, f'{status} 期间重复下载未被拒绝'
+            assert '正在下载' in resp.get_json()['error']
+            clean_db.query(XWork).filter_by(id=work.id).delete()
+            clean_db.commit()
+
     def test_dup_confirm_writes_work_link(self, client, clean_db):
         work = _add_work(clean_db, '1800000000000000501', dup_status='suspected')
         token = _token(client)
@@ -200,3 +213,70 @@ class TestXWorkActions:
         from pixivviewer.models import ArtistLink
         row = clean_db.get(ArtistLink, 42)
         assert row.x_screen_name == 'artist_a'
+
+    def test_artist_link_list_and_delete(self, client, clean_db):
+        from pixivviewer.models import ArtistLink
+        clean_db.add(ArtistLink(pixiv_user_id=7, x_screen_name='who', source='manual'))
+        clean_db.commit()
+
+        rows = client.get('/api/x/artist-links').get_json()
+        assert rows == [{'pixiv_user_id': 7, 'x_screen_name': 'who'}]
+
+        token = _token(client)
+        assert client.delete('/api/x/artist-links/999',
+                             headers={'X-CSRF-Token': token}).status_code == 404
+        resp = client.delete('/api/x/artist-links/7',
+                              headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert clean_db.query(ArtistLink).count() == 0
+
+
+class TestXTagHonesty:
+    """「承诺的动作真的会发生」：未启用时接口如实说，不回一个空转的 queued。"""
+
+    @staticmethod
+    def _silence_wakeup(monkeypatch):
+        # 路由会叫醒真实存在的后台抓取线程；测试里让它空叫（不发任何 X 请求）
+        from pixivviewer import background
+        monkeypatch.setattr(background, 'trigger_x_fetch', lambda: None)
+
+    def test_refresh_rejected_when_loop_disabled(self, client, clean_db, monkeypatch):
+        clean_db.add(XTag(tag='#a', enabled=1, status='done'))
+        clean_db.commit()
+        self._silence_wakeup(monkeypatch)
+        token = _token(client)
+        for enabled, interval in ((False, 900), (True, 0)):
+            monkeypatch.setattr(runtime, '_x_prefetch_state',
+                                {'enabled': enabled, 'interval': interval})
+            resp = client.post('/api/x/tags/%23a/refresh',
+                               headers={'X-CSRF-Token': token})
+            assert resp.status_code == 409, f'enabled={enabled}, interval={interval} 时应拒绝'
+            assert '未启用' in resp.get_json()['error']
+
+    def test_refresh_queues_when_loop_active(self, client, clean_db, monkeypatch):
+        clean_db.add(XTag(tag='#b', enabled=1, status='done'))
+        clean_db.commit()
+        self._silence_wakeup(monkeypatch)
+        monkeypatch.setattr(runtime, '_x_prefetch_state',
+                            {'enabled': True, 'interval': 900})
+        token = _token(client)
+        resp = client.post('/api/x/tags/%23b/refresh',
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 200
+        assert resp.get_json()['queued'] is True
+
+    def test_add_tag_reports_whether_fetch_will_run(self, client, clean_db, monkeypatch):
+        self._silence_wakeup(monkeypatch)
+        token = _token(client)
+        monkeypatch.setattr(runtime, '_x_prefetch_state',
+                            {'enabled': False, 'interval': 900})
+        resp = client.post('/api/x/tags', json={'tag': '#c'},
+                           headers={'X-CSRF-Token': token})
+        assert resp.status_code == 201
+        assert resp.get_json()['triggered'] is False
+
+        monkeypatch.setattr(runtime, '_x_prefetch_state',
+                            {'enabled': True, 'interval': 900})
+        resp = client.post('/api/x/tags', json={'tag': '#d'},
+                           headers={'X-CSRF-Token': token})
+        assert resp.get_json()['triggered'] is True

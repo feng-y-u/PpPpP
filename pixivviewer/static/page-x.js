@@ -40,8 +40,16 @@ async function loadXStatus() {
     const s = await xApi('/api/x/status');
     const bits = [];
     const st = s.state || {};
-    bits.push(st.enabled ? `抓取已开启（每 ${st.interval}s）` : '抓取已关闭');
-    if (st.last_check) bits.push('上次：' + st.last_check.replace('T', ' ').slice(0, 19));
+    const interval = Number(st.interval) || 0;
+    // 文案与后端循环的判定同口径（enabled && interval > 0 才抓）：
+    // "每 0s" 会让用户以为在抓，实际循环空转
+    if (st.enabled && interval > 0) bits.push(`抓取已开启（每 ${interval}s）`);
+    else if (st.enabled) bits.push('<span class="warn">已开启但间隔为 0（不会抓取）</span>');
+    else bits.push('抓取已关闭');
+    if (st.last_check) {
+      const d = new Date(st.last_check);
+      bits.push('上次：' + (isNaN(d.getTime()) ? st.last_check : d.toLocaleString()));
+    }
     if (st.last_error) bits.push(`<span class="warn">最近错误：${escHtml(st.last_error)}</span>`);
     if (!s.cookie_configured) bits.push('<span class="warn">未配置 X Cookie（设置页填写）</span>');
     if (!s.query_id_configured) bits.push('<span class="warn">未配置 query_id（instance/x_api.json）</span>');
@@ -67,11 +75,16 @@ async function loadXTags() {
     const chip = document.createElement('span');
     chip.className = 'x-tag' + (xActiveTag === t.tag ? ' active' : '');
     chip.title = t.error || `上次抓取：${t.last_fetch_at || '从未'}`;
-    chip.innerHTML = `${escHtml(t.tag)} <span class="del">×</span>` +
+    chip.innerHTML = `${escHtml(t.tag)} <span class="ref" title="立即抓取这个标签">↻</span>` +
+      `<span class="del" title="删除标签">×</span>` +
       (t.error ? ' <span class="err">!</span>' : '');
     chip.addEventListener('click', (e) => {
       if (e.target.closest('.del')) {
         deleteXTag(t.tag);
+        return;
+      }
+      if (e.target.closest('.ref')) {
+        refreshXTag(t.tag);
         return;
       }
       xActiveTag = t.tag;
@@ -81,19 +94,35 @@ async function loadXTags() {
   });
 }
 
+async function refreshXTag(tag) {
+  try {
+    await xPost('/api/x/tags/' + encodeURIComponent(tag) + '/refresh');
+    showToast('已加入本轮抓取，稍后点「刷新列表」查看新图');
+  } catch (e) {
+    showToast('刷新失败：' + e.message, true);
+  }
+}
+
 async function addXTag() {
   const input = $('#xTagInput');
+  const addBtn = $('#xTagAddBtn');
   const tag = (input.value || '').trim();
-  if (!tag) return;
+  if (!tag || input.disabled) return;
+  input.disabled = true;
+  addBtn.disabled = true;
   try {
-    await xPost('/api/x/tags', { tag });
+    const data = await xPost('/api/x/tags', { tag });
     input.value = '';
-    showToast('已添加，正在后台抓取');
+    // triggered=false 时这轮不会真的抓（总开关/间隔没开）：不能承诺"正在抓取"
+    showToast(data.triggered ? '已添加，正在后台抓取' : '已添加（X 抓取未启用，去设置页开启）');
     xActiveTag = tag;
     await loadXTags();
     reloadXItems();
   } catch (e) {
     showToast('添加失败：' + e.message, true);
+  } finally {
+    input.disabled = false;
+    addBtn.disabled = false;
   }
 }
 
@@ -130,9 +159,19 @@ function renderXCard(item) {
   const dupActions = item.dup_status === 'suspected'
     ? `<button class="btn btn-sm btn-outline-warning" data-dup="confirm">确认同一作品</button>
        <button class="btn btn-sm btn-outline-secondary" data-dup="ignore">不是</button>` : '';
-  const downloadBtn = item.saved_status === 'done'
-    ? '<span class="btn btn-sm btn-dl-done">已下载</span>'
-    : `<button class="btn btn-sm btn-soft" data-dl>下载${item.media_count > 1 ? `（${item.media_count} 张）` : ''}</button>`;
+  // 下载区按 saved_status 全枚举：queued/downloading 期间按钮必须不可点，
+  // 否则任何重渲染（别的下载完成、dup 操作、切标签）都会把"下载中"的按钮
+  // 复活成可点状态 → 后端 409 兜底之前的重复提交窗口
+  let downloadBtn;
+  if (item.saved_status === 'done') {
+    downloadBtn = '<span class="btn btn-sm btn-dl-done">已下载</span>';
+  } else if (item.saved_status === 'downloading' || item.saved_status === 'queued') {
+    downloadBtn = '<span class="btn btn-sm btn-dl-done">下载中…</span>';
+  } else {
+    downloadBtn = `<button class="btn btn-sm btn-soft" data-dl>` +
+      (item.saved_status === 'failed' ? '重试下载' : `下载${item.media_count > 1 ? `（${item.media_count} 张）` : ''}`) +
+      '</button>';
+  }
 
   col.innerHTML = `
     <div class="x-card" data-id="${item.id}">
@@ -150,6 +189,7 @@ function renderXCard(item) {
              href="https://x.com/${encodeURIComponent(item.author_screen_name || 'i')}/status/${encodeURIComponent(item.tweet_id)}">原推</a>
           ${pixivLink}
           ${dupActions}
+          <button class="btn btn-sm btn-outline-danger" data-del title="删除这条记录">×</button>
         </div>
       </div>
     </div>`;
@@ -160,6 +200,8 @@ function renderXCard(item) {
   });
   const dl = card.querySelector('[data-dl]');
   if (dl) dl.addEventListener('click', () => downloadXWork(item.id, dl));
+  const del = card.querySelector('[data-del]');
+  if (del) del.addEventListener('click', () => deleteXWork(item.id));
   card.querySelectorAll('[data-dup]').forEach(btn => {
     btn.addEventListener('click', () => markXDup(item.id, btn.dataset.dup));
   });
@@ -192,29 +234,63 @@ function reloadXItems() {
   loadXStatus();
 }
 
+// 单卡原地更新：下载完成 / dup 确认后只换这一张卡，不整页 reload ——
+// 整页 reload 会把 xOffset 清零，翻页翻得深的用户被弹回第一屏
+async function refreshXCard(id) {
+  try {
+    const row = await xApi(`/api/x/works/${id}`);
+    const old = document.querySelector(`.x-card[data-id="${id}"]`);
+    if (old) old.parentElement.replaceWith(renderXCard(row));
+  } catch { /* 卡片被过滤/删除时静默跳过 */ }
+}
+
 async function downloadXWork(id, btn) {
+  if (btn.disabled) return;
   btn.disabled = true;
-  btn.textContent = '下载中...';
+  btn.textContent = '已加入队列';
   try {
     await xPost(`/api/x/works/${id}/download`);
-    // 简单轮询：下载完成后刷新这张卡的状态
-    let tries = 0;
-    const timer = setInterval(async () => {
-      tries += 1;
-      try {
-        const row = await xApi(`/api/x/works/${id}`);
-        if (row.saved_status === 'done' || row.saved_status === 'failed') {
-          clearInterval(timer);
-          reloadXItems();
-          showToast(row.saved_status === 'done' ? '下载完成' : '下载失败', row.saved_status !== 'done');
-        }
-      } catch { /* 忽略轮询错误 */ }
-      if (tries > 60) clearInterval(timer);
-    }, 3000);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = '下载';
     showToast('下载失败：' + e.message, true);
+    return;
+  }
+  // 轮询：30 张图 × 60s 读超时的最坏情况远超 3 分钟，封顶要够长；
+  // 连续网络错误也要终止轮询 —— 否则按钮永远停在"下载中…"没人管
+  let tries = 0;
+  let misses = 0;
+  const timer = setInterval(async () => {
+    tries += 1;
+    try {
+      const row = await xApi(`/api/x/works/${id}`);
+      misses = 0;
+      if (row.saved_status === 'done' || row.saved_status === 'failed') {
+        clearInterval(timer);
+        await refreshXCard(id);
+        showToast(row.saved_status === 'done' ? '下载完成' : '下载失败', row.saved_status !== 'done');
+      }
+    } catch { misses += 1; }
+    if (misses >= 5 || tries > 200) {
+      clearInterval(timer);
+      showToast('下载仍在进行或状态未知，稍后点「刷新列表」查看', true);
+    }
+  }, 3000);
+}
+
+async function deleteXWork(id) {
+  if (!confirm('删除这条 X 作品记录？（已下载的图片文件不会删除）')) return;
+  try {
+    await xApi(`/api/x/works/${id}`, {
+      method: 'DELETE', headers: { 'X-CSRF-Token': xCsrf },
+    });
+    const card = document.querySelector(`.x-card[data-id="${id}"]`);
+    if (card) card.parentElement.remove();
+    xTotal = Math.max(0, xTotal - 1);
+    $('#xEmpty').style.display = (xTotal === 0) ? 'block' : 'none';
+    showToast('已删除');
+  } catch (e) {
+    showToast('删除失败：' + e.message, true);
   }
 }
 
@@ -222,9 +298,55 @@ async function markXDup(id, action) {
   try {
     await xPost(`/api/x/works/${id}/dup`, { action });
     showToast(action === 'confirm' ? '已记为同一作品' : '已忽略，不再提示');
-    reloadXItems();
+    await refreshXCard(id);
   } catch (e) {
     showToast('操作失败：' + e.message, true);
+  }
+}
+
+// ── 画师映射（H1 疑似判定的前提数据）──
+async function loadXLinks() {
+  const links = await xApi('/api/x/artist-links').catch(() => []);
+  const list = $('#xLinkList');
+  if (!list) return;
+  list.innerHTML = links.length
+    ? links.map(l =>
+        `<span class="x-tag" data-uid="${l.pixiv_user_id}" title="点击移除这条映射">` +
+        `Pixiv #${l.pixiv_user_id} ↔ @${escHtml(l.x_screen_name)} <span class="del">×</span></span>`).join('')
+    : '<span class="x-sub">还没有映射。H1「疑似同一作品」只对有映射的画师生效。</span>';
+  list.querySelectorAll('[data-uid]').forEach(chip => {
+    chip.addEventListener('click', async (e) => {
+      if (!e.target.closest('.del')) return;
+      const uid = chip.dataset.uid;
+      try {
+        await xApi(`/api/x/artist-links/${uid}`, {
+          method: 'DELETE', headers: { 'X-CSRF-Token': xCsrf },
+        });
+        showToast('已移除映射');
+        loadXLinks();
+      } catch (err) {
+        showToast('移除失败：' + err.message, true);
+      }
+    });
+  });
+}
+
+async function addXLink() {
+  const uid = ($('#xLinkUid')?.value || '').trim();
+  const handle = ($('#xLinkHandle')?.value || '').trim();
+  const name = (handle || '').replace(/^@+/, '');
+  if (!/^\d+$/.test(uid) || !name) {
+    showToast('画师映射需要 Pixiv 数字 UID 和 X 用户名', true);
+    return;
+  }
+  try {
+    await xPost('/api/x/artist-links', { pixiv_user_id: uid, x_screen_name: name });
+    $('#xLinkUid').value = '';
+    $('#xLinkHandle').value = '';
+    showToast('已保存映射');
+    loadXLinks();
+  } catch (e) {
+    showToast('保存失败：' + e.message, true);
   }
 }
 
@@ -233,6 +355,7 @@ $('#xTagAddBtn').addEventListener('click', addXTag);
 $('#xTagInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') addXTag(); });
 $('#xMoreBtn').addEventListener('click', () => loadXItems(false));
 $('#xRefreshBtn').addEventListener('click', reloadXItems);
+$('#xLinkAddBtn')?.addEventListener('click', addXLink);
 $('#xDupFilter').addEventListener('click', (e) => {
   const btn = e.currentTarget;
   const order = ['all', 'hide', 'only'];
@@ -245,4 +368,5 @@ $('#xDupFilter').addEventListener('click', (e) => {
 
 loadXStatus();
 loadXTags();
+loadXLinks();
 loadXItems(true);

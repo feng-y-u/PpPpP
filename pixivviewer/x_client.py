@@ -327,12 +327,33 @@ def extract_pixiv_id(urls: list[str], text: str = '') -> Optional[int]:
     return None
 
 
+# X 的 created_at 恒为英文星期/月份缩写（"Mon Nov 17 10:00:00 +0000 2026"）。
+# 不用 strptime 的 %a/%b：它们按进程 locale 解释名称，非 C/英文 locale 下会
+# ValueError，推文时间全部变 None、H1 的时间窗就永远算不出来。
+_CREATED_AT_MONTHS = {
+    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+}
+
+
 def _parse_created_at(value: str) -> Optional[datetime]:
     if not value:
         return None
+    parts = str(value).split()
+    if len(parts) != 6:
+        return None
+    _wd, mon, day_s, hms, _tz, year_s = parts
+    month = _CREATED_AT_MONTHS.get(mon)
+    if month is None:
+        return None
     try:
-        return datetime.strptime(value, '%a %b %d %H:%M:%S %z %Y').replace(tzinfo=None)
-    except (ValueError, TypeError):
+        hms_parts = hms.split(':')
+        if len(hms_parts) != 3:
+            return None
+        # 沿用旧行为：保留墙面时钟（X 搜索响应恒为 +0000，墙面钟即 UTC）
+        return datetime(int(year_s), month, int(day_s),
+                        int(hms_parts[0]), int(hms_parts[1]), int(hms_parts[2]))
+    except (TypeError, ValueError):
         return None
 
 

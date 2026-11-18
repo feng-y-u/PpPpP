@@ -75,49 +75,54 @@ def index_local_files(session, limit: int = 200) -> dict:
 
     幂等：按 path + mtime + size 判断是否变化；文件已不在的旧行会被清掉。
     返回 {'indexed': n, 'seen': n, 'missing': n}。
+
+    串行执行：设置页的「重建指纹索引」和后台 `_hash_index_loop` 都会调它，
+    两个会话并发对同一批文件做"查重 → INSERT"会撞 `image_hashes` 主键
+    （一边 flush 后另一边才查到不存在），锁住整个扫描换确定性。
     """
-    rows = (session.query(Illust)
-            .filter(Illust.download_status == 'done')
-            .filter(Illust.local_paths.isnot(None))
-            .order_by(Illust.id.desc())
-            .limit(limit * 4)          # 多取一些，跳过文件缺失/已索引的行
-            .all())
-    existing = {row.path: row for row in session.query(ImageHash).all()}
-    indexed = seen = missing = 0
-    for illust in rows:
-        paths = illust.local_paths_list or []
-        if not paths:
-            continue
-        path = paths[0]
-        if not os.path.isfile(path):
-            stale = existing.get(path)
-            if stale is not None:
-                session.delete(stale)
-                missing += 1
-            continue
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        row = existing.get(path)
-        if row is not None and abs(row.mtime - stat.st_mtime) < 0.5 and row.size == stat.st_size:
-            seen += 1
-            continue
-        try:
-            digest = dhash(path)
-        except (HashUnavailable, OSError, ValueError):
-            continue
-        if row is None:
-            row = ImageHash(path=path)
-            session.add(row)
-        row.pixiv_id = illust.pixiv_id
-        row.dhash = digest
-        row.mtime = stat.st_mtime
-        row.size = stat.st_size
-        indexed += 1
-        if indexed >= limit:
-            break
-    return {'indexed': indexed, 'seen': seen, 'missing': missing}
+    with _index_lock:
+        rows = (session.query(Illust)
+                .filter(Illust.download_status == 'done')
+                .filter(Illust.local_paths.isnot(None))
+                .order_by(Illust.id.desc())
+                .limit(limit * 4)          # 多取一些，跳过文件缺失/已索引的行
+                .all())
+        existing = {row.path: row for row in session.query(ImageHash).all()}
+        indexed = seen = missing = 0
+        for illust in rows:
+            paths = illust.local_paths_list or []
+            if not paths:
+                continue
+            path = paths[0]
+            if not os.path.isfile(path):
+                stale = existing.get(path)
+                if stale is not None:
+                    session.delete(stale)
+                    missing += 1
+                continue
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            row = existing.get(path)
+            if row is not None and abs(row.mtime - stat.st_mtime) < 0.5 and row.size == stat.st_size:
+                seen += 1
+                continue
+            try:
+                digest = dhash(path)
+            except (HashUnavailable, OSError, ValueError):
+                continue
+            if row is None:
+                row = ImageHash(path=path)
+                session.add(row)
+            row.pixiv_id = illust.pixiv_id
+            row.dhash = digest
+            row.mtime = stat.st_mtime
+            row.size = stat.st_size
+            indexed += 1
+            if indexed >= limit:
+                break
+        return {'indexed': indexed, 'seen': seen, 'missing': missing}
 
 
 def find_hash_match(session, digest: str, max_distance: int) -> Optional[tuple[int, int]]:

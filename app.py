@@ -43,6 +43,7 @@ from pixivviewer.middleware import bp as middleware_bp, _get_csrf_token, _safe_n
 from pixivviewer import background
 from pixivviewer.background import (
     _shutdown_background_threads, _reset_stuck_downloads, _reset_stuck_prefetch,
+    _reset_stuck_x,
     _prefetch_one_tag,
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
     _start_prefetch_thread, reset_prefetch_refresh,
@@ -155,6 +156,7 @@ _warn_if_tls_unverified()
 # 保持重构前 import 时序：init_db → _reset_stuck_*（清理残留状态）→ 后台线程启动 → atexit 注册。
 _reset_stuck_downloads()
 _reset_stuck_prefetch()
+_reset_stuck_x()
 # 越界重定向发现表：重启不丢（仅观测数据；文件缺失/损坏时从空表开始）
 runtime.load_thumb_redirect_hosts()
 

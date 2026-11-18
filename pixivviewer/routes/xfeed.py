@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import mimetypes
 import os
 import threading
 import time
@@ -36,6 +35,13 @@ _X_THUMB_FAIL_COOLDOWN = 30.0
 _x_thumb_failed: dict[str, float] = {}
 _x_thumb_failed_lock = threading.Lock()
 _x_thumb_sem = threading.Semaphore(6)
+
+# 缓存命中时的 Content-Type 按扩展名定死：mimetypes.guess_type 在
+# Python ≤3.9 / 精简 MIME 数据库下认不出 .webp（返回 None → 退成
+# image/jpeg → 被 nosniff 拒绝渲染，缓存反而比首取更糟，/thumb 的
+# .meta 教训同款）。这里的扩展名集合就是入口白名单，map 永远完备。
+_EXT_MIME = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+             '.png': 'image/png', '.webp': 'image/webp'}
 
 _TAG_MAX_LEN = 64
 
@@ -121,9 +127,17 @@ def x_tag_add() -> Response:
             db.add(row)
             safe_commit(db)
         data = _tag_dict(row)
+    # 让前端如实提示：总开关/间隔没开时，这轮不会真的抓（循环空转）
+    triggered = _x_loop_active()
     from ..background import trigger_x_fetch
     trigger_x_fetch()
-    return jsonify({'ok': True, 'tag': data}), 201
+    return jsonify({'ok': True, 'tag': data, 'triggered': triggered}), 201
+
+
+def _x_loop_active() -> bool:
+    """抓取循环当前是否会真的发请求（enabled 且 interval > 0，与循环判定同口径）。"""
+    state = runtime._x_prefetch_state
+    return bool(state.get('enabled')) and int(state.get('interval') or 0) > 0
 
 
 @bp.route('/api/x/tags/<path:tag>', methods=['DELETE'])
@@ -147,6 +161,10 @@ def x_tag_refresh(tag: str) -> Response:
     with get_session() as db:
         if db.query(XTag.tag).filter(XTag.tag == tag).first() is None:
             return jsonify({'error': '标签不存在'}), 404
+    # 用户点"刷新"的预期是"现在就抓"：循环没开时如实拒绝，而不是回一个
+    # queued:True 然后让线程空转（那是在界面承诺一个不会发生的动作）
+    if not _x_loop_active():
+        return jsonify({'error': 'X 抓取未启用（设置页开启并设间隔 > 0）'}), 409
     from ..background import trigger_x_fetch
     trigger_x_fetch()
     return jsonify({'ok': True, 'queued': True})
@@ -254,10 +272,24 @@ def x_work_download(work_id: int) -> Response:
             return jsonify({'error': '作品不存在'}), 404
         if work.saved_status == 'done':
             return jsonify({'ok': True, 'status': 'done'})
+        if work.saved_status in ('downloading', 'queued'):
+            # 不只是挡重复点击：双击/页面重渲染复活按钮都会走到这里，放行
+            # 就是两个线程写同一批文件（图片交错损坏）
+            return jsonify({'error': '该作品正在下载中'}), 409
         work.saved_status = 'queued'
         safe_commit(db)
     from ..background import _download_x_work
-    runtime.x_download_executor.submit(_download_x_work, work_id)
+    try:
+        runtime.x_download_executor.submit(_download_x_work, work_id)
+    except RuntimeError:
+        # 执行器正在关闭（进程退出窗口）：把 queued 状态回滚，别让卡上的
+        # "下载中" 挂到下次重启（启动重置只兜底进程真挂掉的情况）
+        with get_session() as db:
+            row = db.get(XWork, work_id)
+            if row is not None and row.saved_status == 'queued':
+                row.saved_status = 'failed'
+                safe_commit(db)
+        return jsonify({'error': '下载服务正在关闭，请稍后重试'}), 503
     return jsonify({'ok': True, 'status': 'queued'}), 202
 
 
@@ -304,6 +336,28 @@ def x_work_dup(work_id: int) -> Response:
         safe_commit(db)
         data = {'dup_status': work.dup_status, 'dup_pixiv_id': work.dup_pixiv_id}
     return jsonify({'ok': True, **data})
+
+
+@bp.route('/api/x/artist-links')
+def x_artist_links_get() -> Response:
+    """H1 的前提数据：Pixiv uid ↔ X handle 映射清单（X 页管理用）。"""
+    with get_session() as db:
+        rows = db.query(ArtistLink).order_by(ArtistLink.pixiv_user_id).all()
+        data = [{'pixiv_user_id': row.pixiv_user_id, 'x_screen_name': row.x_screen_name}
+                for row in rows]
+    return jsonify(data)
+
+
+@bp.route('/api/x/artist-links/<int:pixiv_user_id>', methods=['DELETE'])
+@_csrf_required
+def x_artist_link_delete(pixiv_user_id: int) -> Response:
+    with get_session() as db:
+        row = db.get(ArtistLink, pixiv_user_id)
+        if row is None:
+            return jsonify({'error': '映射不存在'}), 404
+        db.delete(row)
+        safe_commit(db)
+    return jsonify({'ok': True})
 
 
 @bp.route('/api/x/artist-links', methods=['POST'])
@@ -365,7 +419,7 @@ def x_image_proxy(url_b64: str) -> Response:
     ext = os.path.splitext(path_part)[1] or '.jpg'
     cache_path = os.path.join(_X_IMAGE_CACHE_DIR, f'{cache_key}{ext}')
     if os.path.isfile(cache_path):
-        return send_file(cache_path, mimetype=mimetypes.guess_type(cache_path)[0] or 'image/jpeg',
+        return send_file(cache_path, mimetype=_EXT_MIME.get(ext.lower(), 'image/jpeg'),
                          max_age=86400 * 7)
 
     now = time.time()
@@ -394,10 +448,19 @@ def x_image_proxy(url_b64: str) -> Response:
             if not mimetype.startswith('image/'):
                 raise requests.RequestException(f'非图片响应：{mimetype}')
             tmp = f'{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp'
-            with open(tmp, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            os.replace(tmp, cache_path)
+            try:
+                with open(tmp, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                os.replace(tmp, cache_path)
+            except BaseException:
+                # 半写的 tmp 不会被容量淘汰器认领（它只认 md5 命名），留着就是
+                # 只进不出的垃圾；写一半失败必须当场清掉再让异常走 502/500 路径
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
         finally:
             session.close()
     except requests.RequestException as e:

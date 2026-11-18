@@ -110,3 +110,23 @@ Pixiv 的 `upload_date` 是 JST 墙面时间，tweet 时间是 UTC：H1 比较�
   距离 5（默认阈值 6 内），说明阈值合适。
 - 未做真实 X 抓取：需要用户自己的登录 Cookie 与有效 query_id，先用
   `python scripts/x_probe.py` 在服务器上验证。
+
+## 提交后审查（2026-11-18 第二轮）
+
+两个审查代理对 `4571adf` 全量复查后修复（`549 passed / 0 failed`，+11 条回归测试）：
+
+- **Critical**：标签可永久卡死 `status='fetching'`（标记先于网络 I/O 提交、入库阶段无
+  try/except、启动无重置）→ 新增 `_reset_stuck_x()`（app.py 启动调用）+ 入库阶段
+  try/except 落 `error`；`queued`/`downloading` 残留同样重置为 `failed`。
+- 下载重入：路由对 in-flight 状态 409、提交失败回滚 `queued`；worker 加每作品互斥锁
+  （`_x_download_locks`，注销只删自己那份）；前端按钮按 saved_status 全枚举渲染。
+- 布尔归一化：`x_enabled` / `x_dedupe_hash` / `auto_follow_download` 走 cookie_secure
+  同款归一（`bool("false")` 是 True，直接 bool() 挡不住字符串）。
+- 交互层：下载/dup 操作改为单卡原地更新（不再把翻页弹回第一屏）；轮询失败/超时有终态
+  提示；状态条 enabled+interval=0 如实显示"不会抓取"；标签 chip 增加 ↻ 手动刷新
+  （未启用时后端 409 如实拒绝）；卡片增加 × 删除；新增画师映射管理（GET/DELETE
+  `/api/x/artist-links`，H1 的前提数据终于有 UI）。
+- 其他：指纹索引加 `_index_lock`（设置页扫描与后台循环不再竞态）；`x_download_executor`
+  纳入优雅关停；`/ximg` 缓存命中按扩展名定死 Content-Type（webp 在老 mimetypes 数据库
+  下会错）+ 半写 tmp 清理；created_at 解析脱离 locale（固定月份表替代 %a/%b）；
+  `tweet_id` 入库加 isdigit 守卫；query_id 优先级提示改为如实（x_api.json 优先）。

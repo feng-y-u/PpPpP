@@ -95,6 +95,7 @@ class TestCsrfProtection:
         ('DELETE', '/api/x/works/999999'),
         ('POST', '/api/x/works/999999/dup'),
         ('POST', '/api/x/artist-links'),
+        ('DELETE', '/api/x/artist-links/999999'),
         ('POST', '/api/x/dedupe/scan'),
     ]
 

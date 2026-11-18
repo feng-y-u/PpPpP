@@ -17,7 +17,13 @@
            background: var(--accent-subtle); color: var(--accent); font-size: 12px; cursor: pointer; border: 1px solid rgba(46,155,234,.25); }
   .x-tag.active { background: var(--accent); color: #fff; }
   .x-tag .del { opacity: .65; font-size: 11px; }
+  .x-tag .ref { opacity: .65; font-size: 11px; }
   .x-tag .err { color: var(--danger); }
+  .x-links { border: 1px solid var(--border-subtle); border-radius: var(--radius-card);
+             padding: 10px 12px; margin: 4px 0 12px; background: var(--bg-elevated); }
+  .x-links summary { cursor: pointer; font-size: 12.5px; color: var(--ink-soft); user-select: none; }
+  .x-links .x-link-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 8px; }
+  .x-links .x-link-form input { max-width: 180px; }
   .x-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
   .x-card { background: var(--bg-elevated); border-radius: var(--radius-card); overflow: hidden; height: 100%;
             box-shadow: var(--shadow-card); display: flex; flex-direction: column; }
@@ -78,6 +84,16 @@
 
   <div id="xStatus" class="x-status"></div>
   <div id="xTagBar" class="x-tagbar"></div>
+
+  <details class="x-links" id="xLinkBox">
+    <summary>画师映射（Pixiv ↔ X，让「疑似同一作品」生效）</summary>
+    <div class="x-link-form">
+      <input id="xLinkUid" class="form-control form-control-sm" placeholder="Pixiv 数字 UID（如 12345）" autocomplete="off">
+      <input id="xLinkHandle" class="form-control form-control-sm" placeholder="X 用户名（如 artist_a）" autocomplete="off">
+      <button id="xLinkAddBtn" class="btn btn-sm btn-soft">添加映射</button>
+    </div>
+    <div id="xLinkList" class="x-tagbar" style="margin:0;"></div>
+  </details>
 
   <div id="xGrid" class="row g-3"></div>
   <div id="xEmpty" class="x-empty" style="display:none;">还没有抓取过。先在上面添加一个标签。</div>

@@ -1202,10 +1202,47 @@ _x_wakeup = threading.Event()
 _x_prefetch_thread: threading.Thread | None = None
 _x_hash_thread: threading.Thread | None = None
 
+# X 下载的每作品互斥锁：路由只挡 "已下载"，队列里再塞进一个同 id 任务时，
+# 唯一能拦住"两个线程同时写同一批文件"的就是这把锁（Pixiv 侧同款是 download_locks）
+_x_download_locks: dict[int, threading.Lock] = {}
+_x_download_locks_guard = threading.Lock()
+
+
+def _release_x_download_lock(work_id: int, lock: threading.Lock) -> None:
+    """注销资源时只删自己那份：pop 前必须比对锁对象本身（并发新任务的锁不能删）。"""
+    with _x_download_locks_guard:
+        if _x_download_locks.get(work_id) is lock:
+            _x_download_locks.pop(work_id, None)
+
 
 def trigger_x_fetch() -> None:
     """让抓取线程立刻跑一轮（新增标签 / 手动刷新）。"""
     _x_wakeup.set()
+
+
+def _reset_stuck_x() -> None:
+    """启动即重置 X 侧残留状态（与 `_reset_stuck_prefetch` 同款防线）。
+
+    `fetching` 标记在网络 I/O **之前**就已提交：进程中途挂掉（部署重启、断电）
+    会留下永久 `fetching` 的标签行，`_x_fetch_tag` 的抢占检查会让它被永久跳过，
+    而唯一的界面恢复路径（删标签）还会连带删掉该标签全部作品记录。
+    `queued`/`downloading` 同理：执行器队列是进程内存，重启后任务已不存在。
+    """
+    with get_session() as db:
+        stuck_tags = (db.query(XTag).filter(XTag.status == 'fetching').all())
+        for row in stuck_tags:
+            row.status = 'error'
+            row.error = '上次抓取被中断（进程重启）'
+        stuck_works = (db.query(XWork)
+                       .filter(XWork.saved_status.in_(('queued', 'downloading')))
+                       .all())
+        for row in stuck_works:
+            row.saved_status = 'failed'
+        if stuck_tags or stuck_works:
+            safe_commit(db)
+    if stuck_tags or stuck_works:
+        logger.info(f'[x] 启动重置：{len(stuck_tags)} 个标签解除 fetching，'
+                    f'{len(stuck_works)} 条作品解除 queued/downloading')
 
 
 def _x_mark_tag(tag: str, status: str, error: str = '') -> None:
@@ -1221,7 +1258,9 @@ def _x_store_tweets(db, tag: str, tweets) -> int:
     """把本批推文写库；已存在的 tweet_id 直接跳过（跨标签、跨轮次都去重）。"""
     added = 0
     for tweet in tweets:
-        if not tweet.tweet_id:
+        # tweet_id 会进文件系统路径（downloads/x_<tweet_id>/）与 URL：只收纯数字，
+        # 让"路径里绝不出现用户可控字符"这条不变式对将来的改动也成立
+        if not tweet.tweet_id or not str(tweet.tweet_id).isdigit():
             continue
         exists = (db.query(XWork.id)
                   .filter(XWork.tweet_id == tweet.tweet_id)
@@ -1312,16 +1351,24 @@ def _x_fetch_tag(tag: str) -> dict:
         logger.error(f'[x] 标签 {tag} 抓取异常: {e}')
         return out
 
-    with get_session() as db:
-        out['added'] = _x_store_tweets(db, tag, tweets)
-        out['trimmed'] = _x_trim_capacity(db, tag)
-        row = db.query(XTag).filter(XTag.tag == tag).first()
-        if row is not None:
-            row.status = 'done'
-            row.error = ''
-            row.last_fetch_at = datetime.now(timezone.utc)
-            row.total = db.query(func.count(XWork.id)).filter(XWork.tag == tag).scalar() or 0
-        safe_commit(db)
+    # 入库阶段同样不能裸奔：DB 异常若从这里逃出去，标签会永远停在 'fetching'
+    #（网络阶段有 try/except，这里历史上没有 —— 抓取轮次被中断且无任何标记）。
+    try:
+        with get_session() as db:
+            out['added'] = _x_store_tweets(db, tag, tweets)
+            out['trimmed'] = _x_trim_capacity(db, tag)
+            row = db.query(XTag).filter(XTag.tag == tag).first()
+            if row is not None:
+                row.status = 'done'
+                row.error = ''
+                row.last_fetch_at = datetime.now(timezone.utc)
+                row.total = db.query(func.count(XWork.id)).filter(XWork.tag == tag).scalar() or 0
+            safe_commit(db)
+    except Exception as e:
+        out['error'] = f'入库失败: {e}'
+        _x_mark_tag(tag, 'error', out['error'])
+        logger.error(f'[x] 标签 {tag} 入库异常: {e}')
+        return out
 
     runtime._x_prefetch_state['tag'] = tag
     runtime._x_prefetch_state['found'] = len(tweets)
@@ -1402,7 +1449,26 @@ def _download_x_work(work_id: int) -> None:
     与 Pixiv 下载引擎完全分开：那边的锁/队列/进度都按 int pixiv_id 建键，
     共用会把两套语义搅在一起。图片地址只允许 `pbs.twimg.com`，且走无凭据
     会话 —— 绝不能把 X 的 Cookie 发给图床以外的任何主机。
+
+    路由只挡 `done`/`downloading`，队列里仍可能被塞进重复任务（双击、页面
+    重渲染复活按钮）：每作品互斥锁保证同一时刻只有一个线程在写这批文件。
     """
+    with _x_download_locks_guard:
+        lock = _x_download_locks.get(work_id)
+        if lock is None:
+            lock = threading.Lock()
+            _x_download_locks[work_id] = lock
+    if not lock.acquire(blocking=False):
+        logger.info(f'[x] 作品 {work_id} 已有下载任务在进行，跳过重复提交')
+        return
+    try:
+        _download_x_work_inner(work_id)
+    finally:
+        lock.release()
+        _release_x_download_lock(work_id, lock)
+
+
+def _download_x_work_inner(work_id: int) -> None:
     with get_session() as db:
         work = db.get(XWork, work_id)
         if work is None:
@@ -1480,6 +1546,9 @@ def _shutdown_background_threads() -> None:
     _x_prefetch_stop.set()
     _x_wakeup.set()          # 叫醒正在长等待的抓取线程
     download_executor.shutdown(wait=False)
+    # X 下载执行器同样要关：不关的话 concurrent.futures 的 atexit 钩子会等在途
+    # 任务跑完（读超时最坏 60s/张 × 2 worker），gunicorn worker 重启被拖住
+    runtime.x_download_executor.shutdown(wait=False)
 
 
 def start_background_threads() -> None:

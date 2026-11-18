@@ -95,17 +95,34 @@ def test_parse_tweet_id_from_urls():
         assert x_client.parse_tweet_id(url) == expected
 
 
-@pytest.mark.parametrize('status,kind', [
-    (401, x_client.XAuthError),
-    (403, x_client.XAuthError),
-    (429, x_client.XRateLimited),
-    (404, x_client.XQueryStale),
-    (422, x_client.XQueryStale),
-    (500, x_client.XError),
-])
-def test_http_error_classification(isolated_x, status, kind):
-    err = x_client._classify_http(status, 'body')
-    assert isinstance(err, kind)
+def test_http_error_classification(isolated_x):
+    """HTTP 状态码 → 异常类型映射（矩阵写成一条循环：同一不变式的输入变体）。"""
+    cases = [
+        (401, x_client.XAuthError),
+        (403, x_client.XAuthError),
+        (429, x_client.XRateLimited),
+        (404, x_client.XQueryStale),
+        (422, x_client.XQueryStale),
+        (500, x_client.XError),
+    ]
+    for status, kind in cases:
+        err = x_client._classify_http(status, 'body')
+        assert isinstance(err, kind), f'{status} 应归为 {kind.__name__}'
+
+
+def test_parse_created_at_is_locale_independent(isolated_x):
+    """X 的 created_at 解析不依赖进程 locale（%a/%b 会按 LC_TIME 解释英文缩写）。
+
+    标准格式、无时区尾巴的畸形输入、乱月份名三档输入钉同一个不变式：
+    合法输入给准确时间，其它一律 None（绝不让异常漏出去炸掉整页解析）。
+    """
+    parsed = x_client._parse_created_at('Mon Nov 17 10:00:00 +0000 2026')
+    assert (parsed.year, parsed.month, parsed.day) == (2026, 11, 17)
+    assert (parsed.hour, parsed.minute, parsed.second) == (10, 0, 0)
+
+    for bad in ('', None, 'not a date', 'Mon Foo 17 10:00:00 +0000 2026',
+                'Mon Nov 17 10:00 +0000 2026', 'Mon Nov 17 25:00:00 +0000 2026'):
+        assert x_client._parse_created_at(bad) is None, f'{bad!r} 应解析为 None'
 
 
 def test_load_cookie_parses_both_formats(isolated_x):

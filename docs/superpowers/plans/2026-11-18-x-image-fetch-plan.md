@@ -45,6 +45,7 @@
 1. `runtime.py`：`_x_prefetch_state`（键集合固定）、`x_download_executor`。
 2. `background.py`：`_x_fetch_tag` / `_x_prefetch_once` / `_x_prefetch_loop` /
    `_hash_index_loop` / `_download_x_work` / `_start_x_threads`；health 加 `x_prefetch_alive`。
+   后台线程 3 → 5（新增 X 抓取与指纹索引两条）。
 3. `config.py`：X 常量 + `SETTINGS_KEYS` + `SETTINGS_BOUNDS`。
 4. `routes/settings.py`：保存后同步 `_x_prefetch_state` 并 `trigger_x_fetch()`。
 5. `templates/settings.html` + `page-settings.js`：X 卡片（开关/间隔/页数/上限/query_id/

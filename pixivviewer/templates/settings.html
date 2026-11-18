@@ -154,7 +154,7 @@
           <input class="form-check-input" type="checkbox" id="x_enabled">
           <label class="form-check-label" for="x_enabled">启用 X 标签抓取</label>
         </div>
-        <div class="form-text">关闭后后台线程空转、不发任何 X 请求（修改后需重启生效）</div>
+        <div class="form-text">总开关：保存后立即生效（同时写入 settings.json，重启后保持）；关闭时后台线程空转、不发任何 X 请求</div>
       </div>
       <div class="mb-3">
         <label class="form-label" for="x_prefetch_interval">抓取间隔（秒）</label>
@@ -174,7 +174,7 @@
       <div class="mb-3">
         <label class="form-label" for="x_search_query_id">搜索 query_id</label>
         <input class="form-control form-control-sm" id="x_search_query_id" type="text" placeholder="留空则读 instance/x_api.json">
-        <div class="form-text">X 换版会失效，届时从浏览器开发者工具里复制新的 SearchTimeline queryId</div>
+        <div class="form-text">X 换版会失效，届时从浏览器开发者工具里复制新的 SearchTimeline queryId。两处都配置时以 instance/x_api.json 为准；修改后需重启生效</div>
       </div>
       <div class="mb-3">
         <div class="form-check">
@@ -182,13 +182,13 @@
           <label class="form-check-label" for="x_dedupe_hash">启用图像指纹去重（需安装 Pillow）</label>
         </div>
         <div class="form-text">
-          对已下载的 Pixiv 图片建立 dHash 索引，下载 X 图片时比对；未安装 Pillow 时自动不可用
+          对已下载的 Pixiv 图片建立 dHash 索引，下载 X 图片时比对；未安装 Pillow 时自动不可用；修改后需重启生效
         </div>
       </div>
       <div class="mb-3">
         <label class="form-label" for="x_hash_distance">指纹距离阈值</label>
         <input class="form-control form-control-sm" id="x_hash_distance" type="number" min="0" max="24" style="max-width:140px;">
-        <div class="form-text">汉明距离 ≤ 该值判为同一张图；越小越严格（建议 4-8）</div>
+        <div class="form-text">汉明距离 ≤ 该值判为同一张图；越小越严格（建议 4-8）；修改后需重启生效</div>
       </div>
       <hr>
       <div class="mb-3">

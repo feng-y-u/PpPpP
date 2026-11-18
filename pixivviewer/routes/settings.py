@@ -369,8 +369,11 @@ def api_settings_post() -> Response:
     for key in _SETTINGS_DEFAULTS:
         if key in body:
             val = body[key]
-            if key in ('auto_follow_download',):
-                val = bool(val)
+            # 布尔键统一归一化（与 cookie_secure 同口径）：bool("false") 是 True，
+            # 直接 bool() 挡不住字符串表单 —— 手改 settings.json 或第三方客户端
+            # 发 "false" 时，抓取会在用户以为关掉的时候跑起来
+            if key in ('auto_follow_download', 'x_enabled', 'x_dedupe_hash'):
+                val = str(val).strip().lower() in ('1', 'true', 'yes', 'on')
             elif key in config_module.SETTINGS_BOUNDS:
                 # 数值键必须落在 config.SETTINGS_BOUNDS 区间内：设置页的
                 # `<input min/max>` 不会在 fetch 保存时生效，清空输入框还会把

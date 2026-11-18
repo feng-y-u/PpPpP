@@ -363,9 +363,11 @@ if os.path.exists(_settings_path):
         for _json_key, (_const_name, _default) in SETTINGS_KEYS.items():
             if _json_key in _overrides and _overrides[_json_key] != '':
                 _val = _overrides[_json_key]
-                if _json_key == 'cookie_secure':
-                    # 统一布尔化：手改 settings.json 为字符串 "false" 时不能变成
-                    # 真值字符串（否则 Session Cookie 被标记 Secure，本地 HTTP 登录失效）
+                # 统一布尔化（cookie_secure 的历史注释就是为这个坑写的）：手改
+                # settings.json 为字符串 "false" 时不能变成真值字符串，否则
+                # "x_enabled": "false" 会让抓取在用户以为关掉的时候跑起来
+                if _json_key in ('cookie_secure', 'auto_follow_download',
+                                 'x_enabled', 'x_dedupe_hash'):
                     _val = str(_val).lower() in ('1', 'true', 'yes', 'on')
                 elif _json_key in SETTINGS_BOUNDS:
                     # 手改 settings.json 同样要过区间校验：0 个下载线程会让下次启动
