@@ -41,9 +41,14 @@ function renderHomeCard(r) {
   const imgSrc = r.medium_url || proxyThumb(r.thumb_url);
   const item = document.createElement('div');
   item.className = 'masonry-item';
+  // width/height 属性不是装饰：占位图解码前浏览器靠它算出内在比例，卡片一插入就有
+  // 真实高度，瀑布流才能按"最矮列"正确落位（没有它时卡片高度是 0，整批会堆进一列，
+  // 见 placeIntoColumns 的注释）。CSS 的 width:100%/height:auto 会覆盖这两个属性，
+  // 真图加载后仍按真图比例显示。
   item.innerHTML = `
     <div class="photo-card" tabindex="0" data-pixiv-id="${r.pixiv_id}">
       <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23f2e8ea'%3E%3C/svg%3E"
+           width="400" height="400"
            data-src="${escAttr(imgSrc)}" loading="lazy" decoding="async" class="img-fade" alt="">
       <div class="card-meta">
         <div class="card-meta-title">${escHtml(r.title || '无题')}</div>
@@ -81,12 +86,21 @@ function createBand() {
 
 // 最短列优先：读实时列高决定落点。卡片高度各不相同（懒加载后才是真实比例），
 // 按 i % 列数轮询会让列高越拉越偏。
-// 但列高不可靠时必须退回按序号轮询：图片还是占位 SVG 时（未解码）所有列的
-// offsetHeight 都是 0，`0 < 0` 恒为 false，首屏卡片会全部堆进第 1 列、右边整列空白
-// （手机实测踩过，2026-11-11）。所以"高度全不可用"时按序号兜底。
+// 但列高不可靠时必须退回按序号轮询：
+// ① 图片还是占位 SVG 时（未解码）所有列的 offsetHeight 都是 0，`0 < 0` 恒为 false，
+//    首屏卡片会全部堆进第 1 列、右边整列空白（2026-11-11 手机实测）；
+// ② 更隐蔽的一种：只有几列有内容、新追加的卡片却量不出高度。此时"选最矮列"选中
+//    的那一列永远不会变高，整批 24 张会连续倒进同一列，另一边空出好几屏
+//    （2026-11-18 手机实测，左右两列轮着出现）。判断依据放到"刚追加的这张卡到底
+//    有没有真实高度"上：只要上一张没高度（< UNMEASURED_MIN_HEIGHT），下一张就按
+//    序号走，直到重新量到真实高度。
+// 占位图另给了 width/height 属性（见 renderHomeCard），正常情况插入即有余量高度，
+// 这条兜底只在真的量不到时才生效。
+const UNMEASURED_MIN_HEIGHT = 40;   // 低于这个高度视为"还没拿到真实高度"
+
 function placeIntoColumns(band, node) {
   const heights = band.cols.map((col) => col.offsetHeight);
-  const usable = heights.some((h) => h > 0);
+  const usable = heights.some((h) => h > 0) && !band.unmeasured;
   let idx = 0;
   if (usable) {
     for (let i = 1; i < heights.length; i++) {
@@ -97,6 +111,8 @@ function placeIntoColumns(band, node) {
   }
   band.placed += 1;
   band.cols[idx].appendChild(node);
+  // 这一张能测出的高度，决定下一张还能不能信列高（见上面 ②）
+  band.unmeasured = node.offsetHeight < UNMEASURED_MIN_HEIGHT;
   return node;
 }
 
