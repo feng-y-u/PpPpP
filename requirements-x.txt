@@ -1,0 +1,6 @@
+# X 抓图的**可选**依赖：图像指纹去重（E2）需要 Pillow。
+# 不装也能用：E1（推文里的 Pixiv 链接）与 H1（同作者弱信号）不受影响，
+# 设置页会显示「Pillow：未安装（哈希去重不可用）」。
+# 用法：pip install -r requirements-x.txt
+-r requirements.txt
+Pillow>=10,<13

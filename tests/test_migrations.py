@@ -360,8 +360,51 @@ def test_alias_tags_migration_adds_column_with_empty_default(tmp_path):
             "SELECT alias_tags FROM search_cache").scalar() == '["星引擎party"]'
 
 
-# ── WAL 备份完整性（审计 S5）──
+def test_x_tables_migration_creates_isolated_tables(tmp_path):
+    """v7：X 抓图新增 5 张表，且**不碰 illusts**；重放幂等。
 
+    tweet_id 必须是 TEXT：X 的 id 是 64 位整数，存 INTEGER 会在前端往返时丢精度
+    （SQLite 的 INTEGER 本身放得下，但 JSON/JS 侧不行）。这一条在这里钉死，
+    防止以后有人"顺手"改成 INTEGER 主键。
+    """
+    database = tmp_path / "pixiv.db"
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE illusts ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, pixiv_id INTEGER UNIQUE NOT NULL,"
+            " title VARCHAR DEFAULT '', user_id INTEGER DEFAULT 0,"
+            " user_name VARCHAR DEFAULT '', tags TEXT DEFAULT '[]',"
+            " page_count INTEGER DEFAULT 1, bookmark_count INTEGER DEFAULT 0,"
+            " upload_date DATETIME, thumb_url VARCHAR DEFAULT '',"
+            " original_urls TEXT DEFAULT '[]', created_at DATETIME)"
+        )
+        conn.exec_driver_sql("INSERT INTO illusts (pixiv_id) VALUES (123)")
+        conn.exec_driver_sql("PRAGMA user_version = 6")
+
+    run_migrations(engine, MIGRATIONS)
+
+    with engine.connect() as conn:
+        names = {row[0] for row in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ('x_tags', 'x_works', 'artist_links', 'work_links', 'image_hashes'):
+            assert table in names, f'v7 未创建 {table}'
+        columns = {row[1]: row[2] for row in conn.exec_driver_sql("PRAGMA table_info(x_works)")}
+        assert columns['tweet_id'] == 'VARCHAR'
+        assert conn.exec_driver_sql("SELECT pixiv_id FROM illusts").scalar() == 123
+
+    assert _user_version(engine) == LATEST_SCHEMA_VERSION
+
+    # 幂等：重复执行不报错、不清数据
+    migrate_x = dict(MIGRATIONS)[7]
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO x_works (tweet_id, tag) VALUES ('1800000000000000001', '#a')")
+        migrate_x(conn)
+        assert conn.exec_driver_sql("SELECT COUNT(*) FROM x_works").scalar() == 1
+
+
+# ── WAL 备份完整性（审计 S5）──
 def _wal_engine(tmp_path, database_name='pixiv.db'):
     """建一个 WAL 模式的库，并写入一行**只存在于 -wal 中**的数据。"""
     database = tmp_path / database_name

@@ -188,6 +188,37 @@ SSL_VERIFY = os.environ.get('SSL_VERIFY', 'true').lower() != 'false'
 # 白名单外的主机仍可访问（下载引擎、缩略图重定向），但**不带 Cookie**。
 IMAGE_HOST_ALLOWLIST = frozenset({'i.pximg.net'})
 
+# ── X（Twitter）标签抓图 ───────────────────────────────────────────────
+# 凭据与接口版本都放在实例目录里，不进仓库、不需要改代码：
+#   x_cookies.txt : auth_token=...; ct0=...
+#   x_api.json    : {"query_id": "...", "features": {...}, "bearer": "..."}
+# query_id 会随 X 发版漂移，届时只改 instance/x_api.json。
+X_COOKIE_PATH = os.path.join(_instance_dir, 'x_cookies.txt')
+X_API_CONFIG_PATH = os.path.join(_instance_dir, 'x_api.json')
+X_BASE_URL = 'https://x.com'
+X_API_BASE = 'https://x.com/i/api/graphql'
+# X 网页端公开的 bearer（非用户凭据）；允许被 x_api.json 覆盖
+X_DEFAULT_BEARER = (
+    'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs'
+    '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
+)
+X_TIMEOUT = (10, 30)          # (连接, 读取) 秒
+X_RATE_PER_15MIN = 15         # 搜索接口的保守预算；超了等下一轮，不要硬冲
+X_IMAGE_HOSTS = frozenset({'pbs.twimg.com'})   # 只代理/下载这些主机的图片
+X_IMAGE_CACHE_DIR = os.path.join(_instance_dir, 'x_image_cache')
+X_MAX_MEDIA_PER_TWEET = 30    # 单条推文超过这个数视为解析异常，直接跳过
+
+# 这些默认值必须在这里定义：settings.json 的覆盖只改**已存在**的全局变量，
+# 没有默认常量时设置页保存的值会写进一个没人读的键（与 _prefetch_state 那类
+# "键名对不上"的坑同源）。
+X_ENABLED = False             # 总开关；关闭时抓取线程空转、不发请求
+X_PREFETCH_INTERVAL = 3600    # 抓取间隔（秒），0 也等于停
+X_PREFETCH_PAGES = 1          # 每标签每轮翻多少页
+X_MAX_WORKS = 2000            # 单标签保留上限（超出淘汰最旧记录，不删文件）
+X_SEARCH_QUERY_ID = ''        # 留空则读 instance/x_api.json
+X_DEDUPE_HASH = True          # 图像指纹去重（需要 Pillow，未装时自动降级）
+X_HASH_DISTANCE = 6           # dHash 汉明距离阈值
+
 # 缩略图越界重定向自动发现（默认开启）：
 # 白名单外的**公网 https** 目标用无凭据会话跟随一次（且要求响应确实是图片），
 # 并记入发现表供观测（`GET /api/thumb/redirect-hosts`）。设 False → 跨域重定向
@@ -267,6 +298,14 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'prefetch_max_illusts': ('PREFETCH_MAX_ILLUSTS', 10000),
     'backup_interval': ('BACKUP_INTERVAL', 86400),
     'backup_keep': ('BACKUP_KEEP', 7),
+    # X 标签抓图（与 Pixiv 预取完全独立）
+    'x_enabled': ('X_ENABLED', False),
+    'x_prefetch_interval': ('X_PREFETCH_INTERVAL', 3600),
+    'x_prefetch_pages': ('X_PREFETCH_PAGES', 1),
+    'x_max_works': ('X_MAX_WORKS', 2000),
+    'x_search_query_id': ('X_SEARCH_QUERY_ID', ''),
+    'x_dedupe_hash': ('X_DEDUPE_HASH', True),
+    'x_hash_distance': ('X_HASH_DISTANCE', 6),
 }
 
 # 数值设置的合法区间（下界, 上界；上界 None = 不设上限）。
@@ -290,6 +329,11 @@ SETTINGS_BOUNDS: dict[str, tuple[int, int | None]] = {
     'prefetch_max_illusts': (1, 1_000_000),
     'backup_interval': (0, None),
     'backup_keep': (1, 120),
+    # X 抓图
+    'x_prefetch_interval': (0, None),
+    'x_prefetch_pages': (1, 10),
+    'x_max_works': (1, 100_000),
+    'x_hash_distance': (0, 24),
 }
 
 

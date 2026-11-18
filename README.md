@@ -17,6 +17,7 @@
 | 预取 | 配置标签（支持同义词合并），后台定时拉取；收藏数定期刷新、按容量自动淘汰 |
 | 自动关注 | 定时检查关注画师的新作，可自动下载 |
 | 备份 | SQLite 滚动快照（`/api/backups`），迁移前另有一次性备份 |
+| X 图片 | 按标签抓取 X 上的推文图片；与图库做同作品判定（链接 / 指纹 / 同作者疑似） |
 | 设置 | 全站访问密码、Cookie、代理、页大小、预取/关注节奏等 |
 
 所有 Pixiv 请求都经由一个适配层发出，带令牌桶限流（避开 403）与 Cookie 失效识别；图片走本地缓存代理，不会每次刷新都打图床。
@@ -81,6 +82,42 @@ python app.py
 | `ITEMS_PER_PAGE` | 每页作品数（默认 24，首页 / 图库 / 缓存页共用） |
 
 完整列表见 `pixivviewer/config.py` 的 `SETTINGS_KEYS`，也可以直接在设置页里改。
+
+## X 图片抓取（可选）
+
+和 Pixiv 预取同款用法：在「X 图片」页或设置页加一个标签，后台按间隔去 X 搜索最新图片，
+可以浏览、下载，并与图库里的 Pixiv 作品做同作品判定。
+
+**开启前需要准备两样东西**（都放在实例目录，不进仓库）：
+
+1. **登录 Cookie**：浏览器登录 x.com → F12 → Application → Cookies，复制 `auth_token` 与 `ct0`，
+   写进 `instance/x_cookies.txt`（一行 `auth_token=...; ct0=...`），或在设置页粘贴。
+2. **搜索 query_id**：X 网页版内部 GraphQL 的 `SearchTimeline` 会随发版换 id。
+   在浏览器 Network 里搜 `SearchTimeline`，把路径里的 `/graphql/<query_id>/` 填进
+   `instance/x_api.json`：
+
+   ```json
+   {"query_id": "填入你抓到的 id"}
+   ```
+
+   也可以只用设置页的 `x_search_query_id`。字段名变了再把 `features` 一起覆盖。
+
+先跑探针确认能连通（输出已脱敏）：
+
+```bash
+python scripts/x_probe.py '#原神'
+```
+
+**限制与风险**：
+
+- X 没有免费搜索 API，走的是网页内部接口，**随时可能失效**；失效时探针/设置页会提示
+  更新 query_id。
+- 抓取违反 X 服务条款，账号可能被限流甚至封禁，仅建议自用。
+- 只抓图片（`pbs.twimg.com` 的 jpg/png/webp），不处理视频/动图。
+- 同作品判定只有两类**决定性**证据：推文里带 Pixiv 链接、或图像指纹一致。同作者只能算
+  「疑似」，需要在页面上人工确认——作者相同不等于作品相同。
+- 指纹去重需要可选依赖：`pip install -r requirements-x.txt`（Pillow）。不装也能用，
+  只是少了指纹这一层。
 
 ## 生产部署
 

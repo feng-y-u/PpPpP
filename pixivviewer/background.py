@@ -12,6 +12,8 @@ from . import fetcher
 from . import helpers
 from . import pixiv_client
 from . import runtime
+from . import x_client
+from . import x_dedupe
 from sqlalchemy import and_, case, func, or_, text, update
 
 from . import backups
@@ -21,13 +23,15 @@ from .config import (IMAGE_HOST_ALLOWLIST, PAGE_DOWNLOAD_INTERVAL,
                     PREFETCH_REFRESH_ABORT_STREAK, PREFETCH_REFRESH_BACKOFF,
                     PREFETCH_REFRESH_BATCH, PREFETCH_REFRESH_FORCE_DONE,
                     PREFETCH_REFRESH_HOME, PREFETCH_REFRESH_NORMAL,
-                    PREFETCH_REFRESH_OLD, PREFETCH_REFRESH_OLD_AGE)
+                    PREFETCH_REFRESH_OLD, PREFETCH_REFRESH_OLD_AGE,
+                    X_IMAGE_HOSTS)
 from .fetcher import build_credentialless_session, build_pixiv_session, fetch_following
 from .helpers import _get_download_dir, _extract_ext, check_image_url
-from .models import (get_session, Illust, SearchCache,
+from .models import (get_session, Illust, SearchCache, XTag, XWork,
                     DownloadLog, safe_commit)
 from .runtime import (_auto_follow_state, _auto_follow_stop, _prefetch_state,
-                     _snapshot_state, _snapshot_stop,
+                     _snapshot_state, _snapshot_stop, _x_prefetch_state,
+                     _x_prefetch_stop,
                      _queued_downloads, _download_progress,
                      _download_queue_lock, is_queued_download,
                      queued_download_snapshot,
@@ -939,6 +943,7 @@ def get_background_health() -> dict:
         'auto_follow_alive': _auto_follow_thread is not None and _auto_follow_thread.is_alive(),
         # 同款语义：活着 ≠ 在留快照，是否在干活看 runtime._snapshot_state['enabled']
         'snapshot_alive': _snapshot_thread is not None and _snapshot_thread.is_alive(),
+        'x_prefetch_alive': _x_prefetch_thread is not None and _x_prefetch_thread.is_alive(),
         'last_check': last_check,
         'stale': stale,
         'last_error': _prefetch_state.get('last_error'),
@@ -1192,10 +1197,288 @@ def _download_illust(pixiv_id: int) -> None:
 _auto_follow_thread: threading.Thread | None = None
 
 
+# ── X（Twitter）标签抓图 ──
+_x_wakeup = threading.Event()
+_x_prefetch_thread: threading.Thread | None = None
+_x_hash_thread: threading.Thread | None = None
+
+
+def trigger_x_fetch() -> None:
+    """让抓取线程立刻跑一轮（新增标签 / 手动刷新）。"""
+    _x_wakeup.set()
+
+
+def _x_mark_tag(tag: str, status: str, error: str = '') -> None:
+    with get_session() as db:
+        row = db.query(XTag).filter(XTag.tag == tag).first()
+        if row is not None:
+            row.status = status
+            row.error = error
+            safe_commit(db)
+
+
+def _x_store_tweets(db, tag: str, tweets) -> int:
+    """把本批推文写库；已存在的 tweet_id 直接跳过（跨标签、跨轮次都去重）。"""
+    added = 0
+    for tweet in tweets:
+        if not tweet.tweet_id:
+            continue
+        exists = (db.query(XWork.id)
+                  .filter(XWork.tweet_id == tweet.tweet_id)
+                  .first())
+        if exists:
+            continue
+        work = XWork(
+            tweet_id=tweet.tweet_id,
+            tag=tag,
+            author_name=tweet.author_name,
+            author_screen_name=(tweet.author_screen_name or '').lower(),
+            text=(tweet.text or '')[:4000],
+            tweeted_at=tweet.tweeted_at,
+            media_count=tweet.media_count,
+        )
+        work.media_list = [m.to_dict() for m in tweet.media]
+        db.add(work)
+        db.flush()   # 让 apply_ingest_dedupe 能查到刚插入的行（同事务内可见）
+        x_dedupe.apply_ingest_dedupe(db, work, tweet)
+        added += 1
+    return added
+
+
+def _x_trim_capacity(db, tag: str) -> int:
+    """单标签容量上限：超出部分按入库顺序淘汰最旧的（不删磁盘文件）。"""
+    cap = int(runtime._x_prefetch_state.get('max_works') or 2000)
+    stale = (db.query(XWork)
+             .filter(XWork.tag == tag)
+             .order_by(XWork.id.desc())
+             .offset(cap)
+             .all())
+    for row in stale:
+        db.delete(row)
+    return len(stale)
+
+
+def _x_fetch_tag(tag: str) -> dict:
+    """抓一个标签（受 `x_prefetch_pages` 控制翻几页），返回统计字典。
+
+    失败只落到该标签的 `status/error` 上，不抛给调用方 —— 一个标签被限流
+    不该拖垮同一轮的其他标签。
+    """
+    tag = (tag or '').strip()
+    out = {'tag': tag, 'added': 0, 'trimmed': 0, 'error': None}
+    if not tag:
+        out['error'] = '标签为空'
+        return out
+    with get_session() as db:
+        row = db.query(XTag).filter(XTag.tag == tag).first()
+        if row is None:
+            out['error'] = '标签不存在'
+            return out
+        if row.status == 'fetching':
+            out['error'] = '该标签正在抓取'
+            return out
+        row.status = 'fetching'
+        row.error = ''
+        safe_commit(db)
+
+    tweets = []
+    try:
+        pages = max(1, int(runtime._x_prefetch_state.get('pages') or 1))
+        cursor = None
+        for _ in range(pages):
+            batch, cursor = x_client.search_timeline(tag, cursor)
+            tweets.extend(batch)
+            if not cursor:
+                break
+    except x_client.XAuthError as e:
+        out['error'] = str(e)
+        _x_mark_tag(tag, 'error', out['error'])
+        return out
+    except x_client.XRateLimited as e:
+        out['error'] = str(e)
+        _x_mark_tag(tag, 'error', out['error'])
+        return out
+    except x_client.XQueryStale as e:
+        out['error'] = str(e)
+        _x_mark_tag(tag, 'error', out['error'])
+        return out
+    except x_client.XNetworkError as e:
+        out['error'] = str(e)
+        _x_mark_tag(tag, 'error', out['error'])
+        return out
+    except Exception as e:  # 单标签异常不拖垮整轮
+        out['error'] = f'抓取失败: {e}'
+        _x_mark_tag(tag, 'error', out['error'])
+        logger.error(f'[x] 标签 {tag} 抓取异常: {e}')
+        return out
+
+    with get_session() as db:
+        out['added'] = _x_store_tweets(db, tag, tweets)
+        out['trimmed'] = _x_trim_capacity(db, tag)
+        row = db.query(XTag).filter(XTag.tag == tag).first()
+        if row is not None:
+            row.status = 'done'
+            row.error = ''
+            row.last_fetch_at = datetime.now(timezone.utc)
+            row.total = db.query(func.count(XWork.id)).filter(XWork.tag == tag).scalar() or 0
+        safe_commit(db)
+
+    runtime._x_prefetch_state['tag'] = tag
+    runtime._x_prefetch_state['found'] = len(tweets)
+    logger.info(f'[x] {tag}: 返回 {len(tweets)} 条，新增 {out["added"]} 条')
+    return out
+
+
+def _x_prefetch_once() -> dict:
+    """跑一轮：遍历所有 enabled 标签，串行抓取。"""
+    with get_session() as db:
+        tags = [row[0] for row in
+                db.query(XTag.tag).filter(XTag.enabled == 1).all()]
+    stats = {'tags': len(tags), 'added': 0}
+    errors = []
+    for tag in tags:
+        if _x_prefetch_stop.is_set():
+            break
+        result = _x_fetch_tag(tag)
+        stats['added'] += result['added']
+        if result['error']:
+            errors.append(f'{tag}: {result["error"]}')
+    runtime._x_prefetch_state['last_check'] = datetime.now(timezone.utc).isoformat()
+    runtime._x_prefetch_state['last_error'] = '; '.join(errors) or None
+    return stats
+
+
+def _x_prefetch_loop() -> None:
+    """`x_enabled` + `x_prefetch_interval` 都生效才发请求；禁用时只空转。"""
+    while not _x_prefetch_stop.is_set():
+        enabled = bool(runtime._x_prefetch_state.get('enabled'))
+        interval = int(runtime._x_prefetch_state.get('interval') or 0)
+        if not enabled or interval <= 0:
+            _x_wakeup.wait(60)
+            _x_wakeup.clear()
+            continue
+        runtime._x_prefetch_state['running'] = True
+        try:
+            _x_prefetch_once()
+        except Exception as e:
+            runtime._x_prefetch_state['last_error'] = f'本轮异常: {e}'
+            logger.error(f'[x] 抓取轮次异常: {e}')
+        finally:
+            runtime._x_prefetch_state['running'] = False
+        _x_wakeup.wait(interval)
+        _x_wakeup.clear()
+
+
+def _hash_index_loop() -> None:
+    """低频给已下载的 Pixiv 作品建 dHash 索引（E2 去重的前提）。"""
+    while not _x_prefetch_stop.is_set():
+        if runtime._x_prefetch_state.get('enabled') and getattr(config, 'X_DEDUPE_HASH', True):
+            try:
+                with get_session() as db:
+                    stats = x_dedupe.index_local_files(db, limit=200)
+                    safe_commit(db)
+                if stats['indexed']:
+                    logger.info(f'[x] 指纹索引新增 {stats["indexed"]} 条')
+            except Exception as e:
+                logger.error(f'[x] 指纹索引失败: {e}')
+        _x_prefetch_stop.wait(1800)
+
+
+def _start_x_threads() -> None:
+    global _x_prefetch_thread, _x_hash_thread
+    if _x_prefetch_thread is None:
+        _x_prefetch_thread = threading.Thread(target=_x_prefetch_loop, daemon=True)
+        _x_prefetch_thread.start()
+        logger.info(f'[x] 抓取线程已启动（interval={runtime._x_prefetch_state["interval"]}s，'
+                    f'enabled={runtime._x_prefetch_state["enabled"]}）')
+    if _x_hash_thread is None:
+        _x_hash_thread = threading.Thread(target=_hash_index_loop, daemon=True)
+        _x_hash_thread.start()
+
+
+def _download_x_work(work_id: int) -> None:
+    """下载一条 X 作品的图片到 `downloads/x_<tweet_id>/`。
+
+    与 Pixiv 下载引擎完全分开：那边的锁/队列/进度都按 int pixiv_id 建键，
+    共用会把两套语义搅在一起。图片地址只允许 `pbs.twimg.com`，且走无凭据
+    会话 —— 绝不能把 X 的 Cookie 发给图床以外的任何主机。
+    """
+    with get_session() as db:
+        work = db.get(XWork, work_id)
+        if work is None:
+            return
+        if work.saved_status == 'done':
+            return
+        urls = [m.get('url') for m in work.media_list if m.get('url')]
+        if not urls:
+            work.saved_status = 'failed'
+            safe_commit(db)
+            return
+        work.saved_status = 'downloading'
+        safe_commit(db)
+        tweet_id = work.tweet_id
+        dup_enabled = bool(getattr(config, 'X_DEDUPE_HASH', True))
+        max_distance = int(getattr(config, 'X_HASH_DISTANCE', 6))
+
+    work_dir = os.path.join(config.DOWNLOAD_DIR, f'x_{tweet_id}')
+    saved: list[str] = []
+    session_obj = None
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        session_obj = build_credentialless_session()
+        for i, url in enumerate(urls):
+            host, reject = check_image_url(url)
+            if reject or host not in X_IMAGE_HOSTS:
+                raise _UnsafeImageUrl(f'非法 X 图片地址（{reject or host}）: {url}')
+            resp = session_obj.get(url, timeout=(10, 60), stream=True,
+                                   allow_redirects=False)
+            if resp.is_redirect:
+                raise _UnsafeImageUrl(f'X 图片地址发生重定向：{url}')
+            resp.raise_for_status()
+            path = os.path.join(work_dir, f'{tweet_id}_{i}.{_extract_ext(url)}')
+            with open(path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            saved.append(path)
+    except Exception as e:
+        logger.error(f'[x] 下载作品 {work_id} 失败: {e}')
+        for path in saved:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        with get_session() as db:
+            work = db.get(XWork, work_id)
+            if work is not None:
+                work.saved_status = 'failed'
+                safe_commit(db)
+        return
+    finally:
+        if session_obj is not None:
+            session_obj.close()
+
+    with get_session() as db:
+        work = db.get(XWork, work_id)
+        if work is None:
+            return
+        work.saved_paths_list = saved
+        work.saved_status = 'done'
+        work.saved_at = datetime.now(timezone.utc)
+        if dup_enabled and saved:
+            match = x_dedupe.match_local_image(db, saved[0], max_distance)
+            if match and work.dup_status not in ('confirmed', 'ignored'):
+                work.dup_status = 'confirmed'
+                work.dup_reason = 'hash'
+                work.dup_pixiv_id = match[0]
+        safe_commit(db)
+
+
 def _shutdown_background_threads() -> None:
     """进程退出时优雅停止后台线程（gunicorn worker 退出 / 测试进程结束）。"""
     _auto_follow_stop.set()
     _snapshot_stop.set()
+    _x_prefetch_stop.set()
+    _x_wakeup.set()          # 叫醒正在长等待的抓取线程
     download_executor.shutdown(wait=False)
 
 
@@ -1208,3 +1491,4 @@ def start_background_threads() -> None:
     _auto_follow_thread.start()
     _start_prefetch_thread()
     _start_snapshot_thread()
+    _start_x_threads()

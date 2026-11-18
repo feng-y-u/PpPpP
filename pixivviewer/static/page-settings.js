@@ -5,6 +5,9 @@ const FIELD_MAP = [
   'per_page', 'search_pages', 'items_per_page',
   'max_bookmarks_default', 'auto_follow_interval', 'auto_follow_download',
   'prefetch_interval', 'prefetch_pages', 'prefetch_max_illusts',
+  // X 抓图（进度、Cookie、面板状态另有独立接口）
+  'x_enabled', 'x_prefetch_interval', 'x_prefetch_pages', 'x_max_works',
+  'x_search_query_id', 'x_dedupe_hash', 'x_hash_distance',
 ];
 
 async function loadSettings() {
@@ -318,3 +321,85 @@ $('#addBlockedBtn').addEventListener('click', () => {
 $('#newBlockedTag').addEventListener('keydown', e => { if (e.key === 'Enter') $('#addBlockedBtn').click(); });
 
 loadBlockedTags();
+
+// ── X 抓图：Cookie / 测试连接 / 指纹索引 ──
+async function loadXPanel() {
+  try {
+    const [status] = await Promise.all([
+      fetch('/api/x/status').then(r => r.json()),
+    ]);
+    const parts = [];
+    parts.push(status.cookie_configured ? 'Cookie：已配置' : 'Cookie：未配置');
+    parts.push(status.query_id_configured ? 'query_id：已配置' : 'query_id：未配置');
+    parts.push(status.hash_available ? 'Pillow：已安装（哈希去重可用）' : 'Pillow：未安装（哈希去重不可用）');
+    if (status.state && status.state.last_error) parts.push('最近错误：' + status.state.last_error);
+    if (status.tag_errors && status.tag_errors.length) {
+      parts.push('标签出错：' + status.tag_errors.map(t => `${t.tag}（${t.error}）`).join('；'));
+    }
+    const hint = $('#xStatusHint');
+    if (hint) hint.textContent = parts.join(' · ');
+  } catch {
+    const hint = $('#xStatusHint');
+    if (hint) hint.textContent = '状态获取失败';
+  }
+}
+
+$('#xCookieSaveBtn')?.addEventListener('click', async () => {
+  const buf = $('#xCookieInput').value.trim();
+  if (!buf) { showToast('请先粘贴 Cookie', true); return; }
+  const btn = $('#xCookieSaveBtn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/x/cookie', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: buf }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      $('#xCookieInput').value = '';
+      showToast('Cookie 已保存');
+      loadXPanel();
+    } else {
+      showToast(data.error || '保存失败', true);
+    }
+  } catch { showToast('网络错误', true); }
+  finally { btn.disabled = false; }
+});
+
+$('#xProbeBtn')?.addEventListener('click', async () => {
+  const btn = $('#xProbeBtn');
+  btn.disabled = true;
+  btn.textContent = '测试中...';
+  try {
+    const r = await fetch('/api/x/probe', {
+      method: 'POST', headers: { 'X-CSRF-Token': csrfToken },
+    });
+    const data = await r.json().catch(() => ({}));
+    showToast(data.message || '测试失败', !r.ok);
+  } catch { showToast('网络错误', true); }
+  finally {
+    btn.disabled = false;
+    btn.textContent = '测试连接';
+  }
+});
+
+$('#xDedupeScanBtn')?.addEventListener('click', async () => {
+  const btn = $('#xDedupeScanBtn');
+  btn.disabled = true;
+  btn.textContent = '扫描中...';
+  try {
+    const r = await fetch('/api/x/dedupe/scan', {
+      method: 'POST', headers: { 'X-CSRF-Token': csrfToken },
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) showToast(`索引：新增 ${data.indexed || 0}，已存在 ${data.seen || 0}`);
+    else showToast(data.error || '扫描失败', true);
+  } catch { showToast('网络错误', true); }
+  finally {
+    btn.disabled = false;
+    btn.textContent = '重建指纹索引';
+  }
+});
+
+loadXPanel();

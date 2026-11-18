@@ -1,0 +1,153 @@
+{
+  "data": {
+    "search_by_raw_query": {
+      "search_timeline": {
+        "timeline": {
+          "instructions": [
+            {
+              "type": "TimelineAddEntries",
+              "entries": [
+                {
+                  "entryId": "tweet-1800000000000000001",
+                  "content": {
+                    "entryType": "TimelineTimelineItem",
+                    "itemContent": {
+                      "itemType": "TimelineTweet",
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "rest_id": "1800000000000000001",
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "legacy": {
+                                  "name": "画师A",
+                                  "screen_name": "Artist_A"
+                                }
+                              }
+                            }
+                          },
+                          "legacy": {
+                            "full_text": "新作！pixiv.net/artworks/12345678",
+                            "created_at": "Mon Nov 17 10:00:00 +0000 2026",
+                            "entities": {
+                              "urls": [
+                                {
+                                  "url": "https://t.co/aaaa",
+                                  "expanded_url": "https://www.pixiv.net/artworks/12345678"
+                                }
+                              ]
+                            },
+                            "extended_entities": {
+                              "media": [
+                                {
+                                  "type": "photo",
+                                  "media_url_https": "https://pbs.twimg.com/media/AAA111.jpg",
+                                  "original_info": {"width": 1200, "height": 1600}
+                                },
+                                {
+                                  "type": "photo",
+                                  "media_url_https": "https://pbs.twimg.com/media/BBB222.png",
+                                  "original_info": {"width": 800, "height": 800}
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "tweet-1800000000000000002",
+                  "content": {
+                    "entryType": "TimelineTimelineItem",
+                    "itemContent": {
+                      "itemType": "TimelineTweet",
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "TweetWithVisibilityResults",
+                          "tweet": {
+                            "rest_id": "1800000000000000002",
+                            "core": {
+                              "user_results": {
+                                "result": {
+                                  "legacy": {
+                                    "name": "画师B",
+                                    "screen_name": "artist_b"
+                                  }
+                                }
+                              }
+                            },
+                            "legacy": {
+                              "full_text": "只有视频",
+                              "created_at": "Mon Nov 17 11:00:00 +0000 2026",
+                              "entities": {"urls": []},
+                              "extended_entities": {
+                                "media": [
+                                  {
+                                    "type": "video",
+                                    "media_url_https": "https://pbs.twimg.com/media/VIDEO.jpg",
+                                    "original_info": {"width": 640, "height": 360}
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "tweet-1800000000000000003",
+                  "content": {
+                    "entryType": "TimelineTimelineItem",
+                    "itemContent": {
+                      "itemType": "TimelineTweet",
+                      "tweet_results": {
+                        "result": {
+                          "__typename": "Tweet",
+                          "rest_id": "1800000000000000003",
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "legacy": {"name": "画师C", "screen_name": "artist_c"}
+                              }
+                            }
+                          },
+                          "legacy": {
+                            "full_text": "单图",
+                            "created_at": "Mon Nov 17 12:00:00 +0000 2026",
+                            "entities": {"urls": []},
+                            "extended_entities": {
+                              "media": [
+                                {
+                                  "type": "photo",
+                                  "media_url_https": "https://pbs.twimg.com/media/CCC333.webp?name=small",
+                                  "original_info": {"width": 900, "height": 1200}
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "entryId": "cursor-bottom-1800000000000000003",
+                  "content": {
+                    "entryType": "TimelineTimelineCursor",
+                    "cursorType": "Bottom",
+                    "value": "CURSOR-PAGE-2"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

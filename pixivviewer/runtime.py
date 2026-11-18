@@ -16,6 +16,7 @@ from .config import (
     PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
     BACKUP_INTERVAL, BACKUP_KEEP,
     THUMB_CONCURRENCY,
+    X_ENABLED, X_PREFETCH_INTERVAL, X_PREFETCH_PAGES, X_MAX_WORKS,
 )
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,25 @@ _snapshot_stop = threading.Event()
 # 见并发约定；并发重建时最多多打一次上游，不返回脏数据）。
 _credential_health_cache: dict = {'ts': 0.0, 'data': None}
 _CREDENTIAL_HEALTH_TTL = 30.0
+
+# ── X（Twitter）标签抓图状态 ──
+# 键集合固定、只改值（见并发约定）。线程即使被禁用也会启动并空转，所以
+# `x_prefetch_alive` 单看不能说明它在干活，要配合 `enabled` 与 `last_check`。
+_x_prefetch_state = {
+    'enabled': X_ENABLED,
+    'interval': X_PREFETCH_INTERVAL,
+    'pages': X_PREFETCH_PAGES,
+    'max_works': X_MAX_WORKS,
+    'running': False,
+    'last_check': None,
+    'last_error': None,
+    'tag': None,
+    'found': 0,
+}
+_x_prefetch_stop = threading.Event()
+# X 作品下载与 Pixiv 下载引擎分开：那边所有结构都按 int pixiv_id 建键，
+# 复用会互相污染（锁、队列、进度、取消标记）。
+x_download_executor = ThreadPoolExecutor(max_workers=2)
 
 # ── 下载队列/进度/取消/线程池 ──
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)

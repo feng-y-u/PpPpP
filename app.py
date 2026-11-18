@@ -58,6 +58,7 @@ from pixivviewer.routes.download import bp as download_bp
 from pixivviewer.routes.prefetch import bp as prefetch_bp
 from pixivviewer.routes.settings import bp as settings_bp, _SETTINGS_PATH, _load_settings
 from pixivviewer.routes.home import bp as home_bp
+from pixivviewer.routes.xfeed import bp as xfeed_bp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +102,7 @@ app.register_blueprint(gallery_bp)
 app.register_blueprint(download_bp)
 app.register_blueprint(prefetch_bp)
 app.register_blueprint(settings_bp)
+app.register_blueprint(xfeed_bp)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # 缓存目录路径由 routes_gallery 单点定义（此前两处各写一份，靠注释约定保持一致）

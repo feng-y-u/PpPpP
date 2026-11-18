@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, Index
+from sqlalchemy import create_engine, event, Integer, String, Text, DateTime, Float, Index
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
@@ -221,6 +221,135 @@ class SearchCache(Base):
     @alias_tags_list.setter
     def alias_tags_list(self, value: list[str]) -> None:
         self.alias_tags = json.dumps(list(value), ensure_ascii=False)
+
+
+# ── X（Twitter）标签抓图 ────────────────────────────────────────────────
+# 与 illusts 完全隔离：不改 pixiv_id 语义、不动图库查询，删掉这几张表就等于
+# 关掉整个功能。tweet_id 必须存字符串 —— X 的 id 是 64 位整数，JS 的 Number
+# 只有 53 位精度，用整型入库会在前后端往返时被改掉最后几位。
+
+class XTag(Base):
+    __tablename__ = 'x_tags'
+
+    tag: Mapped[str] = mapped_column(String, primary_key=True)
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    # idle / fetching / done / error —— 与预取标签同款状态机
+    status: Mapped[str] = mapped_column(String, default='idle')
+    error: Mapped[str] = mapped_column(String, default='')
+    last_fetch_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class XWork(Base):
+    __tablename__ = 'x_works'
+    __table_args__ = (
+        Index('ix_x_works_tag_created', 'tag', 'created_at'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tweet_id: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
+    tag: Mapped[str] = mapped_column(String, default='')
+    author_name: Mapped[str] = mapped_column(String, default='')
+    author_screen_name: Mapped[str] = mapped_column(String, default='')
+    text: Mapped[str] = mapped_column(Text, default='')
+    tweeted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+    # [{"url": "https://pbs.twimg.com/media/...?name=orig", "w": 1200, "h": 1600}, ...]
+    media_urls: Mapped[str] = mapped_column(Text, default='[]')
+    media_count: Mapped[int] = mapped_column(Integer, default=0)
+    saved_status: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    saved_paths: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
+    # 推文里直接带了 Pixiv 作品链接（E1 决定性证据）
+    link_pixiv_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # NULL / suspected / confirmed / ignored
+    dup_status: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    # link（推文链接）/ hash（图像指纹）/ author（弱信号）/ manual（人工确认）
+    dup_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    dup_pixiv_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    @property
+    def media_list(self) -> list[dict]:
+        try:
+            value = json.loads(self.media_urls)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return value if isinstance(value, list) else []
+
+    @media_list.setter
+    def media_list(self, value: list[dict]) -> None:
+        self.media_urls = json.dumps(list(value), ensure_ascii=False)
+
+    @property
+    def saved_paths_list(self) -> list[str]:
+        try:
+            value = json.loads(self.saved_paths or '[]')
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return [p for p in value if isinstance(p, str)] if isinstance(value, list) else []
+
+    @saved_paths_list.setter
+    def saved_paths_list(self, value: list[str]) -> None:
+        self.saved_paths = json.dumps(list(value), ensure_ascii=False)
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'tweet_id': self.tweet_id,
+            'tag': self.tag,
+            'author_name': self.author_name,
+            'author_screen_name': self.author_screen_name,
+            'text': self.text,
+            'tweeted_at': iso_utc(self.tweeted_at),
+            'media': self.media_list,
+            'media_count': self.media_count,
+            'saved_status': self.saved_status,
+            'saved_count': len(self.saved_paths_list),
+            'link_pixiv_id': self.link_pixiv_id,
+            'dup_status': self.dup_status,
+            'dup_reason': self.dup_reason,
+            'dup_pixiv_id': self.dup_pixiv_id,
+            'created_at': iso_utc(self.created_at),
+        }
+
+
+class ArtistLink(Base):
+    """Pixiv 画师 ↔ X 账号的映射（弱信号去重用的预筛，不是作品级证据）。"""
+
+    __tablename__ = 'artist_links'
+
+    pixiv_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    x_screen_name: Mapped[str] = mapped_column(String, default='', index=True)
+    # auto = 从 Pixiv 画师资料推出来的；manual = 用户在页面上填的
+    source: Mapped[str] = mapped_column(String, default='manual')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class WorkLink(Base):
+    """已确认的「同一作品」配对，确认过的一对不再重复提示。"""
+
+    __tablename__ = 'work_links'
+
+    pixiv_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tweet_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source: Mapped[str] = mapped_column(String, default='manual')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ImageHash(Base):
+    """本地图片的 dHash 指纹索引（E2 决定性证据）。
+
+    只索引磁盘上真实存在的文件（下载目录里的原图），按 path + mtime + size
+    判断是否过期；X 侧图片在下载后被比对。
+    """
+
+    __tablename__ = 'image_hashes'
+
+    path: Mapped[str] = mapped_column(String, primary_key=True)
+    pixiv_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    dhash: Mapped[str] = mapped_column(String, default='', index=True)
+    mtime: Mapped[float] = mapped_column(Float, default=0.0)
+    size: Mapped[int] = mapped_column(Integer, default=0)
 
 
 def _rebuild_illusts_table(drop_cols: set[str]) -> None:

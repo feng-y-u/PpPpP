@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PpPpP · X 图片</title>
+<link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
+<link href="/static/style.css" rel="stylesheet">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<meta name="items-per-page" content="{{ items_per_page }}">
+<style>
+  .x-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 22px 0 10px; flex-wrap: wrap; }
+  .x-title { font-family: var(--font-display); font-size: 20px; font-weight: 650; margin: 0; color: var(--ink); }
+  .x-sub { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); margin-top: 4px; }
+  .x-tagbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .x-tag { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+           background: var(--accent-subtle); color: var(--accent); font-size: 12px; cursor: pointer; border: 1px solid rgba(46,155,234,.25); }
+  .x-tag.active { background: var(--accent); color: #fff; }
+  .x-tag .del { opacity: .65; font-size: 11px; }
+  .x-tag .err { color: var(--danger); }
+  .x-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .x-card { background: var(--bg-elevated); border-radius: var(--radius-card); overflow: hidden; height: 100%;
+            box-shadow: var(--shadow-card); display: flex; flex-direction: column; }
+  .x-media { position: relative; aspect-ratio: 1 / 1; background: var(--bg-thumb); overflow: hidden; cursor: pointer; }
+  .x-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .x-badge { position: absolute; top: 6px; left: 6px; font-size: 10.5px; padding: 2px 7px; border-radius: 4px;
+             background: rgba(20,32,52,.78); color: #fff; }
+  .x-badge.warn { background: rgba(192,138,46,.9); }
+  .x-badge.ok { background: rgba(5,150,105,.9); }
+  .x-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 4px; }
+  .x-author { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .x-text { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; max-height: 3.2em; overflow: hidden; }
+  .x-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .x-empty { text-align: center; color: var(--ink-mute); padding: 48px 12px; }
+  .x-status { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); margin-bottom: 8px; }
+  .x-status .warn { color: var(--amber); }
+</style>
+</head>
+<body>
+
+<div class="full-page">
+
+<nav class="navbar">
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="/">
+      <span class="navbar-brand-dot"></span>
+      PpPpP
+    </a>
+    <button class="nav-toggle" aria-label="菜单">☰</button>
+    <div class="navbar-links">
+      <a class="navbar-link" href="/">首页</a>
+      <a class="navbar-link" href="/explore">搜索</a>
+      <a class="navbar-link" href="/gallery">图库</a>
+      <a class="navbar-link" href="/downloads">下载</a>
+      <a class="navbar-link" href="/cache">缓存</a>
+      <a class="navbar-link active" href="/x">X 图片</a>
+      <a class="navbar-link" href="/settings">设置</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+  <div class="x-head">
+    <div>
+      <h1 class="x-title">X 图片</h1>
+      <div class="x-sub">按标签抓取推文图片 · 与 Pixiv 图库做同作品判定</div>
+    </div>
+    <div class="x-sub" id="xCount">0 条</div>
+  </div>
+
+  <div class="x-toolbar">
+    <input id="xTagInput" class="form-control form-control-sm" style="max-width:280px;"
+           placeholder="标签或搜索词，如 #原神" autocomplete="off">
+    <button id="xTagAddBtn" class="btn btn-sm btn-soft">添加并抓取</button>
+    <button id="xDupFilter" class="btn btn-sm btn-outline-secondary" data-mode="all">显示：全部</button>
+    <button id="xRefreshBtn" class="btn btn-sm btn-outline-secondary">刷新列表</button>
+  </div>
+
+  <div id="xStatus" class="x-status"></div>
+  <div id="xTagBar" class="x-tagbar"></div>
+
+  <div id="xGrid" class="row g-3"></div>
+  <div id="xEmpty" class="x-empty" style="display:none;">还没有抓取过。先在上面添加一个标签。</div>
+
+  <div style="text-align:center;padding:18px 0;">
+    <button id="xMoreBtn" class="btn btn-sm btn-soft" style="display:none;">加载更多</button>
+  </div>
+</div>
+
+</div>
+
+<!-- Toast -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3">
+  <div id="liveToast" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/bootstrap-5.3.3/bootstrap.bundle.min.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/page-x.js"></script>
+</body>
+</html>
