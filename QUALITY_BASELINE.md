@@ -86,7 +86,7 @@
 powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1 -q
 ```
 
-**当前基线（Python 3.13.13）：490 collected = 488 passed / 2 skipped / 0 failed，约 20s。**
+**当前基线（Python 3.13.13）：495 collected = 493 passed / 2 skipped / 0 failed，约 20s（2026-11-20 移除 X 抓图后回落）。**
 2 条 skip 是 Windows 上 POSIX `chmod` 语义不可用，不是失败；Linux（含 fuyan 的 3.12.3）上这两条会实际执行，结果数会不同。
 
 Python 3.9.25 真实环境已单独验证：
@@ -126,7 +126,7 @@ Python 3.9.25 真实环境已单独验证：
 
 2026-11-11 实测记录：搜索 24 条、详情 200、`/thumb` 200 `image/jpeg` 303099 bytes；真实适配层搜索 60 条、原图 200 `image/png`。
 
-> `pytest -m integration` 目前 **0 条用例、490 deselected**；在补上真正的 `@pytest.mark.integration` 用例之前，不得把该命令当成发布门槛。
+> `pytest -m integration` 目前 **0 条用例、495 deselected**；在补上真正的 `@pytest.mark.integration` 用例之前，不得把该命令当成发布门槛。
 
 ---
 
@@ -170,7 +170,7 @@ Python 3.9.25 真实环境已单独验证：
 
 ### 6.2 测试
 
-- [ ] 全量 `run_tests.ps1 -q`：**0 failed**（当前 488 passed / 2 skipped）。
+- [ ] 全量 `run_tests.ps1 -q`：**0 failed**（当前 493 passed / 2 skipped）。
 - [ ] 改动模块的定向用例通过。
 - [ ] 3.9 环境 import + 启动 + 关键测试通过；不要把 3.13 全量结果冒充成 3.9。
 - [ ] 真实链路冒烟通过（见 §4.3），且使用临时实例目录。

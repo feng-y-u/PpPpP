@@ -85,18 +85,6 @@ class TestCsrfProtection:
         ('POST', '/api/prefetch/refresh-reset'),
         ('POST', '/api/cache/items/999999/delete'),
         ('POST', '/api/home/more'),
-        # X 抓图端点：漏挂 CSRF 会真的去搜 X / 写 Cookie / 删作品
-        ('POST', '/api/x/tags'),
-        ('DELETE', '/api/x/tags/999999'),
-        ('POST', '/api/x/tags/999999/refresh'),
-        ('POST', '/api/x/cookie'),
-        ('POST', '/api/x/probe'),
-        ('POST', '/api/x/works/999999/download'),
-        ('DELETE', '/api/x/works/999999'),
-        ('POST', '/api/x/works/999999/dup'),
-        ('POST', '/api/x/artist-links'),
-        ('DELETE', '/api/x/artist-links/999999'),
-        ('POST', '/api/x/dedupe/scan'),
     ]
 
     def test_all_mutating_endpoints_require_csrf(self, client):
@@ -1107,7 +1095,7 @@ class TestCollectionApiRemoved:
         assert 'collections' not in app.blueprints
         assert sorted(app.blueprints) == [
             'download', 'gallery', 'home', 'middleware', 'prefetch', 'search',
-            'settings', 'xfeed',
+            'settings',
         ]
 
 

@@ -43,7 +43,6 @@ from pixivviewer.middleware import bp as middleware_bp, _get_csrf_token, _safe_n
 from pixivviewer import background
 from pixivviewer.background import (
     _shutdown_background_threads, _reset_stuck_downloads, _reset_stuck_prefetch,
-    _reset_stuck_x,
     _prefetch_one_tag,
     _prefetch_refresh_bookmarks, _prefetch_capacity_cleanup, _prefetch_loop,
     _start_prefetch_thread, reset_prefetch_refresh,
@@ -59,7 +58,6 @@ from pixivviewer.routes.download import bp as download_bp
 from pixivviewer.routes.prefetch import bp as prefetch_bp
 from pixivviewer.routes.settings import bp as settings_bp, _SETTINGS_PATH, _load_settings
 from pixivviewer.routes.home import bp as home_bp
-from pixivviewer.routes.xfeed import bp as xfeed_bp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,7 +101,6 @@ app.register_blueprint(gallery_bp)
 app.register_blueprint(download_bp)
 app.register_blueprint(prefetch_bp)
 app.register_blueprint(settings_bp)
-app.register_blueprint(xfeed_bp)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # 缓存目录路径由 routes_gallery 单点定义（此前两处各写一份，靠注释约定保持一致）
@@ -156,7 +153,6 @@ _warn_if_tls_unverified()
 # 保持重构前 import 时序：init_db → _reset_stuck_*（清理残留状态）→ 后台线程启动 → atexit 注册。
 _reset_stuck_downloads()
 _reset_stuck_prefetch()
-_reset_stuck_x()
 # 越界重定向发现表：重启不丢（仅观测数据；文件缺失/损坏时从空表开始）
 runtime.load_thumb_redirect_hosts()
 

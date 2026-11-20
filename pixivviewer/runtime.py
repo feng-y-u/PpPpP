@@ -16,7 +16,6 @@ from .config import (
     PREFETCH_INTERVAL, PREFETCH_PAGES, PREFETCH_MAX_ILLUSTS,
     BACKUP_INTERVAL, BACKUP_KEEP,
     THUMB_CONCURRENCY,
-    X_ENABLED, X_PREFETCH_INTERVAL, X_PREFETCH_PAGES, X_MAX_WORKS,
 )
 
 logger = logging.getLogger(__name__)
@@ -276,53 +275,6 @@ _snapshot_stop = threading.Event()
 # 见并发约定；并发重建时最多多打一次上游，不返回脏数据）。
 _credential_health_cache: dict = {'ts': 0.0, 'data': None}
 _CREDENTIAL_HEALTH_TTL = 30.0
-
-# ── X（Twitter）标签抓图状态 ──
-# 键集合固定、只改值（见并发约定）。线程即使被禁用也会启动并空转，所以
-# `x_prefetch_alive` 单看不能说明它在干活，要配合 `enabled` 与 `last_check`。
-_x_prefetch_state = {
-    'enabled': X_ENABLED,
-    'interval': X_PREFETCH_INTERVAL,
-    'pages': X_PREFETCH_PAGES,
-    'max_works': X_MAX_WORKS,
-    'running': False,
-    'last_check': None,
-    'last_error': None,
-    'tag': None,
-    'found': 0,
-}
-_x_prefetch_stop = threading.Event()
-
-# 单标签一次抓取的进度（原生搜索/预取都有"整轮统计"，X 侧原先只有一句
-# "上次抓取时间"，用户点完刷新完全不知道发生了什么）。键 = 标签，值是固定
-# 键集合的 dict，只改值不增删键 —— 无锁读安全（与 _prefetch_state 同约定）。
-# 抓取结束时把 status 留在 done/error，并保留统计供页面回显"上一轮抓到多少"。
-_x_fetch_progress: dict[str, dict] = {}
-_X_FETCH_PROGRESS_KEYS = ('status', 'pages_done', 'pages_total',
-                          'found', 'started_at', 'finished_at', 'error')
-
-
-def x_fetch_progress(tag: str) -> dict:
-    """读某标签的抓取进度快照（键集合恒定，缺失时给全默认值）。"""
-    row = _x_fetch_progress.get(tag)
-    if not isinstance(row, dict):
-        return {k: None for k in _X_FETCH_PROGRESS_KEYS}
-    return {k: row.get(k) for k in _X_FETCH_PROGRESS_KEYS}
-
-
-def x_fetch_progress_update(tag: str, **fields) -> None:
-    """写进度。只允许固定键（写错名字会静默失效，所以这里显式过滤）。"""
-    row = _x_fetch_progress.get(tag)
-    if row is None:
-        row = {k: None for k in _X_FETCH_PROGRESS_KEYS}
-        _x_fetch_progress[tag] = row
-    for key, value in fields.items():
-        if key in _X_FETCH_PROGRESS_KEYS:
-            row[key] = value
-
-# X 作品下载与 Pixiv 下载引擎分开：那边所有结构都按 int pixiv_id 建键，
-# 复用会互相污染（锁、队列、进度、取消标记）。
-x_download_executor = ThreadPoolExecutor(max_workers=2)
 
 # ── 下载队列/进度/取消/线程池 ──
 download_executor = ThreadPoolExecutor(max_workers=DOWNLOAD_MAX_WORKERS)

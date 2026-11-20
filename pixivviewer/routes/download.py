@@ -447,37 +447,9 @@ def api_downloads() -> Response:
             d['local_dir'] = os.path.abspath(_get_download_dir(i.pixiv_id)) if paths else None
             return d
 
-        # X 抓图的下载也并入同一个队列视图（一致性：用户只看一个"下载管理"）。
-        # 行形状刻意贴近 Illust.to_dict（title/pixiv_id/user_name/page_count/
-        # thumb_url），前端只按 source==='x' 分支：缩略图已预代理成 /ximg、
-        # 没有 取消/清除 按钮（X 引擎没有取消语义）、完成态给 /x/view 链接。
-        from ..models import XWork
-        from .xfeed import _ximg_url
-
-        def _x_row(w):
-            d = w.to_dict()
-            # 标题用作者（2026-11-20 反馈"只需要图片和作者"）：推文文本不再消费
-            d['title'] = w.author_name or (f'@{w.author_screen_name}' if w.author_screen_name else f'推文 {w.tweet_id}')
-            d['pixiv_id'] = w.tweet_id          # 展示用 "#<id>"；X 行的操作全走 x_id
-            d['user_name'] = d['title']
-            d['thumb_url'] = _ximg_url(w.thumb_url)
-            d['x_id'] = w.id
-            d['source'] = 'x'
-            return d
-
-        x_active = (db.query(XWork)
-                    .filter(XWork.saved_status == 'downloading')
-                    .order_by(XWork.id.desc()).all())
-        x_queued = (db.query(XWork)
-                    .filter(XWork.saved_status == 'queued')
-                    .order_by(XWork.id.desc()).all())
-        x_completed = (db.query(XWork)
-                       .filter(XWork.saved_status == 'done')
-                       .order_by(XWork.saved_at.desc().nullslast()).limit(10).all())
-
         return jsonify({
-            'active': [_with_progress(i) for i in active] + [_x_row(w) for w in x_active],
-            'queued': [i.to_dict() for i in queued] + [_x_row(w) for w in x_queued],
-            'completed': [_with_dir(i) for i in completed] + [_x_row(w) for w in x_completed],
+            'active': [_with_progress(i) for i in active],
+            'queued': [i.to_dict() for i in queued],
+            'completed': [_with_dir(i) for i in completed],
             'logs': [l.to_dict() for l in logs],
         })

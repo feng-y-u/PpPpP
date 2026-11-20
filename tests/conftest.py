@@ -46,7 +46,7 @@ config.BACKUP_INTERVAL = 0
 import pytest
 
 from pixivviewer.models import (get_session, safe_commit, Illust, BlockedTag, DownloadLog,
-                                SearchCache, XTag, XWork, ArtistLink, WorkLink, ImageHash)
+                                SearchCache)
 
 
 @pytest.fixture
@@ -115,8 +115,7 @@ def clean_db(db):
         f'拒绝清表：engine 指向 {url}，这不是测试库。'
         f'（2026-09-30 曾因 pytest 插件提前 import models 而清空真实库）'
     )
-    for table in [BlockedTag, DownloadLog, Illust, SearchCache,
-                  XTag, XWork, ArtistLink, WorkLink, ImageHash]:
+    for table in [BlockedTag, DownloadLog, Illust, SearchCache]:
         db.query(table).delete()
     db.commit()
     # 重置图库性能缓存（目录扫描 / 孤儿全表 pid），避免测试间脏数据残留

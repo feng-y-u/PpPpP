@@ -46,7 +46,6 @@
       <a class="navbar-link" href="/gallery">图库</a>
       <a class="navbar-link" href="/downloads">下载</a>
       <a class="navbar-link" href="/cache">缓存</a>
-      <a class="navbar-link" href="/x">X 图片</a>
       <a class="navbar-link active" href="/settings">设置</a>
     </div>
   </div>
@@ -63,7 +62,6 @@
     <a href="#s-search">搜索</a>
     <a href="#s-block">屏蔽标签</a>
     <a href="#s-prefetch">预取</a>
-    <a href="#s-x">X 抓取</a>
     <a href="#s-follow">自动关注</a>
   </nav>
 
@@ -176,75 +174,6 @@
         </div>
         <div class="form-text">添加后后台会定时预取该标签的新作品；搜索命中该标签时直接秒回缓存结果。点击标签名删除；点标签内的 ⟳ 重置该标签的刷新状态；点 + 添加同义词（同一主题的多个 Pixiv 标签会合并成一个缓存条目，结果去重）。</div>
         <div class="form-text mt-2" id="prefetchRefreshStats">—</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card shadow-sm mb-3" id="s-x">
-    <div class="card-header py-2 fw-semibold small">X 图片抓取</div>
-    <div class="card-body">
-      <div class="mb-3">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="x_enabled">
-          <label class="form-check-label" for="x_enabled">启用 X 标签抓取</label>
-        </div>
-        <div class="form-text">总开关：保存后立即生效（同时写入 settings.json，重启后保持）；关闭时后台线程空转、不发任何 X 请求</div>
-      </div>
-      <div class="mb-3">
-        <label class="form-label" for="x_prefetch_interval">抓取间隔（秒）</label>
-        <input class="form-control form-control-sm" id="x_prefetch_interval" type="number" min="0" style="max-width:140px;">
-        <div class="form-text">0 = 停止抓取；X 限流很紧，建议 ≥ 3600</div>
-      </div>
-      <div class="mb-3">
-        <label class="form-label" for="x_prefetch_pages">每标签页数</label>
-        <input class="form-control form-control-sm" id="x_prefetch_pages" type="number" min="1" max="10" style="max-width:140px;">
-        <div class="form-text">每标签每轮翻几页（每页约 20 条推文）</div>
-      </div>
-      <div class="mb-3">
-        <label class="form-label" for="x_max_works">单标签保留上限</label>
-        <input class="form-control form-control-sm" id="x_max_works" type="number" min="1" style="max-width:140px;">
-        <div class="form-text">超出后按入库顺序淘汰最旧的记录（不删磁盘文件）</div>
-      </div>
-      <div class="mb-3">
-        <label class="form-label" for="x_query_filter">搜索降噪运算符</label>
-        <input class="form-control form-control-sm" id="x_query_filter" type="text"
-               placeholder="filter:images -filter:replies -filter:retweets">
-        <div class="form-text">自动附加到每个标签后面的 X 搜索运算符：默认要求命中任一绘画标签（#イラスト/#絵/#創作/#二次創作/#fanart/#illustration/#art），把手办照、游戏截图、转发、回复挡在外面；查询里手写了 filter: 的不附加；置空可整体关闭；修改后需重启生效</div>
-      </div>
-      <div class="mb-3">
-        <label class="form-label" for="x_search_query_id">搜索 query_id</label>
-        <input class="form-control form-control-sm" id="x_search_query_id" type="text" placeholder="留空则读 instance/x_api.json">
-        <div class="form-text">X 换版会失效，届时从浏览器开发者工具里复制新的 SearchTimeline queryId。两处都配置时以 instance/x_api.json 为准；修改后需重启生效</div>
-      </div>
-      <div class="mb-3">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="x_dedupe_hash">
-          <label class="form-check-label" for="x_dedupe_hash">启用图像指纹去重（需安装 Pillow）</label>
-        </div>
-        <div class="form-text">
-          对已下载的 Pixiv 图片建立 dHash 索引，下载 X 图片时比对；未安装 Pillow 时自动不可用；修改后需重启生效
-        </div>
-      </div>
-      <div class="mb-3">
-        <label class="form-label" for="x_hash_distance">指纹距离阈值</label>
-        <input class="form-control form-control-sm" id="x_hash_distance" type="number" min="0" max="24" style="max-width:140px;">
-        <div class="form-text">汉明距离 ≤ 该值判为同一张图；越小越严格（建议 4-8）；修改后需重启生效</div>
-      </div>
-      <hr>
-      <div class="mb-3">
-        <label class="form-label">X 登录 Cookie</label>
-        <textarea class="form-control form-control-sm" id="xCookieInput" rows="2"
-                  placeholder="auth_token=...; ct0=...（从浏览器开发者工具复制）"></textarea>
-        <div class="d-flex gap-2 mt-2">
-          <button class="btn btn-outline-primary btn-sm" id="xCookieSaveBtn">保存 Cookie</button>
-          <button class="btn btn-outline-secondary btn-sm" id="xProbeBtn">测试连接</button>
-          <button class="btn btn-outline-secondary btn-sm" id="xDedupeScanBtn">重建指纹索引</button>
-        </div>
-        <div class="form-text mt-2" id="xStatusHint">—</div>
-      </div>
-      <div class="form-text">
-        X 没有免费搜索接口，抓取走网页内部 GraphQL：query_id 会随 X 发版漂移，坏了改
-        <code>instance/x_api.json</code> 即可，无需改代码。抓取违反 X ToS，账号可能被限流，风险自担。
       </div>
     </div>
   </div>

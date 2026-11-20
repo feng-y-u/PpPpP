@@ -169,83 +169,6 @@ def add_search_cache_alias_tags(conn: Connection) -> None:
         )
 
 
-def migrate_x_tables(conn: Connection) -> None:
-    """v7：X（Twitter）标签抓图相关的表。
-
-    与 illusts 完全隔离 —— 不改任何既有列，删掉这些表就等于关掉整个功能。
-    `tweet_id` 用 TEXT：X 的 id 是 64 位整数，JS 的 Number 只有 53 位精度。
-    全部 `IF NOT EXISTS`：`init_db()` 里 create_all 先建过一遍，这里再跑一次是
-    no-op；迁移测试直接对空库执行也能建出来。
-    """
-    conn.exec_driver_sql(
-        "CREATE TABLE IF NOT EXISTS x_tags ("
-        " tag VARCHAR PRIMARY KEY,"
-        " enabled INTEGER NOT NULL DEFAULT 1,"
-        " status VARCHAR NOT NULL DEFAULT 'idle',"
-        " error VARCHAR NOT NULL DEFAULT '',"
-        " last_fetch_at DATETIME,"
-        " total INTEGER NOT NULL DEFAULT 0)"
-    )
-    conn.exec_driver_sql(
-        "CREATE TABLE IF NOT EXISTS x_works ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " tweet_id VARCHAR NOT NULL UNIQUE,"
-        " tag VARCHAR NOT NULL DEFAULT '',"
-        " author_name VARCHAR NOT NULL DEFAULT '',"
-        " author_screen_name VARCHAR NOT NULL DEFAULT '',"
-        " text TEXT NOT NULL DEFAULT '',"
-        " tweeted_at DATETIME,"
-        " media_urls TEXT NOT NULL DEFAULT '[]',"
-        " media_count INTEGER NOT NULL DEFAULT 0,"
-        " saved_status VARCHAR,"
-        " saved_paths TEXT,"
-        " saved_at DATETIME,"
-        " link_pixiv_id INTEGER,"
-        " dup_status VARCHAR,"
-        " dup_reason VARCHAR,"
-        " dup_pixiv_id INTEGER,"
-        " created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-    )
-    conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_x_works_tag_created ON x_works(tag, created_at)"
-    )
-    conn.exec_driver_sql(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ix_x_works_tweet_id ON x_works(tweet_id)"
-    )
-    conn.exec_driver_sql(
-        "CREATE TABLE IF NOT EXISTS artist_links ("
-        " pixiv_user_id INTEGER PRIMARY KEY,"
-        " x_screen_name VARCHAR NOT NULL DEFAULT '',"
-        " source VARCHAR NOT NULL DEFAULT 'manual',"
-        " created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-    )
-    conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_artist_links_x_screen_name ON artist_links(x_screen_name)"
-    )
-    conn.exec_driver_sql(
-        "CREATE TABLE IF NOT EXISTS work_links ("
-        " pixiv_id INTEGER NOT NULL,"
-        " tweet_id VARCHAR NOT NULL,"
-        " source VARCHAR NOT NULL DEFAULT 'manual',"
-        " created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-        " PRIMARY KEY (pixiv_id, tweet_id))"
-    )
-    conn.exec_driver_sql(
-        "CREATE TABLE IF NOT EXISTS image_hashes ("
-        " path VARCHAR PRIMARY KEY,"
-        " pixiv_id INTEGER NOT NULL DEFAULT 0,"
-        " dhash VARCHAR NOT NULL DEFAULT '',"
-        " mtime FLOAT NOT NULL DEFAULT 0,"
-        " size INTEGER NOT NULL DEFAULT 0)"
-    )
-    conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_image_hashes_pixiv_id ON image_hashes(pixiv_id)"
-    )
-    conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_image_hashes_dhash ON image_hashes(dhash)"
-    )
-
-
 MIGRATIONS = (
     (1, migrate_collection_positions),
     (2, migrate_illust_schema),
@@ -253,6 +176,5 @@ MIGRATIONS = (
     (4, add_illust_refresh_failed_at),
     (5, drop_collection_tables),
     (6, add_search_cache_alias_tags),
-    (7, migrate_x_tables),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

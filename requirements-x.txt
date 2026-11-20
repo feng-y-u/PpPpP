@@ -1,9 +1,0 @@
-# X 抓图的**可选**依赖（实际上搜索已离不开，见下）。
-# - XClientTransaction：生成 X 搜索接口强制要求的 x-client-transaction-id
-#   防爬令牌（2026 起缺失时一律空 404）。没装也能启动：E1（推文里的 Pixiv
-#   链接）与 H1（同作者弱信号）不受影响，但搜索抓取会失败并给出明确提示。
-# - Pillow：图像指纹去重（E2）。没装时 E2 自动不可用。
-# 用法：pip install -r requirements-x.txt
--r requirements.txt
-XClientTransaction
-Pillow>=10,<13

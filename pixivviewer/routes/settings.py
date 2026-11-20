@@ -29,8 +29,7 @@ from .prefetch import _PREFETCH_SETTINGS_KEYS
 from .home import clear_home_cache
 from ..models import BlockedTag, get_session, safe_commit
 from ..runtime import (_CREDENTIAL_HEALTH_TTL, _auto_follow_state,
-                     _credential_health_cache, _prefetch_state, _snapshot_state,
-                     _x_prefetch_state)
+                     _credential_health_cache, _prefetch_state, _snapshot_state)
 
 logger = logging.getLogger(__name__)
 
@@ -372,7 +371,7 @@ def api_settings_post() -> Response:
             # 布尔键统一归一化（与 cookie_secure 同口径）：bool("false") 是 True，
             # 直接 bool() 挡不住字符串表单 —— 手改 settings.json 或第三方客户端
             # 发 "false" 时，抓取会在用户以为关掉的时候跑起来
-            if key in ('auto_follow_download', 'x_enabled', 'x_dedupe_hash'):
+            if key in ('auto_follow_download',):
                 val = str(val).strip().lower() in ('1', 'true', 'yes', 'on')
             elif key in config_module.SETTINGS_BOUNDS:
                 # 数值键必须落在 config.SETTINGS_BOUNDS 区间内：设置页的
@@ -419,25 +418,6 @@ def api_settings_post() -> Response:
             for short, long in _PREFETCH_SETTINGS_KEYS.items()
             if long in current
         })
-        # X 抓图的四个键同理：内存态用短键（background 的抓取循环读的就是它），
-        # settings.json 用 x_* 长键。启用且间隔 >0 时顺手叫醒线程，不用等下一轮。
-        _x_state_map = {
-            'enabled': 'x_enabled',
-            'interval': 'x_prefetch_interval',
-            'pages': 'x_prefetch_pages',
-            'max_works': 'x_max_works',
-        }
-        _x_prefetch_state.update({
-            short: current[long]
-            for short, long in _x_state_map.items()
-            if long in current
-        })
-        if _x_prefetch_state.get('enabled') and int(_x_prefetch_state.get('interval') or 0) > 0:
-            try:
-                from ..background import trigger_x_fetch
-                trigger_x_fetch()
-            except Exception:   # 后台线程没起来（测试环境）不影响保存
-                pass
         return jsonify(current)
     except Exception as e:
         return jsonify({'error': f'保存失败: {e}'}), 500

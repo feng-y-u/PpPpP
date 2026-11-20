@@ -28,18 +28,7 @@ function renderActive(items) {
     return;
   }
 
-  container.innerHTML = items.map(i => i.source === 'x' ? `
-    <div class="dl-item">
-      <img class="dl-thumb" src="${i.thumb_url}" loading="lazy">
-      <div class="dl-info">
-        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title)}</div>
-        <div class="dl-meta">X · @${escHtml(i.author_screen_name || '')} · ${i.page_count} 张 · 下载中</div>
-        <div class="progress mt-1"><div class="progress-bar bg-primary" style="width:100%"></div></div>
-      </div>
-      <div class="dl-status d-flex gap-1">
-        <a href="/x/view/${i.x_id}" class="btn btn-soft btn-sm">查看</a>
-      </div>
-    </div>` : `
+  container.innerHTML = items.map(i => `
     <div class="dl-item">
       <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
            loading="lazy">
@@ -98,18 +87,7 @@ function renderQueued(items) {
     return;
   }
 
-  container.innerHTML = items.map(i => i.source === 'x' ? `
-    <div class="dl-item">
-      <img class="dl-thumb" src="${i.thumb_url}" loading="lazy">
-      <div class="dl-info">
-        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title)}</div>
-        <div class="dl-meta">X · @${escHtml(i.author_screen_name || '')} · ${i.page_count} 张 · 等待中</div>
-        <div class="progress mt-1"><div class="progress-bar bg-info" style="width:0%"></div></div>
-      </div>
-      <div class="dl-status d-flex gap-1">
-        <a href="/x/view/${i.x_id}" class="btn btn-soft btn-sm">查看</a>
-      </div>
-    </div>` : `
+  container.innerHTML = items.map(i => `
     <div class="dl-item">
       <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
            loading="lazy">
@@ -151,18 +129,7 @@ function renderCompleted(items) {
     return;
   }
 
-  container.innerHTML = items.map(i => i.source === 'x' ? `
-    <div class="dl-item">
-      <img class="dl-thumb" src="${i.thumb_url}" loading="lazy">
-      <div class="dl-info">
-        <div class="dl-title" title="${escAttr(i.title)}">${escHtml(i.title)}</div>
-        <div class="dl-meta">X · @${escHtml(i.author_screen_name || '')}${i.saved_count ? ' · ' + i.saved_count + ' 张' : ''}</div>
-      </div>
-      <div class="dl-status d-flex gap-1">
-        <a href="/x/file/${i.x_id}" class="btn btn-success btn-sm">下载原图</a>
-        <a href="/x/view/${i.x_id}" class="btn btn-soft btn-sm">查看</a>
-      </div>
-    </div>` : `
+  container.innerHTML = items.map(i => `
     <div class="dl-item">
       <img class="dl-thumb" src="${proxyThumb(i.thumb_url)}"
            loading="lazy">
@@ -174,7 +141,7 @@ function renderCompleted(items) {
         <a href="/download_file/${i.pixiv_id}" class="btn btn-success btn-sm">下载原图</a>
       </div>
     </div>`).join('');
-
+    
   }
 
 function renderLogs(logs) {

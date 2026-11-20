@@ -289,62 +289,25 @@ class TestSettingsPost:
         # 与 /api/prefetch/config 读到的必须是同一个值
         assert client.get('/api/prefetch/config').get_json()['interval'] == 321
 
-    def test_x_keys_apply_immediately(self, client, _isolate_settings, monkeypatch):
-        """x_* 四键与 prefetch_* 同构：保存后写进 `_x_prefetch_state` 短键并叫醒线程。
-
-        回归守卫（S18 同款）：内存态短键 vs settings.json 长键的映射一旦断裂，
-        "保存后立即生效"就会变成"写进没人读的键"。`trigger_x_fetch` 是后台线程
-        seam，必须能被 monkeypatch 看到（路由在函数体内延迟 import）。
-        """
-        from pixivviewer import background, runtime
-
-        calls = []
-        monkeypatch.setattr(background, 'trigger_x_fetch', lambda: calls.append(1))
-
-        resp = _post_settings(client, {
-            'x_enabled': True,
-            'x_prefetch_interval': 900,
-            'x_prefetch_pages': 2,
-            'x_max_works': 500,
-        })
-
-        assert resp.status_code == 200
-        assert runtime._x_prefetch_state['enabled'] is True
-        assert runtime._x_prefetch_state['interval'] == 900
-        assert runtime._x_prefetch_state['pages'] == 2
-        assert runtime._x_prefetch_state['max_works'] == 500
-        saved = json.loads(_isolate_settings.read_text(encoding='utf-8'))
-        assert saved['x_prefetch_interval'] == 900, '落盘仍用 x_* 长键'
-        # 内存态不得被塞进长键（写进去也没人读，只会掩盖问题）
-        assert 'x_prefetch_interval' not in runtime._x_prefetch_state
-        # 启用且间隔 > 0 → 保存顺手叫醒抓取线程，不用等下一轮
-        assert calls == [1]
-
     def test_boolean_settings_coerce_string_forms(self, client, _isolate_settings):
-        """布尔键统一布尔化：字符串 "false" 是真值，会让"抓取未启用"变成"抓取在跑"。
+        """布尔键统一布尔化：字符串 "false" 是真值，会让"自动关注未启用"变成"在跑"。
 
-        历史上只有 auto_follow_download 走 bool() 分支；x_enabled/x_dedupe_hash
-        落进通用数值分支前面没有任何归一化 —— 手改 settings.json 或第三方客户端
-        发字符串时，设置页勾选状态（!!data[key]）与后台循环的实际开关会相反。
+        直接 bool() 挡不住字符串表单 —— 手改 settings.json 或第三方客户端发
+        字符串时，设置页勾选状态（!!data[key]）与后台循环的实际开关会相反。
         """
         resp = _post_settings(client, {
-            'x_enabled': 'false',
-            'x_dedupe_hash': 'false',
             'auto_follow_download': 'false',
         })
 
         assert resp.status_code == 200
-        from pixivviewer import runtime
-        assert runtime._x_prefetch_state['enabled'] is False
         saved = json.loads(_isolate_settings.read_text(encoding='utf-8'))
         # 落盘必须是 JSON 布尔而不是字符串（下次启动 config 加载同样会布尔化）
-        assert saved['x_enabled'] is False
-        assert saved['x_dedupe_hash'] is False
         assert saved['auto_follow_download'] is False
         # 真值字符串依旧归一为 True（与 cookie_secure 同口径）
-        resp = _post_settings(client, {'x_enabled': 'true'})
+        resp = _post_settings(client, {'auto_follow_download': 'true'})
         assert resp.status_code == 200
-        assert runtime._x_prefetch_state['enabled'] is True
+        saved = json.loads(_isolate_settings.read_text(encoding='utf-8'))
+        assert saved['auto_follow_download'] is True
 
 
 class TestSettingsCookie:

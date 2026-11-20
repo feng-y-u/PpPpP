@@ -17,7 +17,6 @@
 | 预取 | 配置标签（支持同义词合并），后台定时拉取；收藏数定期刷新、按容量自动淘汰 |
 | 自动关注 | 定时检查关注画师的新作，可自动下载 |
 | 备份 | SQLite 滚动快照（`/api/backups`），迁移前另有一次性备份 |
-| X 图片 | 按标签抓取 X 上的推文图片；与图库做同作品判定（链接 / 指纹 / 同作者疑似） |
 | 设置 | 全站访问密码、Cookie、代理、页大小、预取/关注节奏等 |
 
 所有 Pixiv 请求都经由一个适配层发出，带令牌桶限流（避开 403）与 Cookie 失效识别；图片走本地缓存代理，不会每次刷新都打图床。
@@ -82,55 +81,6 @@ python app.py
 | `ITEMS_PER_PAGE` | 每页作品数（默认 24，首页 / 图库 / 缓存页共用） |
 
 完整列表见 `pixivviewer/config.py` 的 `SETTINGS_KEYS`，也可以直接在设置页里改。
-
-## X 图片抓取（可选）
-
-和 Pixiv 预取同款用法：在「X 图片」页或设置页加一个标签，后台按间隔去 X 搜索最新图片，
-可以浏览、下载，并与图库里的 Pixiv 作品做同作品判定。
-
-**开启前需要准备两样东西**（都放在实例目录，不进仓库）：
-
-1. **登录 Cookie**：浏览器登录 x.com → F12 → Application → Cookies，复制 `auth_token` 与 `ct0`，
-   写进 `instance/x_cookies.txt`（一行 `auth_token=...; ct0=...`），或在设置页粘贴。
-2. **搜索 query_id + 请求参数**：X 网页版内部 GraphQL 的 `SearchTimeline` 会随发版换
-   id。在浏览器 Network 里搜 `SearchTimeline`，把路径里的 `/graphql/<query_id>/` 填进
-   `instance/x_api.json`：
-
-   ```json
-   {"query_id": "填入你抓到的 id"}
-   ```
-
-   也可以只用设置页的 `x_search_query_id`（两处都配置时以 x_api.json 为准）。
-   `features`/`variables` 同理会漂移；三者**同源同版**（都从你自己的浏览器抓），
-   混用不同来源会得到空 404。
-3. **防爬令牌依赖**：X（2026 起）对搜索接口强制 `x-client-transaction-id` 头，
-   缺失时一律空 404。`pip install -r requirements-x.txt`（含 `XClientTransaction`
-   与 Pillow）即可，服务端会自动生成令牌。
-
-先跑探针确认能连通（输出已脱敏）：
-
-```bash
-python scripts/x_probe.py '#原神'
-```
-
-**限制与风险**：
-
-- X 没有免费搜索 API，走的是网页内部接口，**随时可能失效**；失效时探针/设置页会提示
-  更新 query_id。
-- 抓取违反 X 服务条款，账号可能被限流甚至封禁，仅建议自用。
-- 只抓图片（`pbs.twimg.com` 的 jpg/png/webp），不处理视频/动图。
-- 下载的图片存在 `downloads/x_<tweet_id>/`（与 Pixiv 图库完全独立）；在「X 图片」页
-  点「只看已下载」，再点已下载的卡片即可在 `/x/view` 浏览本地图。
-- 标签搜索默认自动附加降噪运算符：**要求命中任一绘画标签**（`#イラスト`/
-  `#絵`/`#創作`/`#二次創作`/`#fanart`/`#illustration`/`#art`——画师发画必带其一，
-  手办照、游戏截图、转发、回复都不会带），加 `filter:images -filter:replies
-  -filter:retweets`。想更细可直接输入完整搜索式（如 `#原神 min_faves:50
-  filter:images`——手写了 `filter:` 就不再自动附加）；设置页「搜索降噪运算符」
-  可改可清空。
-- 同作品判定只有两类**决定性**证据：推文里带 Pixiv 链接、或图像指纹一致。同作者只能算
-  「疑似」，需要在页面上人工确认——作者相同不等于作品相同。
-- 指纹去重需要 Pillow（在 `requirements-x.txt` 里，与防爬令牌一起装）。不装也能用，
-  只是少了指纹这一层。
 
 ## 生产部署
 
