@@ -142,6 +142,48 @@ def test_load_cookie_missing_keys_raises(isolated_x):
         x_client.load_cookie()
 
 
+class TestQueryFilter:
+    """标签降噪：裸标签追加运算符；手写 filter: 不叠加；置空可关闭。
+
+    2026-11-20 本地联调反馈：裸搜会混进大量转发/回复/杂图（vlog 缩略图等），
+    用户只要画师作品。
+    """
+
+    def test_bare_tag_gets_noise_filter(self, isolated_x):
+        out = x_client._apply_query_filter('#原神')
+        assert out == '#原神 filter:images -filter:replies -filter:retweets', out
+
+    def test_handwritten_filter_is_not_doubled(self, isolated_x):
+        query = '#原神 filter:images min_faves:50'
+        assert x_client._apply_query_filter(query) == query
+
+    def test_empty_config_disables_appending(self, isolated_x, monkeypatch):
+        monkeypatch.setattr(x_client.config, 'X_QUERY_FILTER', '')
+        assert x_client._apply_query_filter('#原神') == '#原神'
+
+    def test_search_timeline_applies_filter(self, isolated_x, monkeypatch):
+        # search_timeline 走 build_search_url 前必须先过 _apply_query_filter：
+        # 用桩钉住 build_search_url 收到的入参
+        captured = {}
+
+        def _spy_build(tag, cursor=None):
+            captured['query'] = tag
+            return 'https://x.com/i/api/graphql/TEST/SearchTimeline'
+
+        monkeypatch.setattr(x_client, 'build_search_url', _spy_build)
+
+        class _NullSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(x_client, '_session', lambda: _NullSession())
+        monkeypatch.setattr(x_client, '_bucket', lambda: type('B', (), {'wait': staticmethod(lambda: None)})())
+        monkeypatch.setattr(x_client, '_transaction_id', lambda m, p, force_refresh=False: 'T')
+        monkeypatch.setattr(x_client, '_search_get', lambda s, url, tid: _FakeResp(200, _payload()))
+        x_client.search_timeline('#原神')
+        assert 'filter:images' in captured['query'], '搜索必须带上降噪运算符'
+
+
 class _FakeResp:
     """search_timeline 只用到 status_code / text / json 三样，这里够用。"""
 

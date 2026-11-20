@@ -7,7 +7,7 @@ const FIELD_MAP = [
   'prefetch_interval', 'prefetch_pages', 'prefetch_max_illusts',
   // X 抓图（进度、Cookie、面板状态另有独立接口）
   'x_enabled', 'x_prefetch_interval', 'x_prefetch_pages', 'x_max_works',
-  'x_search_query_id', 'x_dedupe_hash', 'x_hash_distance',
+  'x_search_query_id', 'x_dedupe_hash', 'x_hash_distance', 'x_query_filter',
 ];
 
 async function loadSettings() {

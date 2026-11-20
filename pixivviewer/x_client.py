@@ -58,6 +58,20 @@ _USER_AGENT = (
     '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 )
 
+
+def _apply_query_filter(query: str) -> str:
+    """给裸标签追加降噪运算符（本地联调反馈：裸搜会混进大量转发/回复/杂图）。
+
+    - 查询里已经手写了 `filter:` 运算符（高级搜索式）就完全不追加，
+      用户自己写的优先；
+    - 运算符集可经 `x_query_filter` 设置（含 Pixiv 用户自定义或置空关闭）。
+    """
+    extra = str(getattr(config, 'X_QUERY_FILTER', '') or '').strip()
+    if not extra or 'filter:' in (query or ''):
+        return (query or '').strip()
+    return f'{(query or "").strip()} {extra}'
+
+
 # 搜索端点要求的一组特性开关（X 用它控制返回结构）。默认集通常可用；
 # 结构变了就改 instance/x_api.json 的 features。
 _DEFAULT_FEATURES = {
@@ -593,7 +607,7 @@ def search_timeline(tag: str, cursor: Optional[str] = None) -> tuple[list[XTweet
     tag = (tag or '').strip()
     if not tag:
         raise XError('标签不能为空')
-    url = build_search_url(tag, cursor)
+    url = build_search_url(_apply_query_filter(tag), cursor)
     path = urlsplit(url).path
     _bucket().wait()
     session = _session()

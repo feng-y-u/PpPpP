@@ -218,6 +218,9 @@ X_MAX_WORKS = 2000            # 单标签保留上限（超出淘汰最旧记录
 X_SEARCH_QUERY_ID = ''        # 留空则读 instance/x_api.json
 X_DEDUPE_HASH = True          # 图像指纹去重（需要 Pillow，未装时自动降级）
 X_HASH_DISTANCE = 6           # dHash 汉明距离阈值
+# 裸标签的降噪运算符：转发/回复/无图推文是标签搜索的主要噪音源（本地联调
+# 反馈"只想看画师作品"）。手写含 filter: 的查询不追加；置空可整体关闭。
+X_QUERY_FILTER = 'filter:images -filter:replies -filter:retweets'
 
 # 缩略图越界重定向自动发现（默认开启）：
 # 白名单外的**公网 https** 目标用无凭据会话跟随一次（且要求响应确实是图片），
@@ -306,6 +309,7 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'x_search_query_id': ('X_SEARCH_QUERY_ID', ''),
     'x_dedupe_hash': ('X_DEDUPE_HASH', True),
     'x_hash_distance': ('X_HASH_DISTANCE', 6),
+'x_query_filter': ('X_QUERY_FILTER', 'filter:images -filter:replies -filter:retweets'),
 }
 
 # 数值设置的合法区间（下界, 上界；上界 None = 不设上限）。

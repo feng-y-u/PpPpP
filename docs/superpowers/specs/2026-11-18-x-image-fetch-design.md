@@ -157,3 +157,23 @@ Pixiv 的 `upload_date` 是 JST 墙面时间，tweet 时间是 UTC：H1 比较�
 附带结论（写在这里防后人重蹈）：`instance/x_api.json` 现在承载三元组
 `query_id + features + variables`，三者必须**同源同版**（都从真实浏览器抓），
 混用社区仓库里的不同版本必 404。
+
+## 本地试用反馈（2026-11-20 二轮）
+
+试用反馈两条，均已实现（562 passed / 0 failed）：
+
+1. **「下载后图片去哪了，图库没有」**：设计即如此（`/gallery` 只读 `illusts`
+   表），但当时 X 页只有小缩略图，缺本地看图入口 —— 这是实际缺口。
+   补：`/x/view/<id>` 看图页（本地图 + 元信息 + 原推/Pixiv 链接 + 删除）、
+   `/api/x/image/<id>/<idx>` 图片服务（路径复核 `downloads/x_<tweet_id>`
+   归属，防任意文件读取；Content-Type 按扩展名定死 + 7 天缓存）、
+   X 页「只看已下载」筛选 + 已下载卡片点击进看图页。
+   （`saved=undone` 过滤踩了一次 SQL 三值逻辑：`NULL != 'done'` 不为真，
+   未下载（NULL）必须显式 `or_(is_(None), ...)` 并入。）
+2. **「搜到很多无关的东西，只要画师作品」**：裸标签搜索的噪音主要来自
+   转发/回复/无图推文。补：`x_client._apply_query_filter` 给裸标签自动追加
+   `filter:images -filter:replies -filter:retweets`（设置键 `x_query_filter`
+   可改可清空；查询里手写了 `filter:` 则完全不追加，让高级搜索式优先）。
+   注：解析层本来就只存 photo 媒体，纯视频推文从未入库——该过滤主要省
+   网络翻页与列表噪音。「真正只看特定画师」属 UserMedia 维度，未做（候选
+   后续功能）。

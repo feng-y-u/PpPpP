@@ -149,6 +149,79 @@ class TestXStatus:
             assert key in data['state']
 
 
+class TestXWorkView:
+    """本地看图页 + 图片服务：X 下载的文件不在 Pixiv 图库里，这是唯一查看面。"""
+
+    def test_saved_filter(self, client, clean_db):
+        _add_work(clean_db, '1800000000000000801', saved_status='done')
+        _add_work(clean_db, '1800000000000000802', saved_status=None)
+        _add_work(clean_db, '1800000000000000803', saved_status='failed')
+
+        done = client.get('/api/x/items?saved=done').get_json()
+        undone = client.get('/api/x/items?saved=undone').get_json()
+        all_rows = client.get('/api/x/items').get_json()
+        assert done['total'] == 1
+        assert undone['total'] == 2
+        assert all_rows['total'] == 3
+
+    def _downloaded_work(self, clean_db, tmp_path, monkeypatch):
+        """造一条已下载作品：真实写两个文件到 tmp 目录（模拟 worker 的 saved_paths）。"""
+        import os as _os
+
+        work = _add_work(clean_db, '1800000000000000804', saved_status='done')
+        d = tmp_path / 'downloads' / f'x_{work.tweet_id}'
+        d.mkdir(parents=True)
+        jpg = d / f'{work.tweet_id}_0.jpg'
+        jpg.write_bytes(b'\xff\xd8\xff\xe0jpeg-bytes')
+        png = d / f'{work.tweet_id}_1.png'
+        png.write_bytes(b'\x89PNGpng-bytes')
+        work.saved_paths_list = [str(jpg), str(png)]
+        clean_db.commit()
+        return work, jpg, png
+
+    def test_view_page_shows_local_images(self, client, clean_db, tmp_path, monkeypatch):
+        work, jpg, png = self._downloaded_work(clean_db, tmp_path, monkeypatch)
+        resp = client.get(f'/x/view/{work.id}')
+        assert resp.status_code == 200
+        html = resp.get_data(as_text=True)
+        assert f'/api/x/image/{work.id}/0' in html
+        assert f'/api/x/image/{work.id}/1' in html
+        assert 'page-xview.js' in html
+
+    def test_view_page_for_undownloaded_work_is_honest(self, client, clean_db):
+        work = _add_work(clean_db, '1800000000000000805', saved_status=None)
+        resp = client.get(f'/x/view/{work.id}')
+        assert resp.status_code == 200
+        assert '还没有下载过' in resp.get_data(as_text=True)
+        assert client.get('/x/view/999999').status_code == 404
+
+    def test_image_file_serving(self, client, clean_db, tmp_path, monkeypatch):
+        work, jpg, png = self._downloaded_work(clean_db, tmp_path, monkeypatch)
+        r0 = client.get(f'/api/x/image/{work.id}/0')
+        assert r0.status_code == 200
+        assert r0.mimetype == 'image/jpeg'
+        assert r0.data.startswith(b'\xff\xd8')
+        r1 = client.get(f'/api/x/image/{work.id}/1')
+        assert r1.mimetype == 'image/png', '扩展名定死 Content-Type（老 mimetypes 认不出 webp 同款）'
+        # 越界 / 未下载 / 不存在三种失败都要是 404，不是 500
+        assert client.get(f'/api/x/image/{work.id}/9').status_code == 404
+        bare = _add_work(clean_db, '1800000000000000806', saved_status=None)
+        assert client.get(f'/api/x/image/{bare.id}/0').status_code == 404
+        work.saved_paths_list = [str(tmp_path / 'downloads' / f'x_{work.tweet_id}' / 'missing.jpg')]
+        clean_db.commit()
+        assert client.get(f'/api/x/image/{work.id}/0').status_code == 404
+
+    def test_image_file_rejects_path_outside_own_dir(self, client, clean_db, tmp_path):
+        """路径列是接口可见数据：塞进别的路径不能变成任意文件读取口。"""
+        evil = tmp_path / 'evil.jpg'
+        evil.write_bytes(b'secret')
+        work = _add_work(clean_db, '1800000000000000807', saved_status='done')
+        work.saved_paths_list = [str(evil)]
+        clean_db.commit()
+        resp = client.get(f'/api/x/image/{work.id}/0')
+        assert resp.status_code == 403, '不在 downloads/x_<tweet_id> 下的路径必须拒绝'
+
+
 class TestXWorkActions:
     def test_download_enqueues(self, client, clean_db, monkeypatch):
         work = _add_work(clean_db, '1800000000000000401')

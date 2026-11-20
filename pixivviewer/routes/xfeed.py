@@ -82,6 +82,7 @@ def _page_size() -> int:
 def x_items() -> Response:
     tag = _clean_tag(request.args.get('tag'))
     dup = (request.args.get('dup') or 'all').lower()
+    saved = (request.args.get('saved') or 'all').lower()
     try:
         offset = max(0, int(request.args.get('offset', 0)))
         limit = max(1, min(60, int(request.args.get('limit', _page_size()))))
@@ -98,6 +99,13 @@ def x_items() -> Response:
                                      XWork.dup_status == 'suspected'))
         elif dup == 'only':
             query = query.filter(XWork.dup_status.in_(('suspected', 'confirmed')))
+        if saved == 'done':
+            # 「只看已下载」：X 页上直接浏览本地已保存的图片
+            query = query.filter(XWork.saved_status == 'done')
+        elif saved == 'undone':
+            # SQL 三值逻辑：NULL != 'done' 不为真，未下载（NULL）必须显式并入
+            query = query.filter(or_(XWork.saved_status.is_(None),
+                                     XWork.saved_status != 'done'))
         total = query.count()
         rows = (query.order_by(XWork.id.desc())
                 .offset(offset).limit(limit).all())
@@ -292,6 +300,56 @@ def x_work_download(work_id: int) -> Response:
                 safe_commit(db)
         return jsonify({'error': '下载服务正在关闭，请稍后重试'}), 503
     return jsonify({'ok': True, 'status': 'queued'}), 202
+
+
+# ── 本地看图（下载后的浏览入口；X 图片不在 Pixiv 图库里，这是唯一查看面）──
+
+@bp.route('/x/view/<int:work_id>')
+def x_work_view(work_id: int) -> Response:
+    with get_session() as db:
+        work = db.get(XWork, work_id)
+        if work is None:
+            abort(404)
+        data = work.to_dict()
+        # to_dict 与 Pixiv 同约定：不回传磁盘路径。渲染页面在服务端自己读
+        # ORM 的 saved_paths_list（只有下载 worker 会写这一列）
+        data['local_images'] = [
+            {'index': i, 'name': os.path.basename(path),
+             'size': (os.path.getsize(path) if os.path.isfile(path) else 0)}
+            for i, path in enumerate(work.saved_paths_list or [])
+        ]
+    if data['saved_status'] != 'done':
+        # 未下载的作品没有本地图可看：如实提示，别渲染一个空页
+        return render_template('x_view.html', work=data,
+                               csrf_token=_get_csrf_token(), not_downloaded=True)
+    return render_template('x_view.html', work=data,
+                           csrf_token=_get_csrf_token(), not_downloaded=False)
+
+
+@bp.route('/api/x/image/<int:work_id>/<int:idx>')
+def x_image_file(work_id: int, idx: int) -> Response:
+    """把已下载的 X 图片文件送出去（下载目录不在任何静态服务下）。
+
+    只信 `saved_paths`（下载 worker 自己写的路径），并复核目录归属
+    `downloads/x_<tweet_id>`：列表/详情接口都回显路径，将来若有人把
+    其它路径塞进这一列，这里不能成为任意文件读取口。
+    """
+    with get_session() as db:
+        work = db.get(XWork, work_id)
+        if work is None:
+            return jsonify({'error': '作品不存在'}), 404
+        paths = work.saved_paths_list or []
+        tweet_id = work.tweet_id
+    if idx < 0 or idx >= len(paths):
+        return jsonify({'error': '图片序号越界'}), 404
+    path = paths[idx]
+    if not os.path.dirname(path).endswith(os.path.join('downloads', f'x_{tweet_id}')):
+        return jsonify({'error': '非法图片路径'}), 403
+    if not os.path.isfile(path):
+        return jsonify({'error': '文件不存在'}), 404
+    ext = os.path.splitext(path)[1].lower()
+    return send_file(path, mimetype=_EXT_MIME.get(ext, 'image/jpeg'),
+                     max_age=86400 * 7)
 
 
 @bp.route('/api/x/works/<int:work_id>', methods=['DELETE'])

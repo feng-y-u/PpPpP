@@ -6,6 +6,7 @@ const X_PAGE_SIZE = parseInt(
 
 let xActiveTag = '';
 let xDupMode = 'all';        // all / hide（藏已确认） / only（只看疑似+已确认）
+let xSavedMode = 'all';       // all / done（只看已下载）
 let xOffset = 0;
 let xTotal = 0;
 let xLoading = false;
@@ -197,6 +198,11 @@ function renderXCard(item) {
 
   const card = col.querySelector('.x-card');
   card.querySelector('.x-media').addEventListener('click', () => {
+    // 已下载的作品优先看本地图（新页），未下载的仍去原推
+    if (item.saved_status === 'done') {
+      window.location.href = `/x/view/${item.id}`;
+      return;
+    }
     window.open(`https://x.com/${encodeURIComponent(item.author_screen_name || 'i')}/status/${encodeURIComponent(item.tweet_id)}`, '_blank', 'noopener');
   });
   const dl = card.querySelector('[data-dl]');
@@ -215,6 +221,7 @@ async function loadXItems(reset) {
   if (reset) { xOffset = 0; $('#xGrid').innerHTML = ''; }
   try {
     const params = new URLSearchParams({ offset: xOffset, limit: X_PAGE_SIZE, dup: xDupMode });
+    if (xSavedMode !== 'all') params.set('saved', xSavedMode);
     if (xActiveTag) params.set('tag', xActiveTag);
     const data = await xApi('/api/x/items?' + params.toString());
     xTotal = data.total || 0;
@@ -364,6 +371,15 @@ $('#xDupFilter').addEventListener('click', (e) => {
   xDupMode = order[(order.indexOf(xDupMode) + 1) % order.length];
   btn.dataset.mode = xDupMode;
   btn.textContent = labels[xDupMode];
+  loadXItems(true);
+});
+$('#xSavedFilter')?.addEventListener('click', (e) => {
+  const btn = e.currentTarget;
+  xSavedMode = xSavedMode === 'done' ? 'all' : 'done';
+  btn.dataset.mode = xSavedMode;
+  btn.textContent = xSavedMode === 'done' ? '只看已下载' : '含未下载';
+  btn.classList.toggle('btn-soft', xSavedMode === 'done');
+  btn.classList.toggle('btn-outline-secondary', xSavedMode !== 'done');
   loadXItems(true);
 });
 

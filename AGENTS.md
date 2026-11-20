@@ -61,9 +61,9 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `pixivviewer/routes/gallery.py` | 图库、详情页、图片服务、缩略图代理 `/thumb/<b64>`、`/api/open-dir` |
 | `pixivviewer/routes/download.py` | 下载触发/状态/取消/批量、下载管理页 |
 | `pixivviewer/routes/prefetch.py` | 预取管理 API（config / tags / status / refresh） |
-| `pixivviewer/routes/xfeed.py` | X 抓图：`/x` 页、标签 CRUD、作品列表/下载/删除、同作品标记、`/ximg` 代理（仅 pbs.twimg.com）、Cookie/探针 |
+| `pixivviewer/routes/xfeed.py` | X 抓图：`/x` 页、标签 CRUD、作品列表/下载/删除、同作品标记、`/x/view` 本地看图页 + `/api/x/image`（仅 downloads/x_*）、`/ximg` 代理（仅 pbs.twimg.com）、Cookie/探针 |
 | `pixivviewer/routes/settings.py` | 登录、设置读写、屏蔽标签、自动关注控制 |
-| `pixivviewer/templates/*.html` | 10 个 Jinja2 模板（首页、搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览、X 图片） |
+| `pixivviewer/templates/*.html` | 11 个 Jinja2 模板（首页、搜索、图库、下载管理、详情、设置、设置解锁、登录、缓存浏览、X 图片、X 作品看图） |
 | `pixivviewer/static/` | `app.js`（共享工具）+ `page-<name>.js`（按页入口，各模板显式引入）+ `style.css` + `vendor/bootstrap-5.3.3/`。**无灯箱组件**（2026-11-10 移除 `lightbox.js`，卡片点击一律跳详情页） |
 | `scripts/` | `run_tests.ps1`（pytest 包装：确定性临时目录 + 沙箱插件）、`sandbox_pytest_shim.py`、`check_tls.py`（只读 TLS 拦截诊断，退出码 0/1/2）、`x_probe.py`（X 抓图可行性探针，输出脱敏，退出码 0/1/2）、`pixiv_capture.py`（抓取并**脱敏** Pixiv 响应样本，刷新契约测试 fixtures）、`pixiv-cleanup.sh`（仅清理已下载原图，与预取容量无关）、`_inspect_db.py` |
 | `migrations/` | `runner.py`（按 `PRAGMA user_version` 版本化执行，**升级前自动备份**）+ `versions.py` |
