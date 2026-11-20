@@ -159,7 +159,8 @@ function renderCompleted(items) {
         <div class="dl-meta">X · @${escHtml(i.author_screen_name || '')}${i.saved_count ? ' · ' + i.saved_count + ' 张' : ''}</div>
       </div>
       <div class="dl-status d-flex gap-1">
-        <a href="/x/view/${i.x_id}" class="btn btn-success btn-sm">查看本地文件</a>
+        <a href="/x/file/${i.x_id}" class="btn btn-success btn-sm">下载原图</a>
+        <a href="/x/view/${i.x_id}" class="btn btn-soft btn-sm">查看</a>
       </div>
     </div>` : `
     <div class="dl-item">

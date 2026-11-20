@@ -218,9 +218,14 @@ X_MAX_WORKS = 2000            # 单标签保留上限（超出淘汰最旧记录
 X_SEARCH_QUERY_ID = ''        # 留空则读 instance/x_api.json
 X_DEDUPE_HASH = True          # 图像指纹去重（需要 Pillow，未装时自动降级）
 X_HASH_DISTANCE = 6           # dHash 汉明距离阈值
-# 裸标签的降噪运算符：转发/回复/无图推文是标签搜索的主要噪音源（本地联调
-# 反馈"只想看画师作品"）。手写含 filter: 的查询不追加；置空可整体关闭。
-X_QUERY_FILTER = 'filter:images -filter:replies -filter:retweets'
+# 裸标签的降噪运算符。2026-11-20 试用反馈：手办照/游戏截图大量混入 —— 画师发画
+# 必带绘画标签（#イラスト/#絵/#創作/#二次創作 与 #art/#fanart/#illustration 等，
+# 参考 2026 年标签指南），而手办/截图/杂谈不会带；要求命中任一绘画标签即可把
+# 非绘画内容挡掉（X 支持括号 OR 分组）。转发/回复同理滤掉。
+# 手写了 filter: 的查询不追加；置空可整体关闭。
+X_QUERY_FILTER = ('(#イラスト OR #絵 OR #創作 OR #二次創作 OR '
+                  '#fanart OR #illustration OR #art) '
+                  'filter:images -filter:replies -filter:retweets')
 
 # 缩略图越界重定向自动发现（默认开启）：
 # 白名单外的**公网 https** 目标用无凭据会话跟随一次（且要求响应确实是图片），
@@ -309,7 +314,10 @@ SETTINGS_KEYS: dict[str, tuple[str, object]] = {
     'x_search_query_id': ('X_SEARCH_QUERY_ID', ''),
     'x_dedupe_hash': ('X_DEDUPE_HASH', True),
     'x_hash_distance': ('X_HASH_DISTANCE', 6),
-'x_query_filter': ('X_QUERY_FILTER', 'filter:images -filter:replies -filter:retweets'),
+'x_query_filter': ('X_QUERY_FILTER',
+                   '(#イラスト OR #絵 OR #創作 OR #二次創作 OR '
+                   '#fanart OR #illustration OR #art) '
+                   'filter:images -filter:replies -filter:retweets'),
 }
 
 # 数值设置的合法区间（下界, 上界；上界 None = 不设上限）。

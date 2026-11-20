@@ -214,8 +214,9 @@ async function deleteXTag(tag) {
 function renderXCard(item) {
   const wrap = document.createElement('div');
   wrap.className = 'masonry-item';
-  const media = (item.media || [])[0] || {};
-  const img = xProxy(media.url);
+  // 网格走 thumb_url（medium 变体，~180KB）：卡片列宽 ~300px，加载 orig
+  // （300-500KB）纯属浪费；下载与 /x/view 预览仍用 orig
+  const img = xProxy(item.thumb_url);
 
   const badges = [];
   if (item.media_count > 1) badges.push(`<span class="photo-badge">${item.media_count}P</span>`);
@@ -248,9 +249,10 @@ function renderXCard(item) {
       '</button>';
   }
 
+  // 只展示作者（2026-11-20 反馈"只需要图片和作者"）：推文文本、日期、来源标签
+  // 都是噪音；文本仍入库（E1 去重证据来自链接解析，展示层不再消费）
   const author = item.author_name || '未知作者';
   const handle = item.author_screen_name ? ` @${item.author_screen_name}` : '';
-  const when = item.tweeted_at ? new Date(item.tweeted_at).toLocaleDateString('zh-CN') : '';
 
   wrap.innerHTML = `
     <div class="photo-card" data-id="${item.id}">
@@ -260,8 +262,6 @@ function renderXCard(item) {
       <div class="photo-badges">${badges.join('')}</div>
       <div class="photo-card-info">
         <div class="photo-card-title" title="${escAttr(author + handle)}">${escHtml(author)}${escHtml(handle)}</div>
-        <div class="photo-card-artist">${escHtml(when)} · 来自标签 ${escHtml(item.tag || '')}</div>
-        <div class="photo-card-text">${escHtml((item.text || '').slice(0, 160))}</div>
         <div class="photo-card-actions">
           ${downloadBtn}
           <a class="btn btn-sm btn-soft" target="_blank" rel="noopener noreferrer"

@@ -59,9 +59,7 @@
     {% if work.dup_status == 'confirmed' %}<span class="xv-badge ok">同一作品{% if work.dup_pixiv_id %} #{{ work.dup_pixiv_id }}{% endif %}</span>
     {% elif work.dup_status == 'suspected' %}<span class="xv-badge warn">疑似同一作品</span>{% endif %}
     <span class="xv-badge">{{ work.media_count }} 张图</span>
-    <span class="tag">{{ work.tag }}</span>
-    · {{ work.author_name }} @{{ work.author_screen_name }}<br>
-    {{ work.text }}
+    · {{ work.author_name }} @{{ work.author_screen_name }}
   </div>
 
   <div class="xv-actions">
@@ -72,6 +70,7 @@
     </button>
     <span id="xvDlHint" class="xv-sub"></span>
     {% else %}
+    <a class="btn btn-sm btn-dl-done" href="/x/file/{{ work.id }}">⬇ 下载原图</a>
     <button class="btn btn-sm btn-outline-danger" id="xvDeleteBtn">删除记录（保留图片文件）</button>
     {% endif %}
     <a class="btn btn-sm btn-soft" target="_blank" rel="noopener noreferrer"

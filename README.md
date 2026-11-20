@@ -121,10 +121,12 @@ python scripts/x_probe.py '#原神'
 - 只抓图片（`pbs.twimg.com` 的 jpg/png/webp），不处理视频/动图。
 - 下载的图片存在 `downloads/x_<tweet_id>/`（与 Pixiv 图库完全独立）；在「X 图片」页
   点「只看已下载」，再点已下载的卡片即可在 `/x/view` 浏览本地图。
-- 标签搜索默认自动附加 `filter:images -filter:replies -filter:retweets` 降噪运算符
-  （滤掉转发/回复/无图内容）；想更精细可直接输入完整搜索式，如
-  `#原神 min_faves:50 filter:images`——手写了 `filter:` 就不再自动附加；
-  设置页「搜索降噪运算符」可改可清空。
+- 标签搜索默认自动附加降噪运算符：**要求命中任一绘画标签**（`#イラスト`/
+  `#絵`/`#創作`/`#二次創作`/`#fanart`/`#illustration`/`#art`——画师发画必带其一，
+  手办照、游戏截图、转发、回复都不会带），加 `filter:images -filter:replies
+  -filter:retweets`。想更细可直接输入完整搜索式（如 `#原神 min_faves:50
+  filter:images`——手写了 `filter:` 就不再自动附加）；设置页「搜索降噪运算符」
+  可改可清空。
 - 同作品判定只有两类**决定性**证据：推文里带 Pixiv 链接、或图像指纹一致。同作者只能算
   「疑似」，需要在页面上人工确认——作者相同不等于作品相同。
 - 指纹去重需要 Pillow（在 `requirements-x.txt` 里，与防爬令牌一起装）。不装也能用，

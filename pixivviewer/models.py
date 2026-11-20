@@ -313,11 +313,18 @@ class XWork(Base):
 
     @property
     def thumb_url(self) -> str:
-        """首图（未代理的原始地址）。空字符串表示这条作品没有图。"""
+        """首图（网格缩略图用 medium 变体）。空字符串表示这条作品没有图。
+
+        实测（2026-11-20）：X 的 orig 与 large 字节级相同（上传即被平台重编码，
+        JPEG 质量 ~70%），medium 是 1200px 重采样、体积约为 orig 的 40%。
+        网格一页 24 张，卡片列宽 ~300px，加载 orig（300-500KB/张）纯属浪费；
+        下载原图与 /x/view 预览仍走 media[].url 的 orig。
+        """
         media = self.media_list
         if not media or not isinstance(media[0], dict):
             return ''
-        return str(media[0].get('url') or '')
+        url = str(media[0].get('url') or '')
+        return url.replace('name=orig', 'name=medium')
 
     def to_dict(self) -> dict:
         return {

@@ -246,6 +246,8 @@ class TestXConsistencyShapes:
         assert data['source'] == 'x'
         assert data['page_count'] == 1
         assert data['thumb_url'].startswith('https://pbs.twimg.com/media/')
+        # thumb_url 是网格缩略图：medium 变体（orig 的 ~40% 体积），下载仍用 orig
+        assert 'name=medium' in data['thumb_url']
         # saved_status → download_status 词表映射（none/done/downloading/failed）
         assert data['download_status'] == 'none'
         work.saved_status = 'queued'
@@ -269,6 +271,63 @@ class TestXConsistencyShapes:
             assert row['progress']['found'] == 12
         finally:
             runtime._x_fetch_progress.pop('#p', None)
+
+    def _downloaded_two(self, clean_db, tmp_path):
+        """造一条已下载两图的作品（文件真实写到 tmp，模拟下载 worker 的产物）。"""
+        work = _add_work(clean_db, '1800000000000000921', saved_status='done')
+        d = tmp_path / 'downloads' / f'x_{work.tweet_id}'
+        d.mkdir(parents=True)
+        jpg = d / f'{work.tweet_id}_0.jpg'
+        jpg.write_bytes(b'\xff\xd8\xff\xe0fake-a')
+        png = d / f'{work.tweet_id}_1.png'
+        png.write_bytes(b'\x89PNGfake-b')
+        work.saved_paths_list = [str(jpg), str(png)]
+        clean_db.commit()
+        return work, jpg, png
+
+    def test_single_file_sends_attachment(self, client, clean_db, tmp_path):
+        """「下载到本地」单图：浏览器直接收附件，对齐 /download_file 的单图分支。"""
+        work = _add_work(clean_db, '1800000000000000922', saved_status='done')
+        d = tmp_path / 'downloads' / f'x_{work.tweet_id}'
+        d.mkdir(parents=True)
+        jpg = d / f'{work.tweet_id}_0.jpg'
+        jpg.write_bytes(b'\xff\xd8\xff\xe0fake-single')
+        work.saved_paths_list = [str(jpg)]
+        clean_db.commit()
+        resp = client.get(f'/x/file/{work.id}')
+        assert resp.status_code == 200
+        assert 'attachment' in resp.headers.get('Content-Disposition', '')
+        assert resp.data.startswith(b'\xff\xd8')
+
+    def test_multi_file_returns_zip(self, client, clean_db, tmp_path):
+        """多图：ZIP_STORED 打包，条目名 = 原文件名（<tweet_id>_<i>.<ext>）。"""
+        import io
+        import zipfile as zf_mod
+
+        work, jpg, png = self._downloaded_two(clean_db, tmp_path)
+        resp = client.get(f'/x/file/{work.id}')
+        assert resp.status_code == 200
+        assert 'attachment' in resp.headers.get('Content-Disposition', '')
+        assert resp.headers['Content-Type'] == 'application/zip'
+        with zf_mod.ZipFile(io.BytesIO(resp.data)) as zf:
+            names = sorted(zf.namelist())
+        assert names == [jpg.name, png.name]
+        assert b'fake-a' in resp.data and b'fake-b' in resp.data
+
+    def test_x_file_rejects_wrong_states_and_paths(self, client, clean_db, tmp_path):
+        """未下载/不存在 → 404；目录归属不符的路径必须拒绝（任意文件下载口防线）。"""
+        # 未下载 / 不存在 → 404
+        bare = _add_work(clean_db, '1800000000000000923', saved_status=None)
+        assert client.get(f'/x/file/{bare.id}').status_code == 404
+        assert client.get('/x/file/999999').status_code == 404
+        # 目录归属不符的路径：不能变成任意文件下载口（与 /api/x/image 同防线）
+        evil = tmp_path / 'evil.jpg'
+        evil.write_bytes(b'secret')
+        hijack = _add_work(clean_db, '1800000000000000924', saved_status='done')
+        hijack.saved_paths_list = [str(evil)]
+        clean_db.commit()
+        resp = client.get(f'/x/file/{hijack.id}')
+        assert resp.status_code == 404, 'downloads/x_<tweet_id> 之外的路径必须拒绝'
 
     def test_downloads_page_includes_x_rows(self, client, clean_db):
         """下载管理页是唯一队列视图：X 的 queued/active/completed 都要在。"""

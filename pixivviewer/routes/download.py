@@ -456,9 +456,10 @@ def api_downloads() -> Response:
 
         def _x_row(w):
             d = w.to_dict()
-            d['title'] = (w.text or '').strip().split('\n')[0][:80] or f'推文 {w.tweet_id}'
+            # 标题用作者（2026-11-20 反馈"只需要图片和作者"）：推文文本不再消费
+            d['title'] = w.author_name or (f'@{w.author_screen_name}' if w.author_screen_name else f'推文 {w.tweet_id}')
             d['pixiv_id'] = w.tweet_id          # 展示用 "#<id>"；X 行的操作全走 x_id
-            d['user_name'] = w.author_name or (f'@{w.author_screen_name}' if w.author_screen_name else '')
+            d['user_name'] = d['title']
             d['thumb_url'] = _ximg_url(w.thumb_url)
             d['x_id'] = w.id
             d['source'] = 'x'

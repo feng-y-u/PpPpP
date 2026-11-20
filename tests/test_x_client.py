@@ -170,8 +170,13 @@ class TestQueryFilter:
     """
 
     def test_bare_tag_gets_noise_filter(self, isolated_x):
+        """默认降噪必须要求绘画标签：手办照/游戏截图不会带 #イラスト/#art 等
+        （2026-11-20 试用反馈"一堆手办、游戏截图"），画师发画却几乎必带其一。"""
         out = x_client._apply_query_filter('#原神')
-        assert out == '#原神 filter:images -filter:replies -filter:retweets', out
+        assert '(#イラスト OR #絵 OR #創作 OR #二次創作 OR ' \
+               '#fanart OR #illustration OR #art)' in out, out
+        assert 'filter:images -filter:replies -filter:retweets' in out
+        assert out.startswith('#原神 ('), out
 
     def test_handwritten_filter_is_not_doubled(self, isolated_x):
         query = '#原神 filter:images min_faves:50'

@@ -7,9 +7,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
+import zipfile
 from base64 import urlsafe_b64decode
+from io import BytesIO
 from urllib.parse import urlsplit
 
 import requests
@@ -370,6 +373,43 @@ def x_image_file(work_id: int, idx: int) -> Response:
     ext = os.path.splitext(path)[1].lower()
     return send_file(path, mimetype=_EXT_MIME.get(ext, 'image/jpeg'),
                      max_age=86400 * 7)
+
+
+@bp.route('/x/file/<int:work_id>')
+def x_work_file(work_id: int) -> Response:
+    """把已下载的 X 作品送回浏览器（单图直发、多图 ZIP_STORED 打包）。
+
+    对齐原生 `/download_file/<pid>`：下载管理页与看图页的「下载原图」都指到
+    这里。只信 saved_paths（下载 worker 写入），并复核目录归属 —— 与
+    /api/x/image 同一道防线，不能成为任意文件读取口。
+    """
+    with get_session() as db:
+        work = db.get(XWork, work_id)
+        if work is None:
+            return jsonify({'error': '作品不存在'}), 404
+        if work.saved_status != 'done':
+            return jsonify({'error': '作品未下载'}), 404
+        tweet_id = work.tweet_id
+        paths = [p for p in work.saved_paths_list
+                 if os.path.isfile(p)
+                 and os.path.dirname(p).endswith(os.path.join('downloads', f'x_{tweet_id}'))]
+    if not paths:
+        return jsonify({'error': '文件已丢失，请重新下载'}), 404
+
+    safe_title = re.sub(r'[\\/*?:"<>|]', '_', f'x_{tweet_id}')[:50]
+    if len(paths) == 1:
+        return send_file(paths[0], as_attachment=True,
+                         download_name=f'{safe_title}{os.path.splitext(paths[0])[1]}')
+
+    # X 单图 ≈ 200-600KB（平台重编码，见 XWork.thumb_url 注释），30 张上限也
+    # 远低于内存阈值：直接内存打包即可，不必走原生的大包临时文件分支。
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
+        for path in paths:
+            zf.write(path, os.path.basename(path))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name=f'{safe_title}.zip')
 
 
 @bp.route('/api/x/works/<int:work_id>', methods=['DELETE'])
