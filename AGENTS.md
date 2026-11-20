@@ -54,7 +54,7 @@ gunicorn -w 1 --threads 8 --timeout 300 -b 127.0.0.1:8000 app:app
 | `pixivviewer/background.py` | 后台线程与下载引擎：自动关注、预取循环、下载执行器、`start_background_threads()`（幂等）、`_reset_stuck_*` |
 | `pixivviewer/pixiv_client.py` | **Pixiv 适配层**：Ajax 端点拼装、Cookie/`PHPSESSID` 认证、Session 与线程内连接池、令牌桶限流、响应信封判定、payload → 规范字段解析；不碰 DB、不认识 `Illust` |
 | `pixivviewer/fetcher.py` | Pixiv **业务层**：屏蔽/R18/收藏数过滤、搜索缓存、游标分页、取消与详情预算、入库、后台详情补全；Ajax 细节全部委托 `pixiv_client`（并把其符号再导出给历史调用方与测试补丁 seam） |
-| `pixivviewer/x_client.py` | **X 适配层**：SearchTimeline 拼装、Cookie（auth_token+ct0）、`instance/x_api.json`（query_id/features 热更新）、令牌桶、错误分类 |
+| `pixivviewer/x_client.py` | **X 适配层**：SearchTimeline 拼装、Cookie（auth_token+ct0）、`instance/x_api.json`（query_id/features/variables 热更新，需同源同版否则空 404）、x-client-transaction-id 防爬令牌（XClientTransaction，404 换新素材重试一次）、令牌桶、错误分类 |
 | `pixivviewer/x_dedupe.py` | 同作品判定：E1 推文链接（决定性）、E2 dHash 指纹（决定性，Pillow 可选）、H1 同作者+时间窗+张数（仅疑似）；只标记不删数据 |
 | `pixivviewer/routes/home.py` | 首页数据 `GET /api/home`（第一屏「最近 48 小时热门」）+ `POST /api/home/more`（第二屏起缓存随机推荐，不缓存）+ 60 秒缓存 `clear_home_cache()` |
 | `pixivviewer/routes/search.py` | `/search`、搜索任务状态、缓存浏览 `/api/cache/*`、`/api/following` |

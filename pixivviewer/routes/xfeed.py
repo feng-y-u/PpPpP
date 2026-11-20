@@ -188,6 +188,7 @@ def x_status() -> Response:
         'tag_errors': tag_errors,
         'cookie_configured': _cookie_configured(),
         'query_id_configured': configured,
+        'transaction_available': bool(getattr(x_client, 'TRANSACTION_AVAILABLE', False)),
         'hash_available': x_dedupe.PIL_AVAILABLE,
     })
 

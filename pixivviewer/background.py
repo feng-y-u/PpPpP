@@ -8,6 +8,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 from . import fetcher
 from . import helpers
 from . import pixiv_client
@@ -1491,20 +1493,42 @@ def _download_x_work_inner(work_id: int) -> None:
     session_obj = None
     try:
         os.makedirs(work_dir, exist_ok=True)
-        session_obj = build_credentialless_session()
+        # X 图片用 x_client 自己的无凭据会话：pixiv_client 的无凭据会话
+        # 内部要求 cookies.txt 存在（没配 Pixiv 就 FileNotFoundError），
+        # X 下载不该耦合到 Pixiv 凭据上
+        session_obj = x_client.build_image_session()
         for i, url in enumerate(urls):
             host, reject = check_image_url(url)
             if reject or host not in X_IMAGE_HOSTS:
                 raise _UnsafeImageUrl(f'非法 X 图片地址（{reject or host}）: {url}')
-            resp = session_obj.get(url, timeout=(10, 60), stream=True,
-                                   allow_redirects=False)
-            if resp.is_redirect:
-                raise _UnsafeImageUrl(f'X 图片地址发生重定向：{url}')
-            resp.raise_for_status()
             path = os.path.join(work_dir, f'{tweet_id}_{i}.{_extract_ext(url)}')
-            with open(path, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            last_error = None
+            for attempt in range(3):
+                try:
+                    resp = session_obj.get(url, timeout=(10, 60), stream=True,
+                                           allow_redirects=False)
+                    if resp.is_redirect:
+                        raise _UnsafeImageUrl(f'X 图片地址发生重定向：{url}')
+                    resp.raise_for_status()
+                    with open(path, 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    last_error = None
+                    break
+                except _UnsafeImageUrl:
+                    raise                    # 地址判定问题，重试没有意义
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    # 图片经代理偶发超时（本地实测 pbs.twimg.com 时好时坏而
+                    # x.com API 稳定）：网络级错误重试，HTTP 错误不重试。
+                    # 重开 'wb' 会截断上次的半截文件，不留脏数据。
+                    last_error = e
+                    time.sleep(2)
+            if last_error is not None:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                raise last_error
             saved.append(path)
     except Exception as e:
         logger.error(f'[x] 下载作品 {work_id} 失败: {e}')

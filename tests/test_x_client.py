@@ -140,3 +140,78 @@ def test_load_cookie_missing_keys_raises(isolated_x):
     x_client.clear_cookie_cache()
     with pytest.raises(x_client.XAuthError):
         x_client.load_cookie()
+
+
+class _FakeResp:
+    """search_timeline 只用到 status_code / text / json 三样，这里够用。"""
+
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self.text = ''
+        self._payload = payload
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError('no json')
+        return self._payload
+
+
+class TestTransactionHeader:
+    """x-client-transaction-id：X 2026 起搜索接口的强制防爬令牌。
+
+    2026-11-20 本地联调实测：参数全对、只缺这个头 → X 回**空 404**，
+    极易误判成 query_id 过期。这里钉住三个行为：带头发请求、404 换新素材
+    重试一次、未装包时单次请求并给出指向安装的报错。
+    """
+
+    @staticmethod
+    def _install_fake_session(monkeypatch, responses):
+        calls = []
+
+        class _Session:
+            def get(self, url, timeout=None, allow_redirects=False, headers=None):
+                calls.append({'url': url, 'headers': dict(headers or {})})
+                return responses[len(calls) - 1]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(x_client, '_session', lambda: _Session())
+        return calls
+
+    def test_search_sends_transaction_header(self, isolated_x, monkeypatch):
+        monkeypatch.setattr(x_client, '_transaction_id', lambda m, p, force_refresh=False: 'TID123')
+        calls = self._install_fake_session(monkeypatch, [_FakeResp(200, _payload())])
+
+        tweets, _ = x_client.search_timeline('#tag')
+        assert len(tweets) == 2
+        assert calls[0]['headers']['x-client-transaction-id'] == 'TID123'
+
+    def test_search_retries_once_with_fresh_material_on_404(self, isolated_x, monkeypatch):
+        refresh_flags = []
+
+        def _fake_tid(method, path, force_refresh=False):
+            refresh_flags.append(force_refresh)
+            return 'TID-NEW' if force_refresh else 'TID-OLD'
+
+        monkeypatch.setattr(x_client, '_transaction_id', _fake_tid)
+        calls = self._install_fake_session(
+            monkeypatch, [_FakeResp(404), _FakeResp(200, _payload())])
+
+        tweets, _ = x_client.search_timeline('#tag')
+        assert len(tweets) == 2, '重试成功后必须正常返回推文'
+        assert len(calls) == 2, '404 只重试一次'
+        assert calls[0]['headers']['x-client-transaction-id'] == 'TID-OLD'
+        assert calls[1]['headers']['x-client-transaction-id'] == 'TID-NEW'
+        assert refresh_flags == [False, True], '第二次必须强制刷新素材'
+
+    def test_search_404_without_package_single_attempt_and_hint(self, isolated_x, monkeypatch):
+        # 未装包：令牌为空 → 裸发一次；404 报错必须指向安装，而不是让人去改 query_id
+        monkeypatch.setattr(x_client, 'TRANSACTION_AVAILABLE', False)
+        monkeypatch.setattr(x_client, '_transaction_id', lambda m, p, force_refresh=False: '')
+        calls = self._install_fake_session(monkeypatch, [_FakeResp(404)])
+
+        with pytest.raises(x_client.XQueryStale) as ei:
+            x_client.search_timeline('#tag')
+        assert 'XClientTransaction' in str(ei.value)
+        assert len(calls) == 1, '没有令牌可用时不允许重试'

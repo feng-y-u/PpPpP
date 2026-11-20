@@ -22,12 +22,32 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
 from . import config
 
 logger = logging.getLogger(__name__)
+
+# ── x-client-transaction-id：X 2026 起对搜索接口强制的防爬令牌 ──
+# 真实浏览器每个 GraphQL 请求都带它（无头 Chrome 登录态抓包确认）；缺失时 X 回
+# **空 404**（不是 403/400），极易误判成 query_id 过期。算法由社区逆向为
+# XClientTransaction（MIT，PyPI，见 requirements-x.txt）；素材 = 登录态 home
+# HTML（<meta> key）+ 其 webpack 清单引用的 ondemand.s.<hash>a.js（动画帧表）。
+# 素材随前端发版轮换，404 时强制换新素材重试一次（twscrape 同款策略）。
+try:
+    import bs4  # noqa: F401
+    from x_client_transaction import ClientTransaction as _XClientTransaction
+    from x_client_transaction.utils import get_ondemand_file_url as _x_ondemand_url
+
+    TRANSACTION_AVAILABLE = True
+except ImportError:  # pragma: no cover - 可选依赖（requirements-x.txt）
+    TRANSACTION_AVAILABLE = False
+
+_transaction_lock = threading.Lock()
+_transaction_state: dict = {'ct': None}
+
 
 # X 的 id 是 64 位整数：只做字符串处理，不转 int（JS 侧也只按字符串用）
 _TWEET_ID_RE = re.compile(r'/status(?:es)?/(\d{1,20})')
@@ -275,6 +295,76 @@ def _session() -> requests.Session:
     return session
 
 
+def _material_session() -> requests.Session:
+    """抓防爬令牌素材（HTML/JS）用的干净会话：只带 Cookie 和浏览器头。
+
+    不能复用 `_session()`：Authorization/X-Csrf 这批 API 头会让 HTML 页面
+    直接回 401 空响应（本地联调实测），而未登录的 x.com 壳页又没有
+    webpack 清单 —— 必须是「带 Cookie 的浏览器式」请求。
+    """
+    auth_token, ct0 = load_cookie()
+    sess = requests.Session()
+    proxy = getattr(config, 'PROXY', '')
+    if proxy:
+        sess.proxies = {'http': proxy, 'https': proxy}
+    sess.headers.update({
+        'User-Agent': _USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    })
+    sess.cookies.set('auth_token', auth_token, domain='.x.com')
+    sess.cookies.set('ct0', ct0, domain='.x.com')
+    sess.verify = bool(getattr(config, 'SSL_VERIFY', True))
+    return sess
+
+
+def _build_transaction() -> Optional[object]:
+    """抓 home + ondemand.s.js 构建 ClientTransaction；失败返回 None 由调用方降级。"""
+    if not TRANSACTION_AVAILABLE:
+        return None
+    timeout = getattr(config, 'X_TIMEOUT', (10, 30))
+    sess = _material_session()
+    try:
+        home = sess.get(f'{config.X_BASE_URL}/home', timeout=timeout)
+        if home.status_code != 200:
+            return None
+        soup = bs4.BeautifulSoup(home.content, 'html.parser')
+        ondemand_url = _x_ondemand_url(response=soup)
+        if not ondemand_url:
+            return None
+        ondemand = sess.get(ondemand_url, timeout=timeout)
+        if ondemand.status_code != 200:
+            return None
+        return _XClientTransaction(home_page_response=soup,
+                                   ondemand_file_response=ondemand.text)
+    except Exception as e:
+        logger.warning(f'[x] 防爬令牌素材构建失败: {e!r}')
+        return None
+    finally:
+        sess.close()
+
+
+def _get_transaction(force_refresh: bool = False) -> Optional[object]:
+    """构建结果带锁缓存；404 重试时 force_refresh 换新素材。"""
+    with _transaction_lock:
+        if not force_refresh and _transaction_state['ct'] is not None:
+            return _transaction_state['ct']
+        ct = _build_transaction()
+        _transaction_state['ct'] = ct
+        return ct
+
+
+def _transaction_id(method: str, path: str, force_refresh: bool = False) -> str:
+    """给单个请求生成令牌；拿不到素材（未装包/抓取失败）返回空串，调用方裸发。"""
+    ct = _get_transaction(force_refresh=force_refresh)
+    if ct is None:
+        return ''
+    try:
+        return ct.generate_transaction_id(method=method, path=path) or ''
+    except Exception:
+        return ''
+
+
 def build_search_url(tag: str, cursor: Optional[str] = None) -> str:
     """拼 SearchTimeline 请求地址；query_id 缺失时抛 XQueryStale 而不是拼出坏地址。"""
     api = _load_api_config()
@@ -287,6 +377,10 @@ def build_search_url(tag: str, cursor: Optional[str] = None) -> str:
         'querySource': 'typed_query',
         'product': 'Latest',
     }
+    # 前端构建的 variables 形状会漂移（新增 with* 开关、querySource 变空串）。
+    # X 对 (queryId, variables, features) 三元组做整体校验，形状不对会回**空 404**
+    #（不是 400），极难排查；x_api.json 的 variables 键允许不改代码就跟进漂移。
+    variables.update(api.get('variables') or {})
     if cursor:
         variables['cursor'] = cursor
     features = api.get('features') or _DEFAULT_FEATURES
@@ -296,6 +390,27 @@ def build_search_url(tag: str, cursor: Optional[str] = None) -> str:
         f'?variables={requests.utils.quote(json.dumps(variables, ensure_ascii=False))}'
         f'&features={requests.utils.quote(json.dumps(features, ensure_ascii=False))}'
     )
+
+
+def build_image_session() -> requests.Session:
+    """下载 pbs.twimg.com 图片用的无凭据会话（与搜索共用代理/UA 配置）。
+
+    不复用 `pixiv_client.build_credentialless_session()`：那个函数内部先走
+    `build_pixiv_session()`（要求 Pixiv 的 cookies.txt 存在，没配 Pixiv 就
+    FileNotFoundError），把 X 下载耦合到了 Pixiv 凭据上 —— X 图片请求本来
+    就不该带任何凭据，更不该依赖另一套登录态。
+    """
+    sess = requests.Session()
+    proxy = getattr(config, 'PROXY', '')
+    if proxy:
+        sess.proxies = {'http': proxy, 'https': proxy}
+    sess.headers.update({
+        'User-Agent': _USER_AGENT,
+        'Referer': f'{config.X_BASE_URL}/',
+        'Accept': 'image/*',
+    })
+    sess.verify = bool(getattr(config, 'SSL_VERIFY', True))
+    return sess
 
 
 def _classify_http(status: int, body: str) -> XError:
@@ -479,11 +594,19 @@ def search_timeline(tag: str, cursor: Optional[str] = None) -> tuple[list[XTweet
     if not tag:
         raise XError('标签不能为空')
     url = build_search_url(tag, cursor)
+    path = urlsplit(url).path
     _bucket().wait()
     session = _session()
     try:
-        resp = session.get(url, timeout=getattr(config, 'X_TIMEOUT', (10, 30)),
-                           allow_redirects=False)
+        tid = _transaction_id('GET', path)
+        resp = _search_get(session, url, tid)
+        if resp.status_code == 404:
+            # 404 有两种含义：防爬令牌/素材被拒（大概率）或 query_id 真过期。
+            # 先换新素材重试一次；仍 404 才归为接口过期 —— 不重试的话一次素材
+            # 失效就会让标签永久报"过期"，且用户无从分辨该改哪份配置。
+            fresh = _transaction_id('GET', path, force_refresh=True)
+            if fresh:
+                resp = _search_get(session, url, fresh)
     except requests.ConnectionError as e:
         raise XNetworkError(f'连不上 X：{e}') from e
     except requests.Timeout as e:
@@ -491,12 +614,22 @@ def search_timeline(tag: str, cursor: Optional[str] = None) -> tuple[list[XTweet
     finally:
         session.close()
     if resp.status_code != 200:
+        if resp.status_code == 404 and not TRANSACTION_AVAILABLE:
+            raise XQueryStale('X 搜索接口不可用（HTTP 404）：缺少防爬令牌'
+                              '（pip install XClientTransaction 或 requirements-x.txt），'
+                              '也可能是 query_id 过期')
         raise _classify_http(resp.status_code, resp.text)
     try:
         payload = resp.json()
     except ValueError as e:
         raise XQueryStale('X 响应不是合法 JSON（可能被风控页替换）') from e
     return parse_search_page(payload)
+
+
+def _search_get(session, url: str, transaction_id: str):
+    headers = {'x-client-transaction-id': transaction_id} if transaction_id else None
+    return session.get(url, timeout=getattr(config, 'X_TIMEOUT', (10, 30)),
+                       allow_redirects=False, headers=headers)
 
 
 def probe_credentials(tag: str = '#テスト') -> dict:

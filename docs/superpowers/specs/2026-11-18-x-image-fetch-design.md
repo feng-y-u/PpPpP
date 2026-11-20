@@ -130,3 +130,30 @@ Pixiv 的 `upload_date` 是 JST 墙面时间，tweet 时间是 UTC：H1 比较�
   纳入优雅关停；`/ximg` 缓存命中按扩展名定死 Content-Type（webp 在老 mimetypes 数据库
   下会错）+ 半写 tmp 清理；created_at 解析脱离 locale（固定月份表替代 %a/%b）；
   `tweet_id` 入库加 isdigit 守卫；query_id 优先级提示改为如实（x_api.json 优先）。
+
+## 本地联调（2026-11-20）：SearchTimeline 的第三道墙 —— x-client-transaction-id
+
+本地端到端测试把 Cookie/query_id/代理/管道全部验证通过（对照组 `TweetResultByRestId`
+直接 200），唯独搜索一律**空 404**。定位过程：
+
+1. 排除参数：用无头 Chrome（登录态）截获真实请求，拿到与线上完全一致的
+   query_id/variables/features（hash `vLHjqbDv7TPFMBkIIO1nOA`，即 twscrape 同款）→
+   仍然 404。注意 **features/variables 形状不匹配同样回空 404**，不是 400。
+2. 排除 TLS 指纹：`curl_cffi` 伪装 Chrome 照样 404（`TweetResultByRestId` 能通）。
+3. 定位真凶：真实浏览器的每个 GraphQL 请求都带 `x-client-transaction-id`
+   （前端 JS 逐请求算出的防爬令牌，2026 起搜索接口强制；twscrape 主线已内置
+   `xclid.py`，见 twitterapi.io 的分析）。缺失 → 空 404。
+
+修复：可选依赖 `XClientTransaction`（PyPI，社区逆向算法）。
+
+- `x_client._build_transaction()`：登录态（**干净浏览器头**，带 API 头会被 HTML 页
+  401）抓 `x.com/home` → 从 webpack 清单取 `ondemand.s.<hash>a.js` → 构建
+  ClientTransaction，带锁缓存；
+- `search_timeline` 每请求生成令牌并发送；**404 时强制换新素材重试一次**（素材随
+  前端发版轮换），仍 404 才报 query_id 过期；未装包时 404 报错直接指向安装命令。
+- `/api/x/status` 新增 `transaction_available`，设置页/X 页如实展示。
+- 实测：`#原神` 搜索 200，返回 13 条推文、游标正常、解析器原样吃下。
+
+附带结论（写在这里防后人重蹈）：`instance/x_api.json` 现在承载三元组
+`query_id + features + variables`，三者必须**同源同版**（都从真实浏览器抓），
+混用社区仓库里的不同版本必 404。

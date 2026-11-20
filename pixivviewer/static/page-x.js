@@ -53,6 +53,7 @@ async function loadXStatus() {
     if (st.last_error) bits.push(`<span class="warn">最近错误：${escHtml(st.last_error)}</span>`);
     if (!s.cookie_configured) bits.push('<span class="warn">未配置 X Cookie（设置页填写）</span>');
     if (!s.query_id_configured) bits.push('<span class="warn">未配置 query_id（instance/x_api.json）</span>');
+    if (!s.transaction_available) bits.push('<span class="warn">未安装 XClientTransaction：搜索会被 404 拒绝</span>');
     if (!s.hash_available) bits.push('未安装 Pillow：哈希去重不可用');
     $('#xStatus').innerHTML = bits.join(' · ');
     $('#xCount').textContent = `${s.works} 条作品 / ${s.tags} 个标签`;

@@ -331,6 +331,9 @@ async function loadXPanel() {
     const parts = [];
     parts.push(status.cookie_configured ? 'Cookie：已配置' : 'Cookie：未配置');
     parts.push(status.query_id_configured ? 'query_id：已配置' : 'query_id：未配置');
+    parts.push(status.transaction_available
+      ? 'XClientTransaction：已安装（防爬令牌可用）'
+      : 'XClientTransaction：未安装（搜索会被 404 拒绝，装 requirements-x.txt）');
     parts.push(status.hash_available ? 'Pillow：已安装（哈希去重可用）' : 'Pillow：未安装（哈希去重不可用）');
     if (status.state && status.state.last_error) parts.push('最近错误：' + status.state.last_error);
     if (status.tag_errors && status.tag_errors.length) {

@@ -92,15 +92,20 @@ python app.py
 
 1. **登录 Cookie**：浏览器登录 x.com → F12 → Application → Cookies，复制 `auth_token` 与 `ct0`，
    写进 `instance/x_cookies.txt`（一行 `auth_token=...; ct0=...`），或在设置页粘贴。
-2. **搜索 query_id**：X 网页版内部 GraphQL 的 `SearchTimeline` 会随发版换 id。
-   在浏览器 Network 里搜 `SearchTimeline`，把路径里的 `/graphql/<query_id>/` 填进
+2. **搜索 query_id + 请求参数**：X 网页版内部 GraphQL 的 `SearchTimeline` 会随发版换
+   id。在浏览器 Network 里搜 `SearchTimeline`，把路径里的 `/graphql/<query_id>/` 填进
    `instance/x_api.json`：
 
    ```json
    {"query_id": "填入你抓到的 id"}
    ```
 
-   也可以只用设置页的 `x_search_query_id`。字段名变了再把 `features` 一起覆盖。
+   也可以只用设置页的 `x_search_query_id`（两处都配置时以 x_api.json 为准）。
+   `features`/`variables` 同理会漂移；三者**同源同版**（都从你自己的浏览器抓），
+   混用不同来源会得到空 404。
+3. **防爬令牌依赖**：X（2026 起）对搜索接口强制 `x-client-transaction-id` 头，
+   缺失时一律空 404。`pip install -r requirements-x.txt`（含 `XClientTransaction`
+   与 Pillow）即可，服务端会自动生成令牌。
 
 先跑探针确认能连通（输出已脱敏）：
 
@@ -116,7 +121,7 @@ python scripts/x_probe.py '#原神'
 - 只抓图片（`pbs.twimg.com` 的 jpg/png/webp），不处理视频/动图。
 - 同作品判定只有两类**决定性**证据：推文里带 Pixiv 链接、或图像指纹一致。同作者只能算
   「疑似」，需要在页面上人工确认——作者相同不等于作品相同。
-- 指纹去重需要可选依赖：`pip install -r requirements-x.txt`（Pillow）。不装也能用，
+- 指纹去重需要 Pillow（在 `requirements-x.txt` 里，与防爬令牌一起装）。不装也能用，
   只是少了指纹这一层。
 
 ## 生产部署

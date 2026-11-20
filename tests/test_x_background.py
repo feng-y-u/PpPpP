@@ -87,6 +87,54 @@ class TestXFetchTagResilience:
         assert row.status == 'fetching', '跳过时不得改写状态'
 
 
+class TestXDownloadSession:
+    def test_download_does_not_require_pixiv_cookie(self, clean_db, monkeypatch, tmp_path):
+        """X 下载与 Pixiv 凭据解耦：没有 cookies.txt 也必须能下载成功。
+
+        2026-11-20 本地联调实测：worker 曾复用 pixiv_client 的无凭据会话，
+        其内部要求 cookies.txt 存在 → 没配 Pixiv 的部署上每张图都失败。
+        """
+        import os
+
+        from pixivviewer import pixiv_client
+
+        monkeypatch.setattr(pixiv_client, 'COOKIE_PATH',
+                            str(tmp_path / 'no-such-pixiv-cookie.txt'))
+        monkeypatch.setattr(background.config, 'DOWNLOAD_DIR', str(tmp_path))
+        work = _add_work(clean_db, saved_status=None)
+
+        class _Resp:
+            status_code = 200
+            headers = {'Content-Type': 'image/jpeg'}
+            is_redirect = False
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, chunk_size=8192):
+                return iter([b'\xff\xd8\xff\xe0fake-jpeg-bytes'])
+
+        class _Session:
+            headers = {}
+
+            def get(self, url, timeout=None, stream=True, allow_redirects=False):
+                return _Resp()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(background.x_client, 'build_image_session', lambda: _Session())
+
+        background._download_x_work(work.id)
+
+        clean_db.refresh(work)
+        assert work.saved_status == 'done'
+        assert work.saved_paths_list, '下载成功必须记录文件路径'
+        for path in work.saved_paths_list:
+            assert os.path.isfile(path)
+            os.remove(path)
+
+
 class TestXDownloadLock:
     def test_second_submission_skips_while_lock_held(self, clean_db, monkeypatch):
         """同作品重复提交：锁被占用时直接返回，不得把 DB 状态推进成 downloading。"""

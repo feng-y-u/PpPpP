@@ -142,7 +142,8 @@ class TestXStatus:
     def test_status_shape(self, client, clean_db, x_client_iso):
         data = client.get('/api/x/status').get_json()
         for key in ('state', 'works', 'tags', 'tag_errors',
-                    'cookie_configured', 'query_id_configured', 'hash_available'):
+                    'cookie_configured', 'query_id_configured',
+                    'transaction_available', 'hash_available'):
             assert key in data
         for key in ('enabled', 'interval', 'running', 'last_check', 'last_error'):
             assert key in data['state']
