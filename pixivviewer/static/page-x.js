@@ -76,10 +76,14 @@ async function loadXTags() {
   tags.forEach(t => {
     const chip = document.createElement('span');
     chip.className = 'x-tag' + (xActiveTag === t.tag ? ' active' : '');
+    chip.dataset.tag = t.tag;
     chip.title = t.error || `上次抓取：${t.last_fetch_at || '从未'}`;
-    chip.innerHTML = `${escHtml(t.tag)} <span class="ref" title="立即抓取这个标签">↻</span>` +
+    const live = _xLiveText(t.progress);
+    chip.innerHTML = `${escHtml(t.tag)} <span class="live">${live}</span>` +
+      `<span class="ref" title="立即抓取这个标签">↻</span>` +
       `<span class="del" title="删除标签">×</span>` +
       (t.error ? ' <span class="err">!</span>' : '');
+    if (live) chip.classList.add('fetching');
     chip.addEventListener('click', (e) => {
       if (e.target.closest('.del')) {
         deleteXTag(t.tag);
@@ -94,12 +98,68 @@ async function loadXTags() {
     });
     bar.appendChild(chip);
   });
+  if (tags.some(t => (t.progress || {}).status === 'fetching' || t.status === 'fetching')) {
+    startXTagPolling();
+  }
+}
+
+// 抓取进度的短文案：与原生搜索页"已加载 N/预计 M"同款信息密度
+function _xLiveText(p) {
+  if (!p || !p.status) return '';
+  if (p.status === 'fetching') {
+    const pages = p.pages_total ? `${p.pages_done || 0}/${p.pages_total}` : String(p.pages_done || 0);
+    return `抓取中 ${pages} 页 · ${p.found || 0} 条`;
+  }
+  if (p.status === 'error') return '上次失败';
+  return '';
+}
+
+// 标签轮询：抓取期间只更新 chip 上的 live 文案，不整条重渲染（避免闪烁）；
+// 有标签从 fetching 变 done 时刷新列表（新图到了，用户点完刷新该看到东西长出来）
+let xTagPollTimer = null;
+function startXTagPolling() {
+  if (xTagPollTimer) return;
+  xTagPollTimer = setInterval(async () => {
+    let anyFetching = false;
+    let completed = false;
+    try {
+      const tags = await xApi('/api/x/tags');
+      tags.forEach(t => {
+        const chip = document.querySelector(`.x-tag[data-tag="${CSS.escape(t.tag)}"]`);
+        if (!chip) return;
+        const p = t.progress || {};
+        const live = chip.querySelector('.live');
+        const wasFetching = chip.classList.contains('fetching');
+        if (p.status === 'fetching') {
+          anyFetching = true;
+          chip.classList.add('fetching');
+          if (live) live.textContent = _xLiveText(p);
+        } else if (wasFetching) {
+          // fetching → done/error 的收口：摘掉转圈态，done 触发一次列表刷新
+          chip.classList.remove('fetching');
+          if (live) live.textContent = p.status === 'error' ? '上次失败' : '';
+          if (p.status === 'done') completed = true;
+        }
+      });
+    } catch { /* 轮询失败下轮再试 */ }
+    if (!anyFetching) {
+      clearInterval(xTagPollTimer);
+      xTagPollTimer = null;
+      if (completed) {
+        showToast('抓取完成，列表已更新');
+        reloadXItems();
+      }
+    }
+  }, 2500);
 }
 
 async function refreshXTag(tag) {
   try {
     await xPost('/api/x/tags/' + encodeURIComponent(tag) + '/refresh');
-    showToast('已加入本轮抓取，稍后点「刷新列表」查看新图');
+    // 立刻把 chip 置成"抓取中"并开始轮询：用户需要马上看到动作被接受了
+    const chip = document.querySelector(`.x-tag[data-tag="${CSS.escape(tag)}"] .live`);
+    if (chip) chip.textContent = '抓取中…';
+    startXTagPolling();
   } catch (e) {
     showToast('刷新失败：' + e.message, true);
   }
@@ -119,6 +179,7 @@ async function addXTag() {
     showToast(data.triggered ? '已添加，正在后台抓取' : '已添加（X 抓取未启用，去设置页开启）');
     xActiveTag = tag;
     await loadXTags();
+    if (data.triggered) startXTagPolling();
     reloadXItems();
   } catch (e) {
     showToast('添加失败：' + e.message, true);
@@ -146,18 +207,28 @@ async function deleteXTag(tag) {
 }
 
 // ── 列表 ──
+// 卡片结构与缓存浏览页（page-cache.js renderCard）同构：同一个 .photo-card
+// 组件、同一套徽标/操作区。X 差异只在：标题行是作者而非作品名、多一条推文
+// 文本、操作区多一枚「原推」。一致性改造 2026-11-20 —— 此前 X 用的是
+// Bootstrap row/col + 自有 .x-card，与全站瀑布流断崖式不一致。
 function renderXCard(item) {
-  const col = document.createElement('div');
-  col.className = 'col-lg-3 col-md-4 col-sm-6';
+  const wrap = document.createElement('div');
+  wrap.className = 'masonry-item';
   const media = (item.media || [])[0] || {};
   const img = xProxy(media.url);
+
   const badges = [];
+  if (item.media_count > 1) badges.push(`<span class="photo-badge">${item.media_count}P</span>`);
   if (item.dup_status === 'confirmed') {
-    badges.push(`<span class="x-badge ok">同一作品${item.dup_pixiv_id ? ' #' + item.dup_pixiv_id : ''}</span>`);
+    badges.push(`<span class="photo-badge ok">同一作品${item.dup_pixiv_id ? ' #' + item.dup_pixiv_id : ''}</span>`);
   } else if (item.dup_status === 'suspected') {
-    badges.push('<span class="x-badge warn">疑似同一作品</span>');
+    badges.push('<span class="photo-badge warn">疑似重复</span>');
   }
-  if (item.saved_status === 'done') badges.push('<span class="x-badge">已下载</span>');
+  if (item.saved_status === 'done') badges.push('<span class="photo-badge ok">已下载</span>');
+  else if (item.saved_status === 'downloading' || item.saved_status === 'queued') {
+    badges.push('<span class="photo-badge">下载中</span>');
+  } else if (item.saved_status === 'failed') badges.push('<span class="photo-badge warn">下载失败</span>');
+
   const pixivLink = item.dup_pixiv_id
     ? `<a class="btn btn-sm btn-soft" href="/detail/${item.dup_pixiv_id}">看 Pixiv</a>` : '';
   const dupActions = item.dup_status === 'suspected'
@@ -177,18 +248,21 @@ function renderXCard(item) {
       '</button>';
   }
 
-  col.innerHTML = `
-    <div class="x-card" data-id="${item.id}">
-      <div class="x-media">
-        ${img ? `<img src="${img}" loading="lazy" alt="">` : ''}
-        ${badges.join('')}
-        ${item.media_count > 1 ? `<span class="x-badge" style="left:auto;right:6px;">${item.media_count} 张</span>` : ''}
-      </div>
-      <div class="x-body">
-        <div class="x-author">${escHtml(item.author_name || '未知作者')}${
-          item.author_screen_name ? ` <span class="handle">@${escHtml(item.author_screen_name)}</span>` : ''}</div>
-        <div class="x-text">${escHtml((item.text || '').slice(0, 160))}</div>
-        <div class="x-actions">
+  const author = item.author_name || '未知作者';
+  const handle = item.author_screen_name ? ` @${item.author_screen_name}` : '';
+  const when = item.tweeted_at ? new Date(item.tweeted_at).toLocaleDateString('zh-CN') : '';
+
+  wrap.innerHTML = `
+    <div class="photo-card" data-id="${item.id}">
+      ${img ? `<img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400' fill='%23ecece7'%3E%3C/svg%3E"
+           data-src="${escAttr(img)}" loading="lazy" class="img-fade" alt="">`
+           : '<div class="img-placeholder" style="aspect-ratio:4/5;"><span>无图</span></div>'}
+      <div class="photo-badges">${badges.join('')}</div>
+      <div class="photo-card-info">
+        <div class="photo-card-title" title="${escAttr(author + handle)}">${escHtml(author)}${escHtml(handle)}</div>
+        <div class="photo-card-artist">${escHtml(when)} · 来自标签 ${escHtml(item.tag || '')}</div>
+        <div class="photo-card-text">${escHtml((item.text || '').slice(0, 160))}</div>
+        <div class="photo-card-actions">
           ${downloadBtn}
           <a class="btn btn-sm btn-soft" target="_blank" rel="noopener noreferrer"
              href="https://x.com/${encodeURIComponent(item.author_screen_name || 'i')}/status/${encodeURIComponent(item.tweet_id)}">原推</a>
@@ -199,14 +273,11 @@ function renderXCard(item) {
       </div>
     </div>`;
 
-  const card = col.querySelector('.x-card');
-  card.querySelector('.x-media').addEventListener('click', () => {
-    // 已下载的作品优先看本地图（新页），未下载的仍去原推
-    if (item.saved_status === 'done') {
-      window.location.href = `/x/view/${item.id}`;
-      return;
-    }
-    window.open(`https://x.com/${encodeURIComponent(item.author_screen_name || 'i')}/status/${encodeURIComponent(item.tweet_id)}`, '_blank', 'noopener');
+  const card = wrap.querySelector('.photo-card');
+  // 与全站同动线：点卡片进详情页（/x/view 下载前后都能看）
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('.photo-card-actions') || e.target.closest('a')) return;
+    window.location.href = `/x/view/${item.id}`;
   });
   const dl = card.querySelector('[data-dl]');
   if (dl) dl.addEventListener('click', () => downloadXWork(item.id, dl));
@@ -215,7 +286,7 @@ function renderXCard(item) {
   card.querySelectorAll('[data-dup]').forEach(btn => {
     btn.addEventListener('click', () => markXDup(item.id, btn.dataset.dup));
   });
-  return col;
+  return wrap;
 }
 
 async function loadXItems(reset) {
@@ -230,8 +301,20 @@ async function loadXItems(reset) {
     xTotal = data.total || 0;
     (data.data || []).forEach(item => $('#xGrid').appendChild(renderXCard(item)));
     xOffset += (data.data || []).length;
-    $('#xEmpty').style.display = (xTotal === 0) ? 'block' : 'none';
+    lazyLoad();
+    // 空态要区分"从没抓过"和"这个筛选下没有"（后者给换筛选的指引）
+    const empty = $('#xEmpty');
+    if (xTotal === 0) {
+      const filtered = (xDupMode !== 'all' || xSavedMode !== 'all' || xActiveTag);
+      empty.textContent = filtered
+        ? '这个筛选下没有作品，试试切回「全部」。'
+        : '还没有抓取过。先在上面添加一个标签。';
+      empty.style.display = 'block';
+    } else {
+      empty.style.display = 'none';
+    }
     $('#xMoreBtn').style.display = (xOffset < xTotal) ? 'inline-block' : 'none';
+    $('#xPageNote').textContent = xTotal ? `已显示 ${xOffset} / ${xTotal} 条` : '';
   } catch (e) {
     showToast('列表加载失败：' + e.message, true);
   } finally {
@@ -250,8 +333,9 @@ function reloadXItems() {
 async function refreshXCard(id) {
   try {
     const row = await xApi(`/api/x/works/${id}`);
-    const old = document.querySelector(`.x-card[data-id="${id}"]`);
+    const old = document.querySelector(`.photo-card[data-id="${id}"]`);
     if (old) old.parentElement.replaceWith(renderXCard(row));
+    lazyLoad();
   } catch { /* 卡片被过滤/删除时静默跳过 */ }
 }
 
@@ -297,7 +381,7 @@ async function deleteXWork(id) {
     await xApi(`/api/x/works/${id}`, {
       method: 'DELETE', headers: { 'X-CSRF-Token': xCsrf },
     });
-    const card = document.querySelector(`.x-card[data-id="${id}"]`);
+    const card = document.querySelector(`.photo-card[data-id="${id}"]`);
     if (card) card.parentElement.remove();
     xTotal = Math.max(0, xTotal - 1);
     $('#xEmpty').style.display = (xTotal === 0) ? 'block' : 'none';

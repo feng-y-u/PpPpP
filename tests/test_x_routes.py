@@ -188,11 +188,20 @@ class TestXWorkView:
         assert f'/api/x/image/{work.id}/1' in html
         assert 'page-xview.js' in html
 
-    def test_view_page_for_undownloaded_work_is_honest(self, client, clean_db):
+    def test_view_page_for_undownloaded_work_shows_proxied_preview(self, client, clean_db):
+        """未下载的详情页：经 /ximg 代理原图预览 + 下载按钮（与 /detail 同动线）。
+
+        旧实现只给一句"还没下载过"的空话 —— 用户必须回列表点下载、再去原推
+        看图，浏览动线断裂。2026-11-20 一致性改造：点卡片进详情页，
+        下载前后都能看。
+        """
         work = _add_work(clean_db, '1800000000000000805', saved_status=None)
         resp = client.get(f'/x/view/{work.id}')
         assert resp.status_code == 200
-        assert '还没有下载过' in resp.get_data(as_text=True)
+        html = resp.get_data(as_text=True)
+        assert '/ximg/' in html, '未下载作品必须渲染代理原图'
+        assert 'id="xvDownloadBtn"' in html
+        assert f'data-x-id="{work.id}"' in html
         assert client.get('/x/view/999999').status_code == 404
 
     def test_image_file_serving(self, client, clean_db, tmp_path, monkeypatch):
@@ -220,6 +229,65 @@ class TestXWorkView:
         clean_db.commit()
         resp = client.get(f'/api/x/image/{work.id}/0')
         assert resp.status_code == 403, '不在 downloads/x_<tweet_id> 下的路径必须拒绝'
+
+
+class TestXConsistencyShapes:
+    """一致性改造（2026-11-20）钉的接口形状。
+
+    X 是同一个产品里的第二种来源，不该是一套平行实现：卡片/详情/下载管理
+    消费同一套字段名（download_status/page_count/thumb_url/local_urls），
+    下载管理页把 X 任务并入同一个队列视图。
+    """
+
+    def test_work_dict_has_native_aliases(self, client, clean_db):
+        """XWork.to_dict 必须带原生别名：统一渲染器只认这一套字段。"""
+        work = _add_work(clean_db, '1800000000000000901')
+        data = client.get(f'/api/x/works/{work.id}').get_json()
+        assert data['source'] == 'x'
+        assert data['page_count'] == 1
+        assert data['thumb_url'].startswith('https://pbs.twimg.com/media/')
+        # saved_status → download_status 词表映射（none/done/downloading/failed）
+        assert data['download_status'] == 'none'
+        work.saved_status = 'queued'
+        clean_db.commit()
+        data = client.get(f'/api/x/works/{work.id}').get_json()
+        assert data['download_status'] == 'downloading', 'queued 在界面上就是"下载中"'
+        assert data['tweet_url'].endswith(work.tweet_id)
+
+    def test_tags_carry_fetch_progress(self, client, clean_db):
+        """标签列表附带抓取进度：页面轮询这一个接口就能渲染"抓取中 1/3 页"。"""
+        clean_db.add(XTag(tag='#p', enabled=1, status='fetching'))
+        clean_db.commit()
+        runtime.x_fetch_progress_update('#p', status='fetching',
+                                        pages_done=1, pages_total=3, found=12)
+        try:
+            tags = client.get('/api/x/tags').get_json()
+            row = next(t for t in tags if t['tag'] == '#p')
+            assert row['progress']['status'] == 'fetching'
+            assert row['progress']['pages_done'] == 1
+            assert row['progress']['pages_total'] == 3
+            assert row['progress']['found'] == 12
+        finally:
+            runtime._x_fetch_progress.pop('#p', None)
+
+    def test_downloads_page_includes_x_rows(self, client, clean_db):
+        """下载管理页是唯一队列视图：X 的 queued/active/completed 都要在。"""
+        _add_work(clean_db, '1800000000000000911', saved_status='queued')
+        _add_work(clean_db, '1800000000000000912', saved_status='downloading')
+        done = _add_work(clean_db, '1800000000000000913', saved_status='done')
+        done.saved_paths_list = ['E:/pixiv/downloads/x_1/1_0.jpg']
+        clean_db.commit()
+
+        data = client.get('/api/downloads').get_json()
+        assert any(r['source'] == 'x' for r in data['active']), 'downloading 的 X 作品必须在活跃区'
+        assert any(r['source'] == 'x' for r in data['queued']), 'queued 的 X 作品必须在等待区'
+        x_done = [r for r in data['completed'] if r['source'] == 'x']
+        assert x_done and x_done[0]['x_id'] == done.id
+        # 行形状刻意贴近 Illust.to_dict：前端只按 source==='x' 分支
+        for row in x_done:
+            assert row['title']
+            assert row['thumb_url'].startswith('/ximg/')
+            assert row['page_count'] >= 1
 
 
 class TestXWorkActions:

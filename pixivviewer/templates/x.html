@@ -9,6 +9,109 @@
 <meta name="csrf-token" content="{{ csrf_token }}">
 <meta name="items-per-page" content="{{ items_per_page }}">
 <style>
+  /* ── 与缓存浏览页同一套瀑布流/卡片（一致性改造 2026-11-20）──
+     样式逐行取自 cache.html：X 卡片与 Pixiv 缓存卡片是同一个组件，
+     差异只在徽标集合与操作按钮。 */
+  .masonry-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+  }
+  .masonry-item {
+    width: calc((100% - 2.4rem) / 4);
+  }
+  @media (max-width: 992px) { .masonry-item { width: calc((100% - 1.6rem) / 3); } }
+  @media (max-width: 768px) { .masonry-item { width: calc((100% - 0.8rem) / 2); } }
+  @media (max-width: 480px) { .masonry-item { width: calc((100% - 0.4rem) / 2); } .masonry-grid { gap: 0.4rem; } }
+
+  .photo-card {
+    position: relative;
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    cursor: pointer;
+    background: var(--bg-elevated);
+    box-shadow: var(--shadow-card);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .photo-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-card-hover);
+  }
+  .photo-card img {
+    display: block;
+    width: 100%;
+    height: auto;
+    transition: transform 0.3s ease;
+    background: var(--bg-thumb);
+  }
+  .photo-card:hover img {
+    transform: scale(1.02);
+  }
+  .photo-badges {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: flex;
+    gap: 3px;
+    pointer-events: none;
+  }
+  .photo-badge {
+    font-size: 0.65rem;
+    font-weight: 600;
+    background: rgba(255,255,255,.85);
+    backdrop-filter: blur(6px);
+    color: #2b2b2b;
+    padding: 1px 7px;
+    border-radius: 4px;
+    pointer-events: none;
+  }
+  .photo-badge.ok { background: rgba(59,138,94,.85); color: #fff; }
+  .photo-badge.warn { background: rgba(192,138,46,.88); color: #fff; }
+
+  .photo-card-info {
+    padding: 0.5rem 0.4rem;
+  }
+  .photo-card-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 0.1rem;
+  }
+  .photo-card-artist {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .photo-card-text {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin-top: 0.15rem;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .photo-card-actions {
+    margin-top: 0.35rem;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .photo-card-actions .btn {
+    font-size: 0.68rem;
+    padding: 0.2rem 0.7rem;
+    border-radius: var(--radius-btn);
+    font-weight: 500;
+  }
+  .photo-card-actions .btn-del { margin-left: auto; padding: 0.1rem 0.5rem; line-height: 1.3; }
+
   .x-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 22px 0 10px; flex-wrap: wrap; }
   .x-title { font-family: var(--font-display); font-size: 20px; font-weight: 650; margin: 0; color: var(--ink); }
   .x-sub { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); margin-top: 4px; }
@@ -19,30 +122,15 @@
   .x-tag .del { opacity: .65; font-size: 11px; }
   .x-tag .ref { opacity: .65; font-size: 11px; }
   .x-tag .err { color: var(--danger); }
+  .x-tag .live { font-size: 10.5px; opacity: .9; }
+  .x-tag.fetching { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-subtle); }
+  .x-tag.fetching .live { color: inherit; }
   .x-links { border: 1px solid var(--border-subtle); border-radius: var(--radius-card);
              padding: 10px 12px; margin: 4px 0 12px; background: var(--bg-elevated); }
   .x-links summary { cursor: pointer; font-size: 12.5px; color: var(--ink-soft); user-select: none; }
   .x-links .x-link-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 8px; }
   .x-links .x-link-form input { max-width: 180px; }
   .x-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-  .x-card { background: var(--bg-elevated); border-radius: var(--radius-card); overflow: hidden; height: 100%;
-            box-shadow: var(--shadow-card); display: flex; flex-direction: column; }
-  /* 图片按原始比例完整显示：这是作品浏览页，1:1 裁切会把竖图的上下切掉
-     （object-fit: cover 的老实现），而用户来这里就是看画。行内用 align-items:start
-     让卡片各自按内容高度排列，不强行等高。 */
-  .x-media { position: relative; background: var(--bg-thumb); overflow: hidden; cursor: pointer; min-height: 120px; }
-  .x-media img { width: 100%; height: auto; display: block; }
-  .x-badge { position: absolute; top: 6px; left: 6px; font-size: 10.5px; padding: 2px 7px; border-radius: 4px;
-             background: rgba(20,32,52,.78); color: #fff; }
-  .x-badge.warn { background: rgba(192,138,46,.9); }
-  .x-badge.ok { background: rgba(5,150,105,.9); }
-  .x-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 4px; }
-  .x-author { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .x-author .handle { font-weight: 500; color: var(--ink-mute); }
-  .x-text { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5;
-            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .x-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
-  .x-actions .btn-del { margin-left: auto; padding: 2px 8px; line-height: 1.2; }
   .x-empty { text-align: center; color: var(--ink-mute); padding: 48px 12px; }
   .x-status { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); margin-bottom: 8px; }
   .x-status .warn { color: var(--amber); }
@@ -102,12 +190,13 @@
     <div id="xLinkList" class="x-tagbar" style="margin:0;"></div>
   </details>
 
-  <div id="xGrid" class="row g-3 align-items-start"></div>
+  <div id="xGrid" class="masonry-grid"></div>
   <div id="xEmpty" class="x-empty" style="display:none;">还没有抓取过。先在上面添加一个标签。</div>
 
   <div style="text-align:center;padding:18px 0;">
     <button id="xMoreBtn" class="btn btn-sm btn-soft" style="display:none;">加载更多</button>
   </div>
+  <div style="text-align:center;padding:10px 0 26px;" id="xPageNote" class="x-sub"></div>
 </div>
 
 </div>

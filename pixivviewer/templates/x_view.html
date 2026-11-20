@@ -49,15 +49,12 @@
 <div class="container">
   <div class="xv-head">
     <div>
-      <h1 class="xv-title">X 作品 #{{ work.tweet_id }}</h1>
-      <div class="xv-sub">本地已下载的图片 · 与 Pixiv 图库相互独立</div>
+      <h1 class="xv-title">{% if not_downloaded %}X 作品预览{% else %}X 作品 #{{ work.tweet_id }}{% endif %}</h1>
+      <div class="xv-sub">{% if not_downloaded %}预览代理原图，满意再下载{% else %}本地已下载的图片 · 与 Pixiv 图库相互独立{% endif %}</div>
     </div>
     <a class="btn btn-sm btn-soft" href="/x">← 返回 X 列表</a>
   </div>
 
-  {% if not_downloaded %}
-  <div class="xv-meta">这条作品还没有下载过本地图。先回 <a href="/x">X 列表</a> 点「下载」。</div>
-  {% else %}
   <div class="xv-meta">
     {% if work.dup_status == 'confirmed' %}<span class="xv-badge ok">同一作品{% if work.dup_pixiv_id %} #{{ work.dup_pixiv_id }}{% endif %}</span>
     {% elif work.dup_status == 'suspected' %}<span class="xv-badge warn">疑似同一作品</span>{% endif %}
@@ -68,14 +65,29 @@
   </div>
 
   <div class="xv-actions">
+    {% if not_downloaded %}
+    <button class="btn btn-sm btn-primary" id="xvDownloadBtn"
+            data-x-id="{{ work.id }}" data-count="{{ work.media_count }}">
+      {% if work.saved_status == 'failed' %}重试下载{% else %}⬇ 下载原图{% endif %}
+    </button>
+    <span id="xvDlHint" class="xv-sub"></span>
+    {% else %}
+    <button class="btn btn-sm btn-outline-danger" id="xvDeleteBtn">删除记录（保留图片文件）</button>
+    {% endif %}
     <a class="btn btn-sm btn-soft" target="_blank" rel="noopener noreferrer"
        href="https://x.com/{{ work.author_screen_name }}/status/{{ work.tweet_id }}">原推</a>
     {% if work.dup_pixiv_id %}
     <a class="btn btn-sm btn-soft" href="/detail/{{ work.dup_pixiv_id }}">看 Pixiv</a>
     {% endif %}
-    <button class="btn btn-sm btn-outline-danger" id="xvDeleteBtn">删除记录（保留图片文件）</button>
   </div>
 
+  {% if not_downloaded %}
+  {% for img in work.remote_images %}
+  <div class="xv-image">
+    <img src="{{ img.url }}" loading="lazy" alt="第 {{ loop.index }} 张（代理原图）">
+  </div>
+  {% endfor %}
+  {% else %}
   {% for img in work.local_images %}
   <a class="xv-image" href="/api/x/image/{{ work.id }}/{{ img.index }}" target="_blank" rel="noopener noreferrer">
     <img src="/api/x/image/{{ work.id }}/{{ img.index }}" alt="第 {{ loop.index }} 张（{{ img.name }}，{{ (img.size / 1024) | round(1) }} KB）">

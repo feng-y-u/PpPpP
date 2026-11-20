@@ -58,6 +58,68 @@ class TestResetStuckX:
         assert clean_db.query(XTag).count() == 0
 
 
+class TestXFetchProgress:
+    """抓取进度的状态机：页面靠它渲染"抓取中 1/3 页 · 12 条"。
+
+    三条硬边界：fetching 期间每翻一页更新一次；失败必须收口成 error（页面
+    上的"正在抓取"不能永远转下去）；成功收口成 done。启动重置还要把进程
+    挂掉时停在 fetching 的进度翻成 error。
+    """
+
+    def _tweet(self, **kw):
+        from pixivviewer.x_client import XMedia, XTweet
+        base = dict(tweet_id='1800000000000000951', author_name='画师',
+                    author_screen_name='Artist_X', text='t',
+                    media=[XMedia(url='https://pbs.twimg.com/media/a.jpg', width=1, height=1)])
+        base.update(kw)
+        return XTweet(**base)
+
+    def test_success_marks_done_with_stats(self, clean_db, monkeypatch):
+        _add_tag(clean_db, tag='#pg')
+        batch = [self._tweet(tweet_id=f'18000000000000009{i}') for i in range(3)]
+
+        def _fake_search(tag, cursor=None):
+            return batch, None
+
+        monkeypatch.setattr(background.x_client, 'search_timeline', _fake_search)
+        out = background._x_fetch_tag('#pg')
+
+        assert out['error'] is None
+        p = background.runtime.x_fetch_progress('#pg')
+        assert p['status'] == 'done'
+        assert p['found'] == 3
+        assert p['pages_done'] == 1
+        assert p['finished_at']
+        background.runtime._x_fetch_progress.pop('#pg', None)
+
+    def test_failure_marks_error_not_stuck_fetching(self, clean_db, monkeypatch):
+        _add_tag(clean_db, tag='#pf')
+
+        def _boom(tag, cursor=None):
+            raise background.x_client.XRateLimited('限流')
+
+        monkeypatch.setattr(background.x_client, 'search_timeline', _boom)
+        background._x_fetch_tag('#pf')
+
+        p = background.runtime.x_fetch_progress('#pf')
+        assert p['status'] == 'error'
+        assert '限流' in (p['error'] or '')
+        assert p['finished_at']
+        background.runtime._x_fetch_progress.pop('#pf', None)
+
+    def test_startup_reset_closes_stuck_fetching_progress(self, clean_db, monkeypatch):
+        background.runtime.x_fetch_progress_update(
+            '#pz', status='fetching', pages_done=1, pages_total=3, found=5)
+        _add_tag(clean_db, tag='#pz', status='fetching')
+
+        background._reset_stuck_x()
+
+        p = background.runtime.x_fetch_progress('#pz')
+        assert p['status'] == 'error', '进程重启后进度不能停在 fetching'
+        assert '中断' in (p['error'] or '')
+        background.runtime._x_fetch_progress.pop('#pz', None)
+
+
 class TestXStoreTweets:
     """入库的两条不变式：tweet_id 只收纯数字（会进路径/URL）；作者为空时补写。
 

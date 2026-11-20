@@ -117,7 +117,13 @@ def x_items() -> Response:
 def x_tags() -> Response:
     with get_session() as db:
         rows = db.query(XTag).order_by(XTag.tag).all()
-        data = [_tag_dict(row) for row in rows]
+        data = []
+        for row in rows:
+            d = _tag_dict(row)
+            # 附带本轮抓取进度：页面点完"立即抓取"后轮询这一个接口就够
+            # （原生搜索页轮询 /api/search/status 是同一个模式）
+            d['progress'] = runtime.x_fetch_progress(row.tag)
+            data.append(d)
     return jsonify(data)
 
 
@@ -302,7 +308,16 @@ def x_work_download(work_id: int) -> Response:
     return jsonify({'ok': True, 'status': 'queued'}), 202
 
 
-# ── 本地看图（下载后的浏览入口；X 图片不在 Pixiv 图库里，这是唯一查看面）──
+# ── 本地看图（X 的"详情页"：下载前后都能看，与 /detail/<pid> 同角色）──
+
+def _ximg_url(url: str) -> str:
+    """把 pbs.twimg.com 的图片地址转成 /ximg 代理 URL（与前端 xProxy 同编码）。"""
+    if not url:
+        return ''
+    from base64 import urlsafe_b64encode
+    b64 = urlsafe_b64encode(url.encode()).decode().rstrip('=')
+    return f'/ximg/{b64}'
+
 
 @bp.route('/x/view/<int:work_id>')
 def x_work_view(work_id: int) -> Response:
@@ -318,12 +333,17 @@ def x_work_view(work_id: int) -> Response:
              'size': (os.path.getsize(path) if os.path.isfile(path) else 0)}
             for i, path in enumerate(work.saved_paths_list or [])
         ]
-    if data['saved_status'] != 'done':
-        # 未下载的作品没有本地图可看：如实提示，别渲染一个空页
-        return render_template('x_view.html', work=data,
-                               csrf_token=_get_csrf_token(), not_downloaded=True)
+        # 未下载也要能看：经 /ximg 代理原图（走详情页浏览、再决定下不下载，
+        # 与 Pixiv"点卡片进详情页"是同一个动线）。下载过的仍优先本地文件。
+        if data['saved_status'] != 'done':
+            data['remote_images'] = [
+                {'index': i, 'url': _ximg_url(str(m.get('url') or ''))}
+                for i, m in enumerate(data.get('media') or [])
+                if isinstance(m, dict) and m.get('url')
+            ]
     return render_template('x_view.html', work=data,
-                           csrf_token=_get_csrf_token(), not_downloaded=False)
+                           csrf_token=_get_csrf_token(),
+                           not_downloaded=(data['saved_status'] != 'done'))
 
 
 @bp.route('/api/x/image/<int:work_id>/<int:idx>')

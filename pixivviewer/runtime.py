@@ -292,6 +292,34 @@ _x_prefetch_state = {
     'found': 0,
 }
 _x_prefetch_stop = threading.Event()
+
+# 单标签一次抓取的进度（原生搜索/预取都有"整轮统计"，X 侧原先只有一句
+# "上次抓取时间"，用户点完刷新完全不知道发生了什么）。键 = 标签，值是固定
+# 键集合的 dict，只改值不增删键 —— 无锁读安全（与 _prefetch_state 同约定）。
+# 抓取结束时把 status 留在 done/error，并保留统计供页面回显"上一轮抓到多少"。
+_x_fetch_progress: dict[str, dict] = {}
+_X_FETCH_PROGRESS_KEYS = ('status', 'pages_done', 'pages_total',
+                          'found', 'started_at', 'finished_at', 'error')
+
+
+def x_fetch_progress(tag: str) -> dict:
+    """读某标签的抓取进度快照（键集合恒定，缺失时给全默认值）。"""
+    row = _x_fetch_progress.get(tag)
+    if not isinstance(row, dict):
+        return {k: None for k in _X_FETCH_PROGRESS_KEYS}
+    return {k: row.get(k) for k in _X_FETCH_PROGRESS_KEYS}
+
+
+def x_fetch_progress_update(tag: str, **fields) -> None:
+    """写进度。只允许固定键（写错名字会静默失效，所以这里显式过滤）。"""
+    row = _x_fetch_progress.get(tag)
+    if row is None:
+        row = {k: None for k in _X_FETCH_PROGRESS_KEYS}
+        _x_fetch_progress[tag] = row
+    for key, value in fields.items():
+        if key in _X_FETCH_PROGRESS_KEYS:
+            row[key] = value
+
 # X 作品下载与 Pixiv 下载引擎分开：那边所有结构都按 int pixiv_id 建键，
 # 复用会互相污染（锁、队列、进度、取消标记）。
 x_download_executor = ThreadPoolExecutor(max_workers=2)

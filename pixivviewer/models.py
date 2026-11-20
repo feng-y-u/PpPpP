@@ -292,6 +292,33 @@ class XWork(Base):
     def saved_paths_list(self, value: list[str]) -> None:
         self.saved_paths = json.dumps(list(value), ensure_ascii=False)
 
+    # saved_status → Illust 的 download_status 词表。X 与 Pixiv 是同一个产品里
+    # 的两种来源，卡片/详情/下载管理只该认一套状态名（2026-11-20 一致性改造）。
+    # queued 与 downloading 在界面上都是"下载中"，跟 Pixiv 侧一致。
+    _DOWNLOAD_STATUS_MAP = {
+        'done': 'done',
+        'queued': 'downloading',
+        'downloading': 'downloading',
+        'failed': 'failed',
+    }
+
+    @property
+    def download_status(self) -> str:
+        """与 Illust.download_status 同词表，供统一组件直接消费。"""
+        return self._DOWNLOAD_STATUS_MAP.get(self.saved_status or '', 'none')
+
+    @property
+    def page_count(self) -> int:
+        return self.media_count or 0
+
+    @property
+    def thumb_url(self) -> str:
+        """首图（未代理的原始地址）。空字符串表示这条作品没有图。"""
+        media = self.media_list
+        if not media or not isinstance(media[0], dict):
+            return ''
+        return str(media[0].get('url') or '')
+
     def to_dict(self) -> dict:
         return {
             'id': self.id,
@@ -310,6 +337,19 @@ class XWork(Base):
             'dup_reason': self.dup_reason,
             'dup_pixiv_id': self.dup_pixiv_id,
             'created_at': iso_utc(self.created_at),
+            # ── 以下是"像原生作品一样被消费"所需的别名（与 Illust.to_dict 对齐）──
+            # 统一卡片渲染器读 download_status/thumb_url/page_count；
+            # 统一详情页读 source 决定"原推"还是"Pixiv 页面"。
+            'source': 'x',
+            'download_status': self.download_status,
+            'page_count': self.page_count,
+            'thumb_url': self.thumb_url,
+            'tweet_url': (f'https://x.com/{self.author_screen_name}/status/{self.tweet_id}'
+                          if self.author_screen_name else
+                          f'https://x.com/i/status/{self.tweet_id}'),
+            'local_urls': [f'/api/x/image/{self.id}/{i}'
+                           for i in range(len(self.saved_paths_list))],
+            'file_size': None,
         }
 
 

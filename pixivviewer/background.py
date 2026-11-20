@@ -1245,6 +1245,17 @@ def _reset_stuck_x() -> None:
     if stuck_tags or stuck_works:
         logger.info(f'[x] 启动重置：{len(stuck_tags)} 个标签解除 fetching，'
                     f'{len(stuck_works)} 条作品解除 queued/downloading')
+    # 进程挂掉时抓取进度也会停在 'fetching'：与标签行同款收口，否则页面上的
+    # "正在抓取 第1/3页" 会永远转下去
+    for tag, row in list(runtime._x_fetch_progress.items()):
+        if row.get('status') == 'fetching':
+            runtime.x_fetch_progress_update(tag, status='error',
+                                            error='上次抓取被中断（进程重启）',
+                                            finished_at=_utc_now_iso())
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _x_mark_tag(tag: str, status: str, error: str = '') -> None:
@@ -1254,6 +1265,13 @@ def _x_mark_tag(tag: str, status: str, error: str = '') -> None:
             row.status = status
             row.error = error
             safe_commit(db)
+
+
+def _x_fetch_fail(tag: str, error: str) -> None:
+    """标签置 error + 抓取进度收口（页面上的"正在抓取"不能永远转下去）。"""
+    _x_mark_tag(tag, 'error', error)
+    runtime.x_fetch_progress_update(tag, status='error', error=error,
+                                    finished_at=_utc_now_iso())
 
 
 def _x_store_tweets(db, tag: str, tweets) -> int:
@@ -1335,33 +1353,41 @@ def _x_fetch_tag(tag: str) -> dict:
         safe_commit(db)
 
     tweets = []
+    pages = max(1, int(runtime._x_prefetch_state.get('pages') or 1))
+    runtime.x_fetch_progress_update(
+        tag, status='fetching', pages_done=0, pages_total=pages,
+        found=0, started_at=_utc_now_iso(), finished_at=None, error=None)
     try:
-        pages = max(1, int(runtime._x_prefetch_state.get('pages') or 1))
         cursor = None
-        for _ in range(pages):
+        for page_no in range(pages):
             batch, cursor = x_client.search_timeline(tag, cursor)
             tweets.extend(batch)
+            # 每翻完一页就更新一次：用户在页面上看到的是"第 1/3 页 · 已入库 12 条"，
+            # 而不是点完刷新后一片沉默（原生搜索的搜索结果会自己长出来）
+            runtime.x_fetch_progress_update(
+                tag, pages_done=page_no + 1, found=len(tweets),
+                status='fetching')
             if not cursor:
                 break
     except x_client.XAuthError as e:
         out['error'] = str(e)
-        _x_mark_tag(tag, 'error', out['error'])
+        _x_fetch_fail(tag, out['error'])
         return out
     except x_client.XRateLimited as e:
         out['error'] = str(e)
-        _x_mark_tag(tag, 'error', out['error'])
+        _x_fetch_fail(tag, out['error'])
         return out
     except x_client.XQueryStale as e:
         out['error'] = str(e)
-        _x_mark_tag(tag, 'error', out['error'])
+        _x_fetch_fail(tag, out['error'])
         return out
     except x_client.XNetworkError as e:
         out['error'] = str(e)
-        _x_mark_tag(tag, 'error', out['error'])
+        _x_fetch_fail(tag, out['error'])
         return out
     except Exception as e:  # 单标签异常不拖垮整轮
         out['error'] = f'抓取失败: {e}'
-        _x_mark_tag(tag, 'error', out['error'])
+        _x_fetch_fail(tag, out['error'])
         logger.error(f'[x] 标签 {tag} 抓取异常: {e}')
         return out
 
@@ -1380,9 +1406,12 @@ def _x_fetch_tag(tag: str) -> dict:
             safe_commit(db)
     except Exception as e:
         out['error'] = f'入库失败: {e}'
-        _x_mark_tag(tag, 'error', out['error'])
+        _x_fetch_fail(tag, out['error'])
         logger.error(f'[x] 标签 {tag} 入库异常: {e}')
         return out
+
+    runtime.x_fetch_progress_update(tag, status='done', found=len(tweets),
+                                    finished_at=_utc_now_iso(), error=None)
 
     runtime._x_prefetch_state['tag'] = tag
     runtime._x_prefetch_state['found'] = len(tweets)
