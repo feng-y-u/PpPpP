@@ -257,24 +257,35 @@ function renderCard(r) {
     `<span class="badge tag-badge">${escHtml(t)}</span>`
   ).join('');
 
-  const thumbUrl = proxyThumb(r.thumb_url);
+  // 孤儿行（只有本地文件、DB 里没有记录）没有缩略图/标题/作者：不要留一个
+  // 空灰块 + 拿 pid 当标题，而要如实说明"仅本地文件"（2026-11-20 审查）
+  const orphan = !!r.is_orphan || (!r.thumb_url && !r.user_name);
+  const thumbUrl = r.thumb_url ? proxyThumb(r.thumb_url) : '';
+  const media = thumbUrl
+    ? `<img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23ecece7'%3E%3C/svg%3E"
+            data-src="${escAttr(thumbUrl)}" loading="lazy" class="img-fade" alt="">`
+    : `<div class="card-img-empty"><span>仅本地文件</span><small>#${r.pixiv_id}</small></div>`;
+  const title = orphan ? '无记录（仅本地文件）' : (r.title || '无题');
+  const info = orphan
+    ? `#${r.pixiv_id} · ${r.file_count || 1} 个本地文件`
+    : `#${r.pixiv_id} · ${escHtml(r.user_name)} · ${r.file_count || 1} 文件`;
 
   const col = document.createElement('div');
   col.className = 'col-lg-3 col-md-4 col-sm-6 col-6 mb-3';
   col.innerHTML = `
     <div class="gallery-card" data-pid="${r.pixiv_id}" style="cursor:pointer;">
-      <div class="card-img-wrap">
+      <div class="card-img-wrap${orphan ? ' is-empty' : ''}">
         <input type="checkbox" class="card-checkbox" data-pid="${r.pixiv_id}">
-        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='250' height='250' fill='%23ecece7'%3E%3C/svg%3E"
-             data-src="${escAttr(thumbUrl)}" loading="lazy" class="img-fade" alt="">
-        <span class="page-badge">${r.file_count || r.page_count || 1} 张</span><span class="size-badge">${fmtSize(r.file_size || 0)}</span>
+        ${media}
+        ${orphan ? '<span class="page-badge">仅本地</span>' : ''}
+        <span class="page-badge${orphan ? ' hidden' : ''}">${r.file_count || r.page_count || 1} 张</span><span class="size-badge">${fmtSize(r.file_size || 0)}</span>
       </div>
       <div class="card-body">
-        <div class="card-title" title="${escAttr(r.title)}">${escHtml(r.title)}</div>
-        <div class="card-info">#${r.pixiv_id} · ${escHtml(r.user_name)} · ${r.file_count || 1} 文件</div>
+        <div class="card-title" title="${escAttr(title)}">${escHtml(title)}</div>
+        <div class="card-info">${info}</div>
         <div class="tags-wrap">${tags}</div>
-        <div class="d-flex gap-1 mt-1">
-          <button class="btn btn-outline-danger btn-sm flex-fill delete-btn" data-pid="${r.pixiv_id}">删除</button>
+        <div class="card-actions">
+          <button class="btn btn-outline-danger btn-sm delete-btn" data-pid="${r.pixiv_id}" title="删除本地文件">删除</button>
           <a href="/download_file/${r.pixiv_id}" class="btn btn-soft btn-sm dl-file-btn">下载原图</a>
         </div>
       </div>

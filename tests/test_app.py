@@ -1195,6 +1195,28 @@ class TestFollowingRouteR18:
                 f'{qs or "缺省"} 时 fetch_following 收到的 r18_mode 应为 {expected}，实际 {calls}'
 
 
+class TestGalleryOrphanRendering:
+    """孤儿作品在列表里的形状：必须带 is_orphan，前端才能如实标"仅本地文件"。
+
+    旧实现把 title 填成 pid、thumb_url 留空，图库上就是"一张空白灰块 + 一串
+    数字当标题"，看起来像加载失败（2026-11-20 审查发现两张这样的卡）。
+    """
+
+    def test_orphan_rows_are_flagged_and_lack_thumb(self, client, clean_db, monkeypatch, tmp_path):
+        from pixivviewer import helpers
+        monkeypatch.setattr(helpers, 'DOWNLOAD_DIR', str(tmp_path))
+        d = tmp_path / '70002'
+        d.mkdir()
+        (d / '70002_p0.jpg').write_bytes(b'x' * 10)
+
+        rows = client.get('/api/gallery?limit=10').get_json()['data']
+        orphan = next((r for r in rows if r['pixiv_id'] == 70002), None)
+        assert orphan is not None, '本地有文件的作品必须出现在图库里'
+        assert orphan.get('is_orphan') is True
+        assert orphan['thumb_url'] == ''
+        assert orphan['file_count'] == 1
+
+
 class TestGalleryDeleteOrphans:
     """删除接口支持无 DB 记录的孤儿作品。
 

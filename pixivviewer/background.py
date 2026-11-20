@@ -1257,7 +1257,11 @@ def _x_mark_tag(tag: str, status: str, error: str = '') -> None:
 
 
 def _x_store_tweets(db, tag: str, tweets) -> int:
-    """把本批推文写库；已存在的 tweet_id 直接跳过（跨标签、跨轮次都去重）。"""
+    """把本批推文写库；已存在的 tweet_id 直接跳过（跨标签、跨轮次都去重）。
+
+    例外：已有记录的作者为空时顺手补上。X 在 2026-11 改了 user 结构，旧解析器
+    把作者名存成了空串；不补的话这些历史行永远显示"未知作者"，H1 也永远不触发。
+    """
     added = 0
     for tweet in tweets:
         # tweet_id 会进文件系统路径（downloads/x_<tweet_id>/）与 URL：只收纯数字，
@@ -1268,6 +1272,14 @@ def _x_store_tweets(db, tag: str, tweets) -> int:
                   .filter(XWork.tweet_id == tweet.tweet_id)
                   .first())
         if exists:
+            if tweet.author_screen_name:
+                stale = (db.query(XWork)
+                         .filter(XWork.tweet_id == tweet.tweet_id,
+                                 XWork.author_screen_name == '')
+                         .first())
+                if stale is not None:
+                    stale.author_name = tweet.author_name
+                    stale.author_screen_name = tweet.author_screen_name.lower()
             continue
         work = XWork(
             tweet_id=tweet.tweet_id,

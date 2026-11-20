@@ -39,6 +39,63 @@ function showToast(msg, isError) {
   bootstrap.Toast.getOrCreateInstance(toast).show();
 }
 
+// ── 确认对话框（替代原生 confirm）──
+// 原生 confirm 是浏览器级弹窗：样式与全站断崖式不一致、无法换行排版、移动端还会
+// 阻塞整页。这里用 Bootstrap modal 实现同样的语义，返回 Promise<boolean>。
+// 懒创建 + 单例：全站只需要一个实例，避免每个页面各写一份弹窗 DOM。
+let _pvConfirmEl = null;
+let _pvConfirmResolve = null;
+
+function _ensureConfirmModal() {
+  if (_pvConfirmEl) return _pvConfirmEl;
+  const wrap = document.createElement('div');
+  wrap.className = 'modal fade';
+  wrap.tabIndex = -1;
+  wrap.setAttribute('aria-hidden', 'true');
+  wrap.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-content">
+        <div class="modal-body">
+          <div class="pv-confirm-title"></div>
+          <div class="pv-confirm-detail"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-soft" data-pv-cancel>取消</button>
+          <button type="button" class="btn btn-sm btn-danger" data-pv-ok>确定</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const modal = bootstrap.Modal.getOrCreateInstance(wrap, { backdrop: true, keyboard: true });
+  const done = (val) => {
+    const r = _pvConfirmResolve;
+    _pvConfirmResolve = null;
+    modal.hide();
+    if (r) r(val);
+  };
+  wrap.querySelector('[data-pv-ok]').addEventListener('click', () => done(true));
+  wrap.querySelector('[data-pv-cancel]').addEventListener('click', () => done(false));
+  wrap.addEventListener('hidden.bs.modal', () => { if (_pvConfirmResolve) done(false); });
+  _pvConfirmEl = wrap;
+  return wrap;
+}
+
+function pvConfirm(message, opts) {
+  const o = opts || {};
+  const el = _ensureConfirmModal();
+  el.querySelector('.pv-confirm-title').textContent = message;
+  const detail = el.querySelector('.pv-confirm-detail');
+  detail.textContent = o.detail || '';
+  detail.style.display = o.detail ? 'block' : 'none';
+  const ok = el.querySelector('[data-pv-ok]');
+  ok.textContent = o.okText || '确定';
+  ok.className = 'btn btn-sm ' + (o.danger === false ? 'btn-primary' : 'btn-danger');
+  return new Promise((resolve) => {
+    _pvConfirmResolve = resolve;
+    bootstrap.Modal.getOrCreateInstance(el).show();
+  });
+}
+
 // ── localStorage 缓存工具 ──
 // 用于搜索状态、图库分页等前端缓存；带 TTL，空间不足时降级重试。
 const pvCache = {
@@ -208,6 +265,14 @@ function _getLazyObserver() {
       if (img.dataset.src) {
         img.src = img.dataset.src;
         img.removeAttribute('data-src');
+      } else {
+        // data-src 为空（作品没有缩略图）：直接换成占位块。
+        // src='' 在 Chrome 里不触发 error 事件，图片会以 height:auto 塌成 0 高，
+        // 卡片变成"只有标题和按钮"的异类（缓存页实测 6/24 张如此）。
+        const ph = document.createElement('div');
+        ph.className = 'img-placeholder';
+        ph.innerHTML = '<span>无预览</span>';
+        img.replaceWith(ph);
       }
       _lazyObserver.unobserve(img);
     });
@@ -300,13 +365,20 @@ document.addEventListener('error', function (e) {
   if (tries < 2) {
     t.dataset.retry = String(tries + 1);
     t.classList.add('img-failed');
+    // 重试间隔要短：每等一次，卡片就矮着一次（截图实测首卡 134px → 527px 跳两次）。
+    // 图床偶发失败通常立刻就好，等 2s 纯属浪费。
     setTimeout(() => {
       // 追加时间戳强制重新请求（不让浏览器走失败缓存）
       const base = (t.src || '').split('?')[0];
       if (base) t.src = base + '?t=' + Date.now();
-    }, 2000);
+    }, tries === 0 ? 600 : 1500);
   } else {
-    // 重试耗尽：保留占位布局，不彻底隐藏（避免页面"图全没了"）
-    t.classList.add('img-failed');
+    // 重试耗尽：换成带说明的占位块，而不是留一个破图。
+    // <img> 是 height:auto 的，src 坏掉时高度会塌成 0 —— 卡片就变成"只有文字"
+    // 的异类，同屏其它卡片都有图，看起来像页面坏了（缓存页实测 6/24 张如此）。
+    const ph = document.createElement('div');
+    ph.className = 'img-placeholder';
+    ph.innerHTML = '<span>无预览</span>';
+    t.replaceWith(ph);
   }
 }, true);

@@ -3,7 +3,9 @@ const xvCsrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('
 
 $('#xvDeleteBtn')?.addEventListener('click', async () => {
   const id = window.location.pathname.split('/').pop();
-  if (!confirm('删除这条 X 作品记录？（已下载的图片文件不会删除）')) return;
+  const ok = await pvConfirm('删除这条 X 作品记录？',
+    { detail: '只删记录，已下载的图片文件保留在磁盘上。', okText: '删除' });
+  if (!ok) return;
   const btn = $('#xvDeleteBtn');
   btn.disabled = true;
   try {

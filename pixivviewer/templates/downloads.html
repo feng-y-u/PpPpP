@@ -54,6 +54,17 @@
 .progress-bar { transition: width 0.3s ease; }
 .log-entry { font-size: 0.72rem; padding: 4px 8px; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); }
 .log-entry:last-child { border-bottom: none; }
+
+/* 状态卡里的"空"只需一行说明，不是整页空状态：共享的 .empty-state 有 56px
+   内边距，两个空卡片就吃掉首屏一半高度（2026-11-20 审查）。 */
+.status-card .empty-state {
+  padding: 18px 12px;
+  margin: 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  border-radius: 0;
+}
 </style>
 </head>
 <body>
@@ -122,7 +133,7 @@
       </div>
 
       <div class="status-card card">
-        <div class="card-header bg-secondary bg-opacity-10 text-light border-0">操作日志</div>
+        <div class="card-header bg-secondary bg-opacity-10 text-body border-0">操作日志</div>
         <div class="card-body p-0" id="logList" style="max-height:300px;overflow-y:auto;">
           <div class="empty-state small">暂无日志</div>
         </div>

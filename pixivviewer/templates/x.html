@@ -27,16 +27,22 @@
   .x-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
   .x-card { background: var(--bg-elevated); border-radius: var(--radius-card); overflow: hidden; height: 100%;
             box-shadow: var(--shadow-card); display: flex; flex-direction: column; }
-  .x-media { position: relative; aspect-ratio: 1 / 1; background: var(--bg-thumb); overflow: hidden; cursor: pointer; }
-  .x-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* 图片按原始比例完整显示：这是作品浏览页，1:1 裁切会把竖图的上下切掉
+     （object-fit: cover 的老实现），而用户来这里就是看画。行内用 align-items:start
+     让卡片各自按内容高度排列，不强行等高。 */
+  .x-media { position: relative; background: var(--bg-thumb); overflow: hidden; cursor: pointer; min-height: 120px; }
+  .x-media img { width: 100%; height: auto; display: block; }
   .x-badge { position: absolute; top: 6px; left: 6px; font-size: 10.5px; padding: 2px 7px; border-radius: 4px;
              background: rgba(20,32,52,.78); color: #fff; }
   .x-badge.warn { background: rgba(192,138,46,.9); }
   .x-badge.ok { background: rgba(5,150,105,.9); }
   .x-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 4px; }
   .x-author { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .x-text { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; max-height: 3.2em; overflow: hidden; }
-  .x-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .x-author .handle { font-weight: 500; color: var(--ink-mute); }
+  .x-text { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .x-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
+  .x-actions .btn-del { margin-left: auto; padding: 2px 8px; line-height: 1.2; }
   .x-empty { text-align: center; color: var(--ink-mute); padding: 48px 12px; }
   .x-status { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-mute); margin-bottom: 8px; }
   .x-status .warn { color: var(--amber); }
@@ -79,7 +85,7 @@
            placeholder="标签或搜索词，如 #原神" autocomplete="off">
     <button id="xTagAddBtn" class="btn btn-sm btn-soft">添加并抓取</button>
     <button id="xDupFilter" class="btn btn-sm btn-outline-secondary" data-mode="all">显示：全部</button>
-    <button id="xSavedFilter" class="btn btn-sm btn-outline-secondary" data-mode="all">含未下载</button>
+    <button id="xSavedFilter" class="btn btn-sm btn-outline-secondary" data-mode="all">全部作品</button>
     <button id="xRefreshBtn" class="btn btn-sm btn-outline-secondary">刷新列表</button>
   </div>
 
@@ -96,7 +102,7 @@
     <div id="xLinkList" class="x-tagbar" style="margin:0;"></div>
   </details>
 
-  <div id="xGrid" class="row g-3"></div>
+  <div id="xGrid" class="row g-3 align-items-start"></div>
   <div id="xEmpty" class="x-empty" style="display:none;">还没有抓取过。先在上面添加一个标签。</div>
 
   <div style="text-align:center;padding:18px 0;">

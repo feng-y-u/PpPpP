@@ -518,10 +518,25 @@ def _to_original(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ''))
 
 
+def _author_of(user: dict) -> tuple[str, str]:
+    """从 user_results.result 取 (显示名, @handle)。
+
+    X 在 2026-11 前后把这两个字段从 `user.legacy` 迁到了 `user.core`
+    （本地实测：真实响应里已经**没有** `legacy` 键）—— 只读 legacy 会让
+    每张卡片的作者名变成空串，连带 H1「同作者」判定因为映射键为空永远不触发。
+    两处都读，谁有值用谁，兼容新旧两种结构。
+    """
+    core = user.get('core') or {}
+    legacy = user.get('legacy') or {}
+    name = core.get('name') or legacy.get('name') or ''
+    screen = core.get('screen_name') or legacy.get('screen_name') or ''
+    return str(name), str(screen)
+
+
 def _tweet_from_legacy(rest_id: str, tweet: dict) -> Optional[XTweet]:
     legacy = tweet.get('legacy') or {}
     user = (((tweet.get('core') or {}).get('user_results') or {}).get('result')) or {}
-    user_legacy = user.get('legacy') or {}
+    author_name, author_screen = _author_of(user)
     media_raw = ((legacy.get('extended_entities') or {}).get('media')
                  or (legacy.get('entities') or {}).get('media') or [])
     if not isinstance(media_raw, list):
@@ -551,8 +566,8 @@ def _tweet_from_legacy(rest_id: str, tweet: dict) -> Optional[XTweet]:
     text = (note.get('text') if isinstance(note, dict) else '') or legacy.get('full_text') or ''
     return XTweet(
         tweet_id=str(rest_id or tweet.get('rest_id') or ''),
-        author_name=user_legacy.get('name') or '',
-        author_screen_name=user_legacy.get('screen_name') or '',
+        author_name=author_name,
+        author_screen_name=author_screen,
         text=text,
         tweeted_at=_parse_created_at(legacy.get('created_at') or ''),
         media=media[:getattr(config, 'X_MAX_MEDIA_PER_TWEET', 30)],

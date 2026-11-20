@@ -129,7 +129,9 @@ async function addXTag() {
 }
 
 async function deleteXTag(tag) {
-  if (!confirm(`删除标签「${tag}」以及它抓到的作品记录？（已下载的图片文件不会删除）`)) return;
+  const ok = await pvConfirm(`删除标签「${tag}」？`,
+    { detail: '它抓到的作品记录会一起删除；已下载的图片文件保留在磁盘上。', okText: '删除' });
+  if (!ok) return;
   try {
     await xApi('/api/x/tags/' + encodeURIComponent(tag), {
       method: 'DELETE', headers: { 'X-CSRF-Token': xCsrf },
@@ -183,15 +185,16 @@ function renderXCard(item) {
         ${item.media_count > 1 ? `<span class="x-badge" style="left:auto;right:6px;">${item.media_count} 张</span>` : ''}
       </div>
       <div class="x-body">
-        <div class="x-author">${escHtml(item.author_name || '')} @${escHtml(item.author_screen_name || '')}</div>
-        <div class="x-text">${escHtml((item.text || '').slice(0, 120))}</div>
+        <div class="x-author">${escHtml(item.author_name || '未知作者')}${
+          item.author_screen_name ? ` <span class="handle">@${escHtml(item.author_screen_name)}</span>` : ''}</div>
+        <div class="x-text">${escHtml((item.text || '').slice(0, 160))}</div>
         <div class="x-actions">
           ${downloadBtn}
           <a class="btn btn-sm btn-soft" target="_blank" rel="noopener noreferrer"
              href="https://x.com/${encodeURIComponent(item.author_screen_name || 'i')}/status/${encodeURIComponent(item.tweet_id)}">原推</a>
           ${pixivLink}
           ${dupActions}
-          <button class="btn btn-sm btn-outline-danger" data-del title="删除这条记录">×</button>
+          <button class="btn btn-sm btn-outline-danger btn-del" data-del title="删除这条记录">×</button>
         </div>
       </div>
     </div>`;
@@ -287,7 +290,9 @@ async function downloadXWork(id, btn) {
 }
 
 async function deleteXWork(id) {
-  if (!confirm('删除这条 X 作品记录？（已下载的图片文件不会删除）')) return;
+  const ok = await pvConfirm('删除这条 X 作品记录？',
+    { detail: '只删记录，已下载的图片文件保留在磁盘上。', okText: '删除' });
+  if (!ok) return;
   try {
     await xApi(`/api/x/works/${id}`, {
       method: 'DELETE', headers: { 'X-CSRF-Token': xCsrf },
@@ -377,7 +382,7 @@ $('#xSavedFilter')?.addEventListener('click', (e) => {
   const btn = e.currentTarget;
   xSavedMode = xSavedMode === 'done' ? 'all' : 'done';
   btn.dataset.mode = xSavedMode;
-  btn.textContent = xSavedMode === 'done' ? '只看已下载' : '含未下载';
+  btn.textContent = xSavedMode === 'done' ? '只看已下载' : '全部作品';
   btn.classList.toggle('btn-soft', xSavedMode === 'done');
   btn.classList.toggle('btn-outline-secondary', xSavedMode !== 'done');
   loadXItems(true);

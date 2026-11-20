@@ -227,7 +227,7 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 - 真实 Pixiv 集成测试必须显式使用 `@pytest.mark.integration` 和 `live_pixiv_required` fixture；缺少 Cookie 时 skip。
 - **默认用例不得读写仓库根的真实 `cookies.txt`**：走真实 `_fetch_details_parallel` 的用例要自己 `monkeypatch.setattr(pixiv_client, 'COOKIE_PATH', ...)` 指到临时文件（见 `test_fetcher.py::_cookie_file`），否则干净 checkout 上会 `FileNotFoundError` 挂掉，而开发者机器上又会**悄悄依赖**本机真实凭据。写 Cookie 的夹具**必须在收尾还原**该文件（它在 `.gitignore` 里，写坏没有任何副本可恢复）。
 - `run_tests.ps1` 内部直接调 `venv\Scripts\python.exe`，跑测试**不需要先 activate venv**。它只做两件额外的事：把 `TEMP/TMP` 指到确定性临时根，并在沙箱下加载 `scripts/sandbox_pytest_shim.py`（剥掉 `os.mkdir` 的 `0o700` mode）。本地直接 `venv\Scripts\python.exe -m pytest` 也能跑，但在沙箱环境会踩 WinError 5。
-- **当前实测基线：收集 490 条 = 488 passed / 2 skipped / 0 failed**，约 20s（2026-11-13 第三轮新增 6 条首页性能/排除已下载/收藏数刷新用例；此前第二轮新增 Python 3.9 兼容、设置部分写入/历史非法配置、代理/XFF 信任边界、静态/登录/CSRF 豁免、SVG 拒绝、page-detail DOM/JS、真实 fetch_following+worker 等 7 条高风险用例）。
+- **当前实测基线：收集 568 条 = 566 passed / 2 skipped / 0 failed**，约 20s（2026-11-13 第三轮新增 6 条首页性能/排除已下载/收藏数刷新用例；此前第二轮新增 Python 3.9 兼容、设置部分写入/历史非法配置、代理/XFF 信任边界、静态/登录/CSRF 豁免、SVG 拒绝、page-detail DOM/JS、真实 fetch_following+worker 等 7 条高风险用例）。
 - **粒度约定：一个用例 = 一个不变式**。同一不变式的多个输入变体（CSRF 端点矩阵、非法重定向目标矩阵、字段漂移清单、终态枚举、限流状态码矩阵、扩展名矩阵…）写成**一条用例内的循环 / 顺序分段 + 每例断言消息**，不要拆成多条用例，也不要 `parametrize`。判断标准：拆开之后会不会出现"两条用例的前置准备一模一样、只有输入与期望值不同"；会，就合成一条并在循环里带上 `f'{case} …'` 的失败消息。反过来，**不同不变式不要合并** —— `done` 与 `cancelled` 都"不是预览来源"，但前者靠查库命中、后者靠事务回滚；迁移测试不许跨版本合（否则"哪一版坏了"被掩盖）；同一现象的不同触发路径（排队中取消 vs 下载中取消、单条删除 vs 批量删除）也不合。
   **2026-09-30 全量重排**：710 → **431 条（-39%）**。验收口径是**断言语义与执行次数不降**，不是断言行数；重排时**只允许改 `tests/`**，且必须保留 `docstring` 里的事故叙事。
   重排后做的变异验证（改了立即还原）覆盖：中图扩展名（只坏 `webp` 一档 → 循环仍红）、预取容量三层**层序**（反转 tier → 红，见下条）、预取 CSRF 矩阵（去掉单端点保护 → 红）、`PIXIV_TEST_TMP` 分支、缓存页 R18 过滤。
@@ -313,7 +313,9 @@ pixiv_client / config / runtime / helpers / backups（叶子）→ middleware �
 
 ## 前端约定
 
-- 无构建步骤：`app.js` 提供共享工具（`$`、`escHtml`、`proxyThumb`、`fmtSize`、`pvCache` 等），每个模板在底部显式引入自己的 `page-<name>.js`。
+- 无构建步骤：`app.js` 提供共享工具（`$`、`escHtml`、`proxyThumb`、`fmtSize`、`pvCache`、`pvConfirm` 等），每个模板在底部显式引入自己的 `page-<name>.js`。
+- **危险操作确认统一用 `pvConfirm(msg, {detail, okText, danger})`（返回 Promise<boolean>）**，不要用原生 `confirm()`：浏览器级弹窗与全站视觉断崖、不能排版、移动端还会阻塞整页。全站单例 modal，懒创建。
+- **图片取不到时不能留塌陷的 `<img>`**：`<img>` 是 `height:auto`，src 坏掉高度就是 0，卡片会变成"只有文字"的异类。`app.js` 在懒加载发现空 `data-src`、或错误重试耗尽时，替换成 `.img-placeholder`（带"无预览"文案、固定 4:5 占位）。`img.img-failed` 也给了 `min-height`，避免重试期间卡片高度跳动。
 - CSRF token 从页面 `<meta name="csrf-token">` 读取，POST 统一带 `X-CSRF-Token` 头。
 - 搜索结果在前端缓存 30 分钟（`SEARCH_CACHE_TTL`），游标状态恢复兜底 24 小时（与后端游标 TTL 对齐）。
 - **卡片点击一律跳详情页**：全站已无灯箱（2026-11-10 移除 `pixivviewer/static/lightbox.js`，用户反馈不好用）。首页/搜索/图库三处卡片点击都进 `/detail/<pid>`；图库卡片带 `ctx=gallery&sort&page&pos` 上下文（详情页据此给「上一作/下一作」），搜索页的**预览卡**（未落库）走同一个入口，由详情页回退到运行中任务的内存快照给出中图。

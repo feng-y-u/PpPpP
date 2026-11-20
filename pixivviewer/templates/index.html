@@ -8,11 +8,22 @@
 <link href="/static/style.css" rel="stylesheet">
 <meta name="csrf-token" content="{{ csrf_token }}">
 <style>
-/* ── Hero Search Area ── */
-.search-hero {
+/* ── Hero Search Area ── */.search-hero {
   padding: 2.5rem 0 2rem;
   text-align: center;
 }
+
+/* 最近搜索：一排小 chip，点一下直接搜（省掉重复输入；首屏空白也一并填上） */
+.recent-searches {
+  display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+  margin-top: 12px;
+}
+.recent-searches .rs-label { font-size: 11.5px; color: var(--ink-mute); margin-right: 2px; }
+.recent-searches button {
+  font-size: 11.5px; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border-card); background: var(--bg-elevated); color: var(--ink-soft);
+}
+.recent-searches button:hover { color: var(--ink); border-color: var(--border-active); }
 
 .search-hero-title {
   font-size: 1.6rem;
@@ -340,6 +351,8 @@
         <input id="searchQuery" class="form-control" placeholder="多个标签用逗号分隔（中英逗号均可）">
         <button id="searchBtn" class="btn-search">搜索</button>
       </div>
+      <!-- 最近搜索：搜索页首屏原本是一片空白，用户每次都要重新敲标签 -->
+      <div id="recentSearches" class="recent-searches" hidden></div>
     </div>
 
     <!-- Filters：每对「标签 + 控件」是一个盒子（.filter-box），换行时不会被拆开 -->

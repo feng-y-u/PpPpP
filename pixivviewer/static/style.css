@@ -501,7 +501,16 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 }
 .modal-backdrop.show { opacity: .38; }
 .modal.fade .modal-content { animation: modalIn .18s ease; }
-@keyframes modalIn {
+
+/* 全站统一确认弹窗（app.js pvConfirm）：原生 confirm 换成 modal 后需要的排版 */
+.modal .pv-confirm-title { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.55; }
+.modal .pv-confirm-detail {
+  display: none; margin-top: 8px; font-size: 12px; line-height: 1.65; color: var(--ink-soft);
+  padding: 8px 10px; border-radius: var(--r-s);
+  background: var(--ice-2); border: 1px solid var(--steel-soft);
+}
+.modal .modal-body { padding: 18px 20px 10px; }
+.modal .modal-footer { padding: 10px 20px 16px; border-top: 1px solid var(--steel-soft); gap: 8px; }@keyframes modalIn {
   from { opacity: 0; transform: scale(.97) translateY(4px); }
   to   { opacity: 1; transform: none; }
 }
@@ -580,7 +589,19 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 
 img.img-fade { opacity: 0; transition: opacity .3s ease; }
 img.img-fade.img-loaded { opacity: 1; }
-img.img-failed { background: var(--ice-2); object-fit: cover; opacity: .45; }
+/* 加载/重试期间的破图不能塌成 0 高：卡片会一度变成"只有文字"的窄条，
+   同屏其它卡片都有图 → 视觉上像页面坏了，且恢复时整屏跳动。 */
+img.img-failed { background: var(--ice-2); object-fit: cover; opacity: .45; min-height: 160px; }
+
+/* 图片彻底取不到时的占位块（app.js 里替换掉坏掉的 <img>）：
+   必须占住与原图相近的高度，否则同屏卡片高度参差不齐。 */
+.img-placeholder {
+  aspect-ratio: 4 / 5;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--ice-2);
+  color: var(--ink-mute);
+  font-size: 11.5px; letter-spacing: .4px;
+}
 
 .section-divider { border: none; height: 1px; background: var(--steel-soft); margin: 0; }
 .badge { font-weight: 600; border-radius: 3px; }

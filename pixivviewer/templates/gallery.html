@@ -69,6 +69,21 @@
   text-overflow: ellipsis;
 }
 .card-info { font-size: 0.73rem; color: var(--text-secondary); margin-bottom: 0.2rem; }
+
+/* 孤儿卡（只有本地文件、没有 DB 记录）：没有缩略图可放，用一条说明代替空灰块 */
+.card-img-wrap.is-empty { display: flex; align-items: center; justify-content: center; }
+.card-img-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  color: var(--ink-mute); font-size: 12px; letter-spacing: .3px;
+}
+.card-img-empty small { font-family: var(--font-mono); font-size: 10.5px; opacity: .75; }
+.page-badge.hidden { display: none; }
+
+/* 卡片操作区：两个按钮都全宽会让每张卡看起来像一个表单，红色删除尤其抢眼。
+   改成紧凑一行、右对齐，下载是主操作、删除降级为描边小按钮。 */
+.card-actions { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+.card-actions .dl-file-btn { flex: 1; }
+.card-actions .delete-btn { flex: 0 0 auto; }
 .tags-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin: 0.25rem 0; }
 .photo-tag, .tag-badge {
   font-size: 0.62rem;

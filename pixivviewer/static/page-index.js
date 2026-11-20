@@ -274,11 +274,55 @@ async function loadNextPage() {
   }
 }
 
+// ── 最近搜索（localStorage，最多 8 条）──
+// 搜索页首屏原本是一片空白，用户每次都要重新敲同样的标签。
+const RECENT_KEY = 'pv_recent_searches';
+
+function loadRecentSearches() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; }
+}
+
+function rememberSearch(type, query) {
+  if (!query) return;
+  const entry = `${type}::${query}`;
+  const list = loadRecentSearches().filter(x => x !== entry);
+  list.unshift(entry);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 8))); } catch {}
+  renderRecentSearches();
+}
+
+function renderRecentSearches() {
+  const box = $('#recentSearches');
+  if (!box) return;
+  const list = loadRecentSearches();
+  if (!list.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.innerHTML = '<span class="rs-label">最近：</span>';
+  list.forEach(entry => {
+    const [type, query] = entry.split('::');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = (type === 'user' ? '@' : '') + query;
+    b.title = type === 'following' ? '关注动态' : (type === 'user' ? '画师搜索' : '标签搜索');
+    b.addEventListener('click', () => {
+      $('#searchQuery').value = query;
+      if (type !== 'following') {
+        $('#searchType').value = type;
+        document.querySelectorAll('#searchTypeTabs .st-tab').forEach(t =>
+          t.classList.toggle('active', t.dataset.type === type));
+      }
+      doSearch();
+    });
+    box.appendChild(b);
+  });
+  box.hidden = false;
+}
+
 async function doSearch() {
   const type = $('#searchType').value;
   const query = $('#searchQuery').value.trim();
   const minBookmarks = parseInt($('#minBookmarks').value) || 0;
   if (type === 'user' && !query) { showToast('请输入画师ID'); return; }
+  rememberSearch(type, query);
 
   // 校验通过才升代数：升了代数，仍在轮询的旧任务就成了"上一代"，静默失效
   const gen = ++searchGeneration;
@@ -803,6 +847,8 @@ $('#searchTypeTabs').addEventListener('click', (e) => {
 
 $('#searchBtn').addEventListener('click', () => doSearch());
 $('#searchQuery').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
+
+renderRecentSearches();
 
 // Check URL params (e.g., from detail page redirects)
 const urlParams = new URLSearchParams(location.search);

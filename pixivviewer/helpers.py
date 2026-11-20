@@ -263,6 +263,9 @@ def _build_orphan_dicts(pixiv_ids: list[int], local_items: dict[int, list[str]])
             'id': 0,
             'pixiv_id': pid,
             'title': str(pid),
+            # 显式标记：这类行没有标题/缩略图/作者，UI 必须如实说"只有本地文件"，
+            # 不能拿 pid 当标题、留一个灰块让人以为图加载失败了（2026-11-20 审查）
+            'is_orphan': True,
             'user_id': 0,
             'user_name': '',
             'tags': [],

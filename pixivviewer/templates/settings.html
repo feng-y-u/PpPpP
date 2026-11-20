@@ -7,6 +7,29 @@
 <link href="/static/vendor/bootstrap-5.3.3/bootstrap.min.css" rel="stylesheet">
 <link href="/static/style.css" rel="stylesheet">
 <meta name="csrf-token" content="{{ csrf_token }}">
+<style>
+  /* 设置页是一条 3600px 的长列表：保存按钮原本在最底部，改完一项要滚到底才知道
+     有没有保存（2026-11-20 审查）。改成贴底常驻，并给顶部一个分区跳转条。 */
+  .settings-jump {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px;
+    position: sticky; top: 58px; z-index: 30;
+    padding: 8px 0; background: linear-gradient(180deg, var(--bg-page) 72%, transparent);
+  }
+  .settings-jump a {
+    font-size: 11.5px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border-card); color: var(--ink-soft); background: var(--bg-elevated);
+  }
+  .settings-jump a:hover { color: var(--ink); border-color: var(--border-active); }
+  .settings-actions {
+    position: sticky; bottom: 0; z-index: 30;
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    margin: 0 -4px; padding: 12px 4px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: linear-gradient(180deg, rgba(246,250,255,0), rgba(246,250,255,.94) 38%);
+    backdrop-filter: blur(6px);
+    border-top: 1px solid var(--border-subtle);
+  }
+  @media (max-width: 640px) { .settings-jump { top: 56px; } }
+</style>
 </head>
 <body>
 
@@ -33,7 +56,18 @@
 <div class="container mt-3" style="max-width:700px;">
   <h5 class="mb-3">设置</h5>
 
-  <div class="card shadow-sm mb-3">
+  <nav class="settings-jump">
+    <a href="#s-net">网络</a>
+    <a href="#s-dl">下载</a>
+    <a href="#s-view">显示</a>
+    <a href="#s-search">搜索</a>
+    <a href="#s-block">屏蔽标签</a>
+    <a href="#s-prefetch">预取</a>
+    <a href="#s-x">X 抓取</a>
+    <a href="#s-follow">自动关注</a>
+  </nav>
+
+  <div class="card shadow-sm mb-3" id="s-net">
     <div class="card-header py-2 fw-semibold small">网络</div>
     <div class="card-body">
       <div class="mb-3">
@@ -49,7 +83,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-dl">
     <div class="card-header py-2 fw-semibold small">下载</div>
     <div class="card-body">
       <div class="mb-3">
@@ -65,7 +99,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-view">
     <div class="card-header py-2 fw-semibold small">显示</div>
     <div class="card-body">
       <div class="mb-3">
@@ -76,7 +110,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-search">
     <div class="card-header py-2 fw-semibold small">搜索</div>
     <div class="card-body">
       <div class="mb-3">
@@ -102,7 +136,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-block">
     <div class="card-header py-2 fw-semibold small">屏蔽标签<span id="blockedCount" class="badge bg-secondary ms-2" style="display:none;"></span></div>
     <div class="card-body">
       <div class="d-flex gap-2 mb-2">
@@ -114,7 +148,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-prefetch">
     <div class="card-header py-2 fw-semibold small">搜索预取</div>
     <div class="card-body">
       <div class="mb-3">
@@ -146,7 +180,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-x">
     <div class="card-header py-2 fw-semibold small">X 图片抓取</div>
     <div class="card-body">
       <div class="mb-3">
@@ -215,7 +249,7 @@
     </div>
   </div>
 
-  <div class="card shadow-sm mb-3">
+  <div class="card shadow-sm mb-3" id="s-follow">
     <div class="card-header py-2 fw-semibold small">自动关注</div>
     <div class="card-body">
       <div class="mb-3">
@@ -234,10 +268,10 @@
     </div>
   </div>
 
-  <div class="d-flex gap-2 mb-4">
+  <div class="settings-actions">
     <button class="btn btn-primary" id="saveBtn">保存设置</button>
-    <span id="saveStatus" class="small" style="color:var(--text-muted);align-self:center;display:none;"></span>
-    <span class="small" style="color:var(--text-muted);align-self:center;">设置保存后需重启服务生效</span>
+    <span id="saveStatus" class="small" style="color:var(--text-muted);display:none;"></span>
+    <span class="small" style="color:var(--text-muted);">大部分设置保存后需重启服务生效</span>
   </div>
 </div>
 

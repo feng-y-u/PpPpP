@@ -190,7 +190,9 @@ async function loadAutoFollowStatus() {
 }
 
 async function resetPrefetchRefresh(tag) {
-  if (!confirm(`重置「${tag}」的刷新状态？\n（清空刷新完成/失败退避标记，下一轮预取重新拉取收藏数）`)) return;
+  const ok = await pvConfirm(`重置「${tag}」的刷新状态？`,
+    { detail: '清空刷新完成/失败退避标记，下一轮预取会重新拉取收藏数。', okText: '重置', danger: false });
+  if (!ok) return;
   try {
     const resp = await fetch('/api/prefetch/refresh-reset', {
       method: 'POST',
@@ -233,7 +235,9 @@ async function addPrefetchTag() {
 }
 
 async function removePrefetchTag(tag) {
-  if (!confirm(`确定删除预取标签「${tag}」？\n若它是分组，其同义词会一并移除，相关缓存作品也会被清理。`)) return;
+  const ok = await pvConfirm(`删除预取标签「${tag}」？`,
+    { detail: '若它是分组，其同义词会一并移除，相关缓存作品也会被清理。', okText: '删除' });
+  if (!ok) return;
   try {
     const resp = await fetch(`/api/prefetch/tags/${encodeURIComponent(tag)}`, {
       method: 'DELETE',

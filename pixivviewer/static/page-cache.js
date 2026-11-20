@@ -60,7 +60,9 @@ function renderCard(r) {
 
 // 从缓存删除单条作品
 async function deleteCacheItem(pixivId, title, btn) {
-  if (!confirm(`确定从缓存中删除「${title || pixivId}」吗？\n（不会删除已下载的文件）`)) return;
+  const ok = await pvConfirm(`从缓存中删除「${title || pixivId}」？`,
+    { detail: '只移除缓存记录，不会删除已下载的文件。', okText: '删除' });
+  if (!ok) return;
   btn.disabled = true;
   try {
     const resp = await fetch(`/api/cache/items/${pixivId}/delete`, {
@@ -100,6 +102,9 @@ async function loadCacheTags() {
     sel.value = cacheTags.some(t => t.tag === prevTag) ? prevTag : (cacheTags[0] ? cacheTags[0].tag : '');
     $('#cacheRefreshBtn').disabled = !cacheTags.length;
     updateCacheMeta();
+    // 进页面就自动浏览第一个标签：此前只填了下拉框和状态行，网格始终空白，
+    // 用户看到"条数: 190"却什么都没有，以为页面坏了（2026-11-20 审查发现）
+    if (sel.value) browseCache();
   } catch { $('#cacheTagSelect').innerHTML = '<option value="">加载失败</option>'; }
 }
 
@@ -160,12 +165,24 @@ function renderCacheResults(data) {
   cachePageSize = data.page_size || cachePageSize;
   cacheFilteredTotal = data.filtered_total || 0;
   $('#masonryGrid').innerHTML = '';
+  const empty = $('#emptyState');
   if (!data.results.length) {
-    $('#emptyState').style.display = 'block';
+    // 空网格必须解释"为什么空"，两种原因完全不同：
+    // ① 缓存记录本身为 0 —— 这个标签还没抓过；
+    // ② 缓存记录有 N 条、但库里一条都对不上（作品被容量清理/手动删除）——
+    //    只写"暂无缓存数据"会让人以为页面坏了（2026-11-20 审查：条数 190 却全空）。
+    const cached = Number(data.total) || 0;
+    if (cached > 0) {
+      empty.innerHTML = `缓存记录还有 ${cached} 条，但对应作品已不在库中`
+        + `<br><span style="font-size:11.5px;">多半是容量清理或手动删除造成的；点右上角「刷新」重新抓取这个标签。</span>`;
+    } else {
+      empty.textContent = '这个标签还没有缓存数据，等预取跑一轮，或点右上角「刷新」立即抓取。';
+    }
+    empty.style.display = 'block';
     $('#paginationBar').style.display = 'none';
     return;
   }
-  $('#emptyState').style.display = 'none';
+  empty.style.display = 'none';
   const grid = $('#masonryGrid');
   renderInChunks(data.results, (r) => {
     const node = renderCard(r);

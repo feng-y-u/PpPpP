@@ -62,6 +62,26 @@ def test_parse_keeps_only_photo_tweets_and_normalizes_urls(isolated_x):
     assert tweets[1].media[0].url == 'https://pbs.twimg.com/media/CCC333.webp?name=orig'
 
 
+def test_author_reads_new_core_shape(isolated_x):
+    """X 把 name/screen_name 从 user.legacy 迁到了 user.core。
+
+    2026-11-20 本地抓包实测：真实响应里 user_results.result 已经**没有 legacy
+    键**，导致线上每张卡片作者名都是空串、H1「同作者」判定因映射键为空永不触发。
+    两种结构都要能解析（老响应仍带 legacy）。
+    """
+    payload = _payload()
+    entry = payload['data']['search_by_raw_query']['search_timeline']['timeline']['instructions'][0]['entries'][0]
+    user = entry['content']['itemContent']['tweet_results']['result']['core']['user_results']['result']
+    # 换成新版结构：只有 core
+    user.pop('legacy', None)
+    user['core'] = {'name': '画师A（新）', 'screen_name': 'Artist_A_New'}
+
+    tweets, _ = x_client.parse_search_page(payload)
+    first = tweets[0]
+    assert first.author_name == '画师A（新）'
+    assert first.author_screen_name == 'Artist_A_New'
+
+
 def test_parse_unwraps_visibility_results(isolated_x):
     payload = _payload()
     entry = payload['data']['search_by_raw_query']['search_timeline']['timeline']['instructions'][0]['entries'][1]

@@ -58,6 +58,42 @@ class TestResetStuckX:
         assert clean_db.query(XTag).count() == 0
 
 
+class TestXStoreTweets:
+    """入库的两条不变式：tweet_id 只收纯数字（会进路径/URL）；作者为空时补写。
+
+    补写这条来自 2026-11-20 的线上现象：X 把 user 结构从 legacy 迁到 core 后，
+    旧解析器把作者存成空串，历史行永远显示"未知作者"，H1「同作者」判定
+    也因为映射键为空永不触发。重新抓到同一条推文时必须把作者补回去。
+    """
+
+    def _tweet(self, **kw):
+        from pixivviewer.x_client import XMedia, XTweet
+        base = dict(tweet_id='1800000000000000901', author_name='画师',
+                    author_screen_name='Artist_X', text='t',
+                    media=[XMedia(url='https://pbs.twimg.com/media/a.jpg', width=1, height=1)])
+        base.update(kw)
+        return XTweet(**base)
+
+    def test_backfills_empty_author_on_existing_row(self, clean_db):
+        stale = XWork(tweet_id='1800000000000000901', tag='#t',
+                      author_name='', author_screen_name='', media_count=1)
+        clean_db.add(stale)
+        clean_db.commit()
+
+        background._x_store_tweets(clean_db, '#t', [self._tweet()])
+        clean_db.commit()
+
+        clean_db.refresh(stale)
+        assert stale.author_screen_name == 'artist_x', '作者必须补写（handle 统一小写）'
+        assert stale.author_name == '画师'
+        assert clean_db.query(XWork).count() == 1, '不能因为补写多插一行'
+
+    def test_non_digit_tweet_id_is_skipped(self, clean_db):
+        """tweet_id 会拼进 downloads/x_<id>/ 与 URL：非纯数字一律不入库。"""
+        background._x_store_tweets(clean_db, '#t', [self._tweet(tweet_id='../../etc')])
+        assert clean_db.query(XWork).count() == 0
+
+
 class TestXFetchTagResilience:
     def test_store_phase_failure_marks_tag_error_not_fetching(self, clean_db, monkeypatch):
         """入库阶段的 DB 异常必须落到标签 status='error'，不能让标签停在 'fetching'。"""
